@@ -66,6 +66,54 @@ class RecordingProcessFactory:
 
 
 class RigctldArgumentTests(unittest.TestCase):
+    def test_builds_public_official_dummy_without_device_or_hardware_tx(self):
+        config = RigctldConfig(
+            model_id=1,
+            device=None,
+            host="0.0.0.0",
+            port=4532,
+            public_dummy_test=True,
+        )
+
+        self.assertEqual(
+            ["rigctld", "-m", "1", "-T", "0.0.0.0", "-t", "4532"],
+            build_rigctld_args(config),
+        )
+
+    def test_public_dummy_contract_rejects_every_hardware_shape(self):
+        invalid = (
+            RigctldConfig(1049, None, host="0.0.0.0", public_dummy_test=True),
+            RigctldConfig(1, "COM7", host="0.0.0.0", public_dummy_test=True),
+            RigctldConfig(
+                1,
+                None,
+                baud=38400,
+                host="0.0.0.0",
+                public_dummy_test=True,
+            ),
+            RigctldConfig(1, None, host="127.0.0.1", public_dummy_test=True),
+            RigctldConfig(
+                1,
+                None,
+                host="0.0.0.0",
+                hardware_tx_enabled=True,
+                public_dummy_test=True,
+            ),
+        )
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                build_rigctld_args(config)
+
+        with self.assertRaises(TypeError):
+            build_rigctld_args(
+                RigctldConfig(
+                    1,
+                    None,
+                    host="0.0.0.0",
+                    public_dummy_test=1,
+                )
+            )
+
     def test_binds_loopback_and_preserves_explicit_device_as_one_element(self):
         args = build_rigctld_args(
             RigctldConfig(
@@ -97,12 +145,20 @@ class RigctldArgumentTests(unittest.TestCase):
     def test_rejects_non_exact_loopback_hosts(self):
         for host in ("0.0.0.0", "::", "localhost", "127.0.0.01", "127.0.0.2"):
             with self.subTest(host=host), self.assertRaises(ValueError):
-                build_rigctld_args(RigctldConfig(1049, "COM7", host=host))
+                build_rigctld_args(
+                    RigctldConfig(
+                        1049,
+                        "COM7",
+                        host=host,
+                        public_dummy_test=False,
+                    )
+                )
 
     def test_rejects_invalid_integer_boolean_and_device_inputs(self):
         invalid_configs = (
             RigctldConfig(True, "COM7"),
             RigctldConfig(0, "COM7"),
+            RigctldConfig(1049, None),
             RigctldConfig(1049, ""),
             RigctldConfig(1049, "   "),
             RigctldConfig(1049, "COM7\r-injected"),
