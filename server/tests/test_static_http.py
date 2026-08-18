@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 from remote_radio_server.static_http import StaticWebServer
@@ -30,6 +31,21 @@ async def request(port: int, path: str, method: str = "GET") -> bytes:
 
 def split_response(response: bytes) -> tuple[bytes, bytes]:
     return tuple(response.split(b"\r\n\r\n", 1))
+
+
+class DashboardMarkupParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.elements = {}
+        self.scripts = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        element_id = attributes.get("id")
+        if element_id is not None:
+            self.elements[element_id] = (tag, attributes)
+        if tag == "script":
+            self.scripts.append(attributes)
 
 
 class StaticWebServerTests(unittest.IsolatedAsyncioTestCase):
@@ -168,6 +184,43 @@ class StaticWebServerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.open_connection("127.0.0.1", listening_port)
         with self.assertRaises(RuntimeError):
             await server.serve(port=0)
+
+
+class RepositoryDashboardAssetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_serves_semantic_external_dashboard_assets(self):
+        web_root = Path(__file__).resolve().parents[2] / "web"
+        server = StaticWebServer(web_root)
+        try:
+            await server.serve(port=0)
+            responses = {
+                path: await request(server.port, path)
+                for path in (
+                    "/",
+                    "/styles.css",
+                    "/radio-client.js",
+                    "/dashboard.js",
+                )
+            }
+        finally:
+            await server.close()
+
+        for path, response in responses.items():
+            with self.subTest(path=path):
+                self.assertTrue(response.startswith(b"HTTP/1.1 200 OK"))
+
+        _, html_body = split_response(responses["/"])
+        parser = DashboardMarkupParser()
+        parser.feed(html_body.decode("utf-8"))
+        self.assertIn("rr-widget-v3", parser.elements)
+        self.assertIn("connection-form", parser.elements)
+        self.assertIn("mode-select", parser.elements)
+        ptt_tag, ptt_attributes = parser.elements["rr-ptt-v3"]
+        self.assertEqual("button", ptt_tag)
+        self.assertIn("disabled", ptt_attributes)
+        self.assertEqual("true", ptt_attributes["aria-disabled"])
+        self.assertEqual(
+            [{"type": "module", "src": "/dashboard.js"}], parser.scripts
+        )
 
 
 if __name__ == "__main__":

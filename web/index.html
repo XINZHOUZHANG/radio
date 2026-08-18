@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Remote Radio · 远程电台控制台</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/dashboard.js"></script>
+  </head>
+  <body>
+    <main id="rr-widget-v3" data-dashboard="remote-radio-v3" data-connection="disconnected">
+      <section class="rr-page" aria-label="远程电台控制台">
+        <header class="rr-hero">
+          <div class="rr-topline">
+            <span class="rr-eyebrow">Remote Radio · Hamlib control plane</span>
+            <span id="connection-state" class="rr-connection-state" role="status" data-state="disconnected">未连接</span>
+          </div>
+          <h1>让远程电台，<br><span>像桌面组件一样自然</span></h1>
+          <p>频率与模式来自后端确认快照。音频、FT8、天调、旋转器及 PTT 在接入真实服务前保持安全禁用。</p>
+
+          <form id="connection-form" class="rr-connection-dialog" aria-hidden="false">
+            <div class="rr-connection-copy">
+              <strong>连接 Debian 测试后台</strong>
+              <span id="connection-detail">令牌仅保留在当前浏览器会话</span>
+            </div>
+            <label class="rr-token-field" for="device-token">
+              <span>临时连接令牌</span>
+              <input id="device-token" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="粘贴 public-dummy.started 中的 token">
+            </label>
+            <button type="submit" class="rr-pill-button rr-primary">连接后台</button>
+          </form>
+
+          <div class="rr-activity" aria-live="polite">
+            <span class="rr-activity-dot" aria-hidden="true"></span>
+            <span id="activity-message" data-tone="neutral">输入服务启动时输出的临时令牌</span>
+          </div>
+        </header>
+
+        <div class="rr-wall">
+          <article class="rr-widget rr-status">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">⌁</span>电台状态</span>
+              <button id="refresh-state" class="rr-icon-button" type="button" aria-label="刷新状态" disabled>↻</button>
+            </div>
+            <div class="rr-frequency"><span id="rr-frequency-v3">—</span><span class="rr-unit">MHz</span></div>
+            <div class="rr-state-row">
+              <span class="rr-live-dot" aria-hidden="true"></span>
+              <span id="rr-rig-state-v3">等待后端快照</span>
+            </div>
+            <div class="rr-band-list" aria-label="常用频率">
+              <button type="button" class="rr-band-button" data-frequency-hz="14074000" data-mode="USB" disabled><strong>20 m</strong><span>14.074 · FT8</span></button>
+              <button type="button" class="rr-band-button" data-frequency-hz="7074000" data-mode="USB" disabled><strong>40 m</strong><span>7.074 · FT8</span></button>
+              <button type="button" class="rr-band-button" data-frequency-hz="14230000" data-mode="USB" disabled><strong>20 m</strong><span>14.230 · SSTV</span></button>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-voice">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">●</span>语音与 PTT</span>
+              <span class="rr-availability">未接入后台</span>
+            </div>
+            <div class="rr-voice-body">
+              <div class="rr-voice-copy">
+                <strong>发射路径已锁定</strong>
+                <span>浏览器不会构造 PTT 消息<br>音频链路尚未接入</span>
+              </div>
+              <button id="rr-ptt-v3" type="button" class="rr-ptt-button" disabled aria-disabled="true">PTT<br>已禁用</button>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-memory">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">M</span>波段记忆</span>
+              <span class="rr-head-note">确认后更新</span>
+            </div>
+            <div class="rr-memory-grid">
+              <button type="button" class="rr-memory-button" data-frequency-hz="14074000" data-mode="USB" disabled><strong>FT8 国际呼叫</strong><span>20 m · USB</span></button>
+              <button type="button" class="rr-memory-button" data-frequency-hz="7074000" data-mode="USB" disabled><strong>夜间 FT8</strong><span>40 m · USB</span></button>
+              <button type="button" class="rr-memory-button" data-frequency-hz="14300000" data-mode="USB" disabled><strong>海事网络</strong><span>20 m · USB</span></button>
+              <button type="button" class="rr-memory-button" data-frequency-hz="21074000" data-mode="USB" disabled><strong>15 米 FT8</strong><span>15 m · USB</span></button>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-spectrum">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">∿</span>音频频谱</span>
+              <span class="rr-availability rr-on-dark">未接入后台</span>
+            </div>
+            <div class="rr-spectrum-body">
+              <div class="rr-signal-value">— <small>dBm</small></div>
+              <div class="rr-bars rr-placeholder-bars" aria-label="音频频谱尚未接入">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-link">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">↗</span>控制链路</span>
+              <span class="rr-availability rr-on-dark">明文测试</span>
+            </div>
+            <div class="rr-link-body">
+              <strong>:8765</strong>
+              <span>认证 WebSocket<br>状态随连接实时更新</span>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-ft8">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">8</span>FT8 解码</span>
+              <span class="rr-availability rr-on-dark">未接入后台</span>
+            </div>
+            <div class="rr-ft8-body">
+              <div class="rr-ft8-meta">WSJT-X / 解码服务</div>
+              <div class="rr-ft8-call">NO DATA</div>
+              <div class="rr-ft8-copy">本阶段只验证 Hamlib Dummy 的频率与模式控制。</div>
+              <div class="rr-ft8-actions">
+                <button type="button" class="rr-small-button rr-bright" disabled aria-disabled="true">回复</button>
+                <button type="button" class="rr-small-button" disabled aria-disabled="true">日志</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-control">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">⌘</span>快速控制</span>
+              <span class="rr-head-note">Hamlib 能力驱动</span>
+            </div>
+            <div class="rr-control-grid">
+              <label class="rr-control-field" for="mode-select">
+                <strong>工作模式</strong>
+                <select id="mode-select" disabled aria-label="工作模式">
+                  <option value="">等待能力信息</option>
+                </select>
+              </label>
+              <button type="button" class="rr-control-button" disabled aria-disabled="true"><strong>功率</strong><span>未接入后台</span></button>
+              <button type="button" class="rr-control-button" disabled aria-disabled="true"><strong>前置放大</strong><span>未接入后台</span></button>
+              <button type="button" class="rr-control-button" disabled aria-disabled="true"><strong>滤波器</strong><span>未接入后台</span></button>
+              <div class="rr-control-readout"><strong>快照修订</strong><span id="snapshot-revision">0</span></div>
+              <button type="button" class="rr-control-button" disabled aria-disabled="true"><strong>降噪</strong><span>未接入后台</span></button>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-waterfall">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">≋</span>瀑布图</span>
+              <span class="rr-availability rr-on-dark">未接入后台</span>
+            </div>
+            <div class="rr-waterfall-body">
+              <div class="rr-waterfall-screen" aria-label="瀑布图占位视图">
+                <svg class="rr-waterfall-line" viewBox="0 0 260 60" role="img" aria-label="装饰性频谱曲线">
+                  <path d="M0 46 L12 43 L23 45 L34 40 L47 43 L58 38 L70 42 L83 33 L94 39 L106 25 L114 38 L128 36 L139 41 L151 29 L160 39 L173 34 L185 42 L198 35 L211 38 L224 31 L238 42 L250 38 L260 41"></path>
+                </svg>
+              </div>
+              <div class="rr-waterfall-labels"><span>0 Hz</span><span>2 kHz</span><span>4 kHz</span></div>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-tuner">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">T</span>自动天调</span>
+              <span class="rr-availability">未接入后台</span>
+            </div>
+            <div class="rr-tuner-body">
+              <div class="rr-tuner-arc"><div class="rr-swr"><strong id="swr-value">—</strong><span>SWR · 只读快照</span></div></div>
+              <button type="button" class="rr-tuner-button" disabled aria-disabled="true">重新调谐 · 未接入</button>
+            </div>
+          </article>
+
+          <article class="rr-widget rr-rotor">
+            <div class="rr-widget-head">
+              <span class="rr-widget-title"><span class="rr-widget-icon">R</span>天线旋转器</span>
+              <span class="rr-availability">未接入后台</span>
+            </div>
+            <div class="rr-rotor-body">
+              <div class="rr-compass" aria-hidden="true"><span>N</span><i></i><strong>—°</strong></div>
+              <button type="button" class="rr-rotor-button" disabled aria-disabled="true">设置方位 · 未接入</button>
+            </div>
+          </article>
+        </div>
+
+        <footer class="rr-review-note">
+          <span>HTTP :8080</span><span>WebSocket :8765</span><span>Hamlib Dummy :4532</span>
+          <strong>PTT 永久禁用</strong>
+        </footer>
+      </section>
+    </main>
+  </body>
+</html>
