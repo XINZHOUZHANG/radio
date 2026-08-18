@@ -1049,4 +1049,3 @@ Expected: `0.0.0.0:8080`, `0.0.0.0:8765`, and `0.0.0.0:4532` are owned by this t
 - [ ] **Step 9: Preserve the service for user acceptance, then shut down safely on request**
 
 Leave the foreground process running while the user tests. When the user explicitly finishes, send Ctrl+C to that exact SSH session, wait for owned cleanup, then rerun the scoped `ss` command. Expected: all three listeners are gone and no unrelated process or file was touched.
-

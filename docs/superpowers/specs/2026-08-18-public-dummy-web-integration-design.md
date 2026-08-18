@@ -1,7 +1,7 @@
 # Remote Radio Public Dummy Web Integration Design
 
-**Date:** 2026-08-18  
-**Status:** Approved for implementation  
+**Date:** 2026-08-18
+**Status:** Approved for implementation
 **Scope:** Browser-to-Debian acceptance path using the official Hamlib Dummy
 
 ## 1. Goal
@@ -217,4 +217,3 @@ simulated PTT state; no physical hardware or RF path exists in this mode.
 Passing this acceptance does not certify the control plane for real-hardware
 transmission. The unresolved C1, C3, and I3 final-review findings continue to
 block that use.
-
