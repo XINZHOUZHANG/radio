@@ -1,12 +1,21 @@
 import asyncio
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import remote_radio_server.__main__ as cli
+from remote_radio_server.__main__ import (
+    _validated_args,
+    public_dummy_startup_event,
+)
 from remote_radio_server.public_dummy import (
     PublicDummyConfig,
     PublicDummyStack,
+    PublicDummyStartup,
 )
 
 
@@ -374,6 +383,136 @@ class PublicDummyStackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["http.close", "websocket.close", "runtime.close", "http.close"],
             cleanup_events,
+        )
+
+
+class PublicDummyCliTests(unittest.TestCase):
+    def test_public_dummy_mode_has_fixed_public_ports_and_no_hardware_tx(self):
+        args = _validated_args(["--public-dummy-test"])
+
+        self.assertTrue(args.public_dummy_test)
+        self.assertEqual(8080, args.http_port)
+        self.assertEqual(8765, args.port)
+        self.assertEqual(4532, args.rigctld_port)
+        self.assertFalse(args.enable_hardware_tx)
+        self.assertFalse(args.acknowledge_transmit_risk)
+
+    def test_public_dummy_mode_rejects_every_incompatible_cli_shape(self):
+        invalid = (
+            ["--public-dummy-test", "--mock"],
+            [
+                "--public-dummy-test",
+                "--launch-rigctld",
+                "--model-id",
+                "1",
+                "--device",
+                "dummy",
+            ],
+            ["--public-dummy-test", "--serve"],
+            ["--public-dummy-test", "--once"],
+            ["--public-dummy-test", "--device-token", "phone=secret"],
+            [
+                "--public-dummy-test",
+                "--enable-hardware-tx",
+                "--acknowledge-transmit-risk",
+            ],
+            ["--public-dummy-test", "--host", "0.0.0.0"],
+            ["--public-dummy-test", "--rigctld-host", "0.0.0.0"],
+            ["--public-dummy-test", "--http-port", "0"],
+        )
+        for argv in invalid:
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    _validated_args(argv)
+                self.assertEqual("", stdout.getvalue())
+
+    def test_http_port_is_reserved_for_public_dummy_mode(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            _validated_args(["--mock", "--http-port", "8081"])
+
+    def test_serializes_the_public_dummy_startup_event_without_extra_state(self):
+        startup = PublicDummyStartup(
+            url="http://0.0.0.0:8080",
+            websocket_url="ws://0.0.0.0:8765/radio",
+            http_port=8080,
+            websocket_port=8765,
+            rigctld_port=4532,
+            device_id="web-test",
+            token="secret",
+            identity={"model_id": 1, "model": "Dummy"},
+        )
+
+        self.assertEqual(
+            {
+                "type": "public-dummy.started",
+                "url": "http://0.0.0.0:8080",
+                "websocket_url": "ws://0.0.0.0:8765/radio",
+                "device_id": "web-test",
+                "token": "secret",
+                "identity": {"model_id": 1, "model": "Dummy"},
+            },
+            public_dummy_startup_event(startup),
+        )
+
+
+class PublicDummyCliRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_dummy_run_prints_once_waits_and_always_closes(self):
+        startup = PublicDummyStartup(
+            url="http://0.0.0.0:8080",
+            websocket_url="ws://0.0.0.0:8765/radio",
+            http_port=8080,
+            websocket_port=8765,
+            rigctld_port=4532,
+            device_id="web-test",
+            token="secret",
+            identity={"model_id": 1, "model": "Dummy"},
+        )
+        captured = {}
+
+        class StopRun(Exception):
+            pass
+
+        class FakeWaitEvent:
+            async def wait(self):
+                raise StopRun("test stop")
+
+        class FakeStack:
+            async def start(self):
+                captured["started"] = True
+                return startup
+
+            async def close(self):
+                captured["closed"] = True
+
+        def stack_factory(config):
+            captured["config"] = config
+            return FakeStack()
+
+        args = _validated_args(["--public-dummy-test"])
+        stdout = io.StringIO()
+        with (
+            patch.object(cli, "PublicDummyStack", side_effect=stack_factory),
+            patch.object(cli.asyncio, "Event", return_value=FakeWaitEvent()),
+            contextlib.redirect_stdout(stdout),
+            self.assertRaisesRegex(StopRun, "test stop"),
+        ):
+            await cli._run(args)
+
+        self.assertTrue(captured["started"])
+        self.assertTrue(captured["closed"])
+        self.assertTrue(captured["config"].web_root.is_absolute())
+        self.assertEqual("web", captured["config"].web_root.name)
+        self.assertEqual(8080, captured["config"].http_port)
+        self.assertEqual(8765, captured["config"].websocket_port)
+        self.assertEqual(4532, captured["config"].rigctld_port)
+        self.assertEqual(
+            public_dummy_startup_event(startup),
+            json.loads(stdout.getvalue()),
         )
 
 

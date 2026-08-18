@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 from .gateway import GatewayError, Principal, serialize_json_event, serialize_snapshot
+from .public_dummy import PublicDummyConfig, PublicDummyStack, PublicDummyStartup
 from .rig.launcher import RigctldConfig, RigctldLauncher
 from .runtime import ControlPlaneRuntime
 from .server import RemoteRadioServer
@@ -20,12 +22,18 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument(
         "--launch-rigctld", action="store_true", help="launch a local rigctld"
     )
+    source.add_argument(
+        "--public-dummy-test",
+        action="store_true",
+        help="serve the explicit public official-Dummy acceptance stack",
+    )
     parser.add_argument("--once", action="store_true", help="print initial state and exit")
     parser.add_argument(
         "--serve", action="store_true", help="serve loopback WebSocket clients"
     )
     parser.add_argument("--host", default="127.0.0.1", help="WebSocket listen host")
     parser.add_argument("--port", type=int, default=8765, help="WebSocket listen port")
+    parser.add_argument("--http-port", type=int, default=8080, help="dashboard HTTP port")
     parser.add_argument(
         "--device-token",
         action="append",
@@ -50,22 +58,39 @@ def _validated_args(argv=None):
         parser.error("--rigctld-host must be exactly 127.0.0.1")
     if not 1 <= args.rigctld_port <= 65535:
         parser.error("--rigctld-port must be in the range 1..65535")
+    if not 1 <= args.http_port <= 65535:
+        parser.error("--http-port must be in the range 1..65535")
     if args.enable_hardware_tx != args.acknowledge_transmit_risk:
         parser.error(
             "--enable-hardware-tx and --acknowledge-transmit-risk must be supplied together"
         )
-    if args.launch_rigctld and (args.model_id is None or args.device is None):
-        parser.error("--launch-rigctld requires --model-id and --device")
-    if not args.launch_rigctld and any(
-        value is not None for value in (args.model_id, args.device, args.baud)
-    ):
-        parser.error("--model-id, --device, and --baud require --launch-rigctld")
     if args.serve and args.once:
         parser.error("--serve is incompatible with --once")
     if args.host != "127.0.0.1":
         parser.error("--host must be exactly 127.0.0.1")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be in the range 1..65535")
+    if args.public_dummy_test:
+        if args.serve or args.once:
+            parser.error("--public-dummy-test is incompatible with --serve and --once")
+        if args.device_token:
+            parser.error("--public-dummy-test does not accept --device-token")
+        if any(value is not None for value in (args.model_id, args.device, args.baud)):
+            parser.error(
+                "--public-dummy-test does not accept model, device, or baud options"
+            )
+        if args.enable_hardware_tx or args.acknowledge_transmit_risk:
+            parser.error("--public-dummy-test forbids hardware TX flags")
+        args.device_tokens = {}
+        return args
+    if args.launch_rigctld and (args.model_id is None or args.device is None):
+        parser.error("--launch-rigctld requires --model-id and --device")
+    if not args.launch_rigctld and any(
+        value is not None for value in (args.model_id, args.device, args.baud)
+    ):
+        parser.error("--model-id, --device, and --baud require --launch-rigctld")
+    if args.http_port != 8080:
+        parser.error("--http-port requires --public-dummy-test")
     device_tokens = {}
     for entry in args.device_token:
         if "=" not in entry:
@@ -109,6 +134,23 @@ def _runtime(args) -> ControlPlaneRuntime:
 
 
 async def _run(args) -> int:
+    if args.public_dummy_test:
+        web_root = Path(__file__).resolve().parents[2] / "web"
+        stack = PublicDummyStack(
+            PublicDummyConfig(
+                web_root=web_root,
+                http_port=args.http_port,
+                websocket_port=args.port,
+                rigctld_port=args.rigctld_port,
+            )
+        )
+        try:
+            startup = await stack.start()
+            _write_event(public_dummy_startup_event(startup))
+            await asyncio.Event().wait()
+        finally:
+            await stack.close()
+        return 0
     runtime = _runtime(args)
     async with runtime:
         if args.serve:
@@ -151,6 +193,19 @@ async def _run(args) -> int:
 def _write_event(event) -> None:
     sys.stdout.write(serialize_json_event(event) + "\n")
     sys.stdout.flush()
+
+
+def public_dummy_startup_event(startup: PublicDummyStartup) -> dict[str, object]:
+    if not isinstance(startup, PublicDummyStartup):
+        raise TypeError("startup must be PublicDummyStartup")
+    return {
+        "type": "public-dummy.started",
+        "url": startup.url,
+        "websocket_url": startup.websocket_url,
+        "device_id": startup.device_id,
+        "token": startup.token,
+        "identity": dict(startup.identity),
+    }
 
 
 def main(argv=None) -> int:
