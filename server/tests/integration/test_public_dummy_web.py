@@ -141,15 +141,23 @@ class PublicDummyWebIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             await client.send_json({"type": "ptt.lease"})
             lease = await client.receive_json()
-            await client.send_json(
-                {
-                    "type": "ptt.set",
-                    "lease_id": lease["lease_id"],
-                    "enabled": True,
-                }
-            )
-            ptt_result = await client.receive_json()
-            self.assertEqual("error", ptt_result["type"])
+            ptt_request = {
+                "type": "ptt.set",
+                "lease_id": lease["lease_id"],
+                "enabled": True,
+            }
+            ptt_deadline = asyncio.get_running_loop().time() + 5.0
+            while True:
+                await client.send_json(ptt_request)
+                ptt_result = await client.receive_json()
+                self.assertEqual("error", ptt_result["type"])
+                if ptt_result["code"] != "locked_out":
+                    break
+                if asyncio.get_running_loop().time() >= ptt_deadline:
+                    self.fail(
+                        "timed out waiting for the startup PTT lockout to clear"
+                    )
+                await asyncio.sleep(0.05)
             self.assertEqual("hardware_tx_disabled", ptt_result["code"])
             await client.send_json({"type": "rig.snapshot"})
             self.assertFalse((await client.receive_json())["ptt"])
