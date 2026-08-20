@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 
-**Status:** Approved in chat; awaiting written-spec review
+**Status:** Approved
 
 **Scope:** Local accounts, browser sessions, iOS device pairing, authorization,
 revocation, and audit for the Remote Radio control plane
@@ -187,20 +187,30 @@ is reached.
 Every state-changing cookie-authenticated HTTP request requires both:
 
 - an exact allowed `Origin`/`Host` check; and
-- an `X-CSRF-Token` matching a second random secret bound to the session.
+- an `X-CSRF-Token` bound to the presented session cookie.
 
-The CSRF token is returned by `GET /api/v1/session`, kept in memory by the web
-application, and never placed in a cookie. CORS is disabled. JSON endpoints
-require `Content-Type: application/json`, exact known fields, bounded bodies,
-and no duplicate JSON keys.
+Browser setup and login requests also require the exact allowed `Origin` and
+`Host`, even though no session exists yet, to prevent login/setup CSRF. Native
+pairing-challenge, pairing-poll, and device-refresh requests do not use browser
+CSRF tokens; they remain TLS-only, strictly shaped, and rate-limited.
+
+The CSRF token is `HMAC-SHA-256(server_csrf_key,
+"remote-radio-csrf\0" || session_token)`, encoded as base64url. The 256-bit
+server CSRF key is generated once and stored as a mode-`0600` file in the data
+directory; the database still stores only the session-token digest. The token
+is returned by `GET /api/v1/session`, kept in memory by the web application,
+and never placed in a cookie or persistent browser storage. CORS is disabled.
+JSON endpoints require `Content-Type: application/json`, exact known fields,
+bounded bodies, and no duplicate JSON keys.
 
 Password, setup, pairing, refresh, and authenticated control traffic must use
 HTTPS/WSS whenever a listener is reachable beyond loopback. In this slice,
 account mode fails closed at startup unless every non-loopback HTTP/WebSocket
 listener has a directly configured TLS certificate and key; trusted reverse
-proxy handling is outside this slice. The current plaintext public-Dummy stack
-may remain for its legacy temporary-token acceptance test, but it cannot expose
-password or pairing endpoints. It is not an authentication-mode fallback.
+proxy handling is outside this slice. The explicitly test-only plaintext
+`--public-dummy-test` path may retain its temporary token for legacy Dummy
+acceptance, but it cannot expose password or pairing endpoints. It is not an
+authentication-mode fallback.
 
 ## 7. Six-digit iOS Pairing
 
@@ -366,10 +376,12 @@ Safety-sensitive order is mandatory when access is reduced:
    code `1008`.
 
 Every inbound WebSocket message compares the connection revision with the
-current in-memory account revision before dispatch. Every transmit entry point
-checks again immediately before the safety/hardware action. Thus a cached
-principal cannot act during the short interval between the database commit and
-socket closure.
+current in-memory account revision before dispatch, except that a strictly
+validated PTT-off from the current lease owner is always allowed to reach the
+safety supervisor. Every transmit-on entry point checks again immediately
+before the safety/hardware action. Thus a cached principal cannot act during
+the short interval between the database commit and socket closure, while no
+authorization transition can prevent de-key.
 
 Session expiry, logout, refresh-token reuse, password change/reset, account
 disable/delete, device revocation, and removal of `can_transmit` all follow this
@@ -380,10 +392,11 @@ path. Existing disconnect cleanup remains a final independent de-key defense.
 The production data directory defaults to `/opt/testradio/data` on Debian and
 is configurable only so tests can use an owned temporary directory. The data
 directory is mode `0700`; `remote-radio.sqlite3` and its SQLite sidecar files
-are mode `0600`. Schema migrations are numbered, transactional, and refuse to
-run against an unknown newer schema. Connections enable foreign keys, a bounded
-busy timeout, and WAL mode. Blocking SQLite and Argon2 work runs outside the
-asyncio event loop through bounded worker execution.
+and the CSRF HMAC key are mode `0600`. Schema migrations are numbered,
+transactional, and refuse to run against an unknown newer schema. Connections
+enable foreign keys, a bounded busy timeout, and WAL mode. Blocking SQLite and
+Argon2 work runs outside the asyncio event loop through bounded worker
+execution.
 
 The schema has focused tables for users, browser sessions, devices, access
 credentials, refresh-credential rotation, login throttles, schema metadata, and
@@ -423,10 +436,11 @@ tokens.
 
 The production path removes `_DeviceAuthorizer` and the startup token from
 public account mode. A dependency-injected in-memory authorizer may remain in
-isolated unit tests, but no non-test CLI option may activate it or bypass the
+isolated unit tests and the separately labeled legacy `--public-dummy-test`
+acceptance path, but no account-mode CLI option may activate it or bypass the
 database authorizer. Web UI migration removes the token input and
-`sessionStorage` handling, replacing them with setup/login/settings views and
-cookie-authenticated WebSocket startup.
+`sessionStorage` handling from account mode, replacing them with
+setup/login/settings views and cookie-authenticated WebSocket startup.
 
 Existing rig control, PTT safety, and public-Dummy tests are adapted rather than
 discarded. Authentication does not make hardware TX available. The official
