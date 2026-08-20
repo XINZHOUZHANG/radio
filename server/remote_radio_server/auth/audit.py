@@ -21,7 +21,10 @@ _MAX_METADATA_BYTES = 4096
 
 
 def _normalized_key(key: str) -> str:
-    with_word_boundaries = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    with_acronym_boundaries = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    with_word_boundaries = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])", "_", with_acronym_boundaries
+    )
     return re.sub(r"[^a-zA-Z0-9]+", "_", with_word_boundaries).strip("_").lower()
 
 

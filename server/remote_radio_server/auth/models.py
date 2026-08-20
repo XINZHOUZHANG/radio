@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -49,9 +49,9 @@ class DeviceRecord:
 @dataclass(frozen=True, slots=True)
 class DeviceGrant:
     device_id: str
-    access_token: str
+    access_token: str = field(repr=False)
     access_expires_at: int
-    refresh_token: str
+    refresh_token: str = field(repr=False)
     refresh_expires_at: int
     role: Role
     can_transmit: bool

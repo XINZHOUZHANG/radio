@@ -15,6 +15,9 @@ class AuditEventTests(unittest.TestCase):
 
     def test_audit_event_rejects_nested_and_normalized_secret_keys(self):
         for key in (
+            "APIToken",
+            "CSRFToken",
+            "HTTPPassword",
             "user_code",
             "refresh_token",
             "refresh-token",

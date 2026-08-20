@@ -60,16 +60,19 @@ class AuthRepository:
         async with self._lock:
             if self._closed:
                 return
-            await asyncio.to_thread(self._connection.close)
             self._closed = True
+            await _to_thread_cancellation_safe(self._connection.close)
 
     async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("repository is closed")
-            result = await asyncio.to_thread(operation, self._connection)
-            await asyncio.to_thread(_tighten_file_modes, self._database_path)
-            return result
+            try:
+                return await _to_thread_cancellation_safe(operation, self._connection)
+            finally:
+                await _to_thread_cancellation_safe(
+                    _tighten_file_modes, self._database_path
+                )
 
     async def create_user(
         self,
@@ -205,6 +208,31 @@ def _load_or_create_csrf_key(path: Path) -> bytes:
     if len(key) != 32:
         raise RuntimeError("csrf.key must contain exactly 32 bytes")
     return key
+
+
+async def _to_thread_cancellation_safe(function: Callable[..., T], *args: object) -> T:
+    worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                raise
+            cancellation = error
+        except BaseException:
+            if cancellation is None:
+                raise
+            break
+    if cancellation is not None:
+        if not worker.cancelled():
+            try:
+                worker.result()
+            except BaseException:
+                pass
+        raise cancellation
+    return worker.result()
 
 
 def _open_connection(path: Path) -> sqlite3.Connection:

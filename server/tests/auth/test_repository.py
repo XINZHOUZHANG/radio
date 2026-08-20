@@ -1,14 +1,16 @@
+import asyncio
 import os
 import sqlite3
 import stat
 import tempfile
+import threading
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest import mock
 
 from remote_radio_server.auth.audit import AuditEvent
-from remote_radio_server.auth.models import Role
+from remote_radio_server.auth.models import DeviceGrant, Role
 from remote_radio_server.auth import repository as repository_module
 from remote_radio_server.auth.repository import AuthRepository
 
@@ -84,6 +86,111 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(path=path):
                     self.assertEqual(0, stat.S_IMODE(path.stat().st_mode) & 0o077)
 
+    async def test_schema_enforces_identity_and_credential_invariants(self):
+        repository = await AuthRepository.open(Path(self.temp.name), clock=lambda: 100)
+        self.addAsyncCleanup(repository.close)
+
+        columns = await repository._run(
+            lambda connection: {
+                table: {
+                    row["name"]
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                for table in (
+                    "users",
+                    "browser_sessions",
+                    "devices",
+                    "access_credentials",
+                    "refresh_credentials",
+                )
+            }
+        )
+        self.assertTrue(
+            {"password_phc", "auth_revision", "deleted_at"} <= columns["users"]
+        )
+        self.assertTrue(
+            {"user_id", "secret_digest", "absolute_expires_at"}
+            <= columns["browser_sessions"]
+        )
+        self.assertTrue({"user_id", "platform", "revoked_at"} <= columns["devices"])
+        self.assertTrue(
+            {"device_id", "secret_digest", "expires_at"}
+            <= columns["access_credentials"]
+        )
+        self.assertTrue(
+            {"device_id", "family_id", "previous_id", "used_at"}
+            <= columns["refresh_credentials"]
+        )
+
+        def insert_user(connection, values):
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO users(
+                        id, username, password_phc, role, can_transmit, enabled,
+                        must_change_password, auth_revision, created_at, updated_at
+                    ) VALUES (?, ?, '$argon2id$test', ?, ?, ?, ?, ?, 100, 100)
+                    """,
+                    values,
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        await repository._run(
+            lambda connection: insert_user(
+                connection, ("valid-user", "valid.user", "operator", 0, 1, 0, 1)
+            )
+        )
+
+        invalid_users = (
+            ("observer-user", "observer.user", "observer", 0, 1, 0, 1),
+            ("transmit-user", "transmit.user", "operator", 2, 1, 0, 1),
+            ("enabled-user", "enabled.user", "operator", 0, 2, 0, 1),
+            ("password-user", "password.user", "operator", 0, 1, 2, 1),
+            ("revision-user", "revision.user", "operator", 0, 1, 0, 0),
+            ("duplicate-user", "valid.user", "operator", 0, 1, 0, 1),
+        )
+        for values in invalid_users:
+            with self.subTest(values=values), self.assertRaises(sqlite3.IntegrityError):
+                await repository._run(
+                    lambda connection, values=values: insert_user(connection, values)
+                )
+
+        def insert_and_rollback_on_error(connection, sql, parameters):
+            try:
+                connection.execute(sql, parameters)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            await repository._run(
+                lambda connection: insert_and_rollback_on_error(
+                    connection,
+                    """
+                    INSERT INTO browser_sessions(
+                        id, user_id, secret_digest, created_at, last_seen_at,
+                        idle_expires_at, absolute_expires_at
+                    ) VALUES ('session-1', 'missing-user', X'01', 100, 100, 200, 300)
+                    """,
+                    (),
+                )
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            await repository._run(
+                lambda connection: insert_and_rollback_on_error(
+                    connection,
+                    """
+                    INSERT INTO devices(id, user_id, name, platform, created_at)
+                    VALUES ('device-1', 'valid-user', 'Phone', ?, 100)
+                    """,
+                    ("android",),
+                )
+            )
+
     async def test_open_persists_csrf_key_and_data(self):
         data_dir = Path(self.temp.name)
         first = await AuthRepository.open(data_dir, clock=lambda: 100)
@@ -138,19 +245,21 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository = await AuthRepository.open(Path(self.temp.name), clock=lambda: 100)
         self.addAsyncCleanup(repository.close)
 
-        await repository.create_user(
-            user_id="user-1",
-            username="duplicate.audit",
-            password_phc="$argon2id$test",
-            role=Role.OPERATOR,
-            can_transmit=False,
-            must_change_password=False,
-            audit=AuditEvent("user.create", "success"),
+        await repository._run(
+            lambda connection: connection.execute(
+                """
+                CREATE TRIGGER fail_audit_insert
+                BEFORE INSERT ON audit_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced audit failure');
+                END
+                """
+            )
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "forced audit failure"):
             await repository.create_user(
-                user_id="user-2",
-                username="duplicate.audit",
+                user_id="user-1",
+                username="atomic.audit",
                 password_phc="$argon2id$test",
                 role=Role.OPERATOR,
                 can_transmit=False,
@@ -158,8 +267,58 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 audit=AuditEvent("user.create", "success"),
             )
 
-        self.assertIsNone(await repository.get_user("user-2"))
-        self.assertEqual(1, len((await repository.list_audit(None, 20)).events))
+        self.assertIsNone(await repository.get_user("user-1"))
+        self.assertEqual((), (await repository.list_audit(None, 20)).events)
+
+    async def test_cancelled_operation_retains_lock_until_worker_finishes(self):
+        repository = await AuthRepository.open(Path(self.temp.name), clock=lambda: 100)
+        self.addAsyncCleanup(repository.close)
+        worker_started = threading.Event()
+        worker_finished = threading.Event()
+        release_worker = threading.Event()
+        later_started = threading.Event()
+
+        def blocked_operation(connection):
+            worker_started.set()
+            try:
+                if not release_worker.wait(2):
+                    raise TimeoutError("test worker was not released")
+                return connection.execute("SELECT 1").fetchone()[0]
+            finally:
+                worker_finished.set()
+
+        def later_operation(connection):
+            later_started.set()
+            return connection.execute("SELECT 1").fetchone()[0]
+
+        first = asyncio.create_task(repository._run(blocked_operation))
+        self.assertTrue(await asyncio.to_thread(worker_started.wait, 1))
+        first.cancel()
+        await asyncio.sleep(0)
+        later = asyncio.create_task(repository._run(later_operation))
+        entered_while_worker_active = await asyncio.to_thread(later_started.wait, 0.2)
+        release_worker.set()
+        self.assertTrue(await asyncio.to_thread(worker_finished.wait, 1))
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        self.assertEqual(1, await later)
+        self.assertFalse(entered_while_worker_active)
+
+    def test_device_grant_repr_redacts_plaintext_credentials(self):
+        grant = DeviceGrant(
+            device_id="device-1",
+            access_token="access-plaintext",
+            access_expires_at=100,
+            refresh_token="refresh-plaintext",
+            refresh_expires_at=200,
+            role=Role.OPERATOR,
+            can_transmit=False,
+        )
+
+        representation = repr(grant)
+        self.assertIn("device-1", representation)
+        self.assertNotIn("access-plaintext", representation)
+        self.assertNotIn("refresh-plaintext", representation)
 
     def test_csrf_creation_handles_short_os_write(self):
         key_path = Path(self.temp.name) / "csrf.key"
