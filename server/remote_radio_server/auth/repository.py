@@ -181,6 +181,85 @@ class AuthRepository:
 
         return await self._run(list_page)
 
+    async def login_throttle_retry_after(self, scope_keys: tuple[str, ...]) -> int:
+        now = self._clock()
+
+        def retry_after(connection: sqlite3.Connection) -> int:
+            placeholders = ",".join("?" for _ in scope_keys)
+            row = connection.execute(
+                f"SELECT MAX(blocked_until) FROM login_throttles "
+                f"WHERE scope_key IN ({placeholders})",
+                scope_keys,
+            ).fetchone()
+            blocked_until = 0 if row is None or row[0] is None else int(row[0])
+            return max(0, blocked_until - now)
+
+        return await self._run(retry_after)
+
+    async def record_login_failure(
+        self, account_scope_key: str, source_scope_key: str
+    ) -> int:
+        now = self._clock()
+
+        def record(connection: sqlite3.Connection) -> int:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                account_count, account_started_at, _ = _throttle_values(
+                    connection, account_scope_key, now
+                )
+                account_count += 1
+                account_delay = (
+                    min(30 * 2 ** (account_count - 5), 900)
+                    if account_count >= 5
+                    else 0
+                )
+                account_blocked_until = now + account_delay if account_delay else 0
+                _store_throttle(
+                    connection,
+                    account_scope_key,
+                    account_count,
+                    account_started_at,
+                    account_blocked_until,
+                )
+
+                source_count, source_started_at, source_blocked_until = _throttle_values(
+                    connection, source_scope_key, now
+                )
+                if source_blocked_until <= now and now - source_started_at >= 600:
+                    source_count = 0
+                    source_started_at = now
+                source_count += 1
+                source_delay = 900 if source_count >= 30 else 0
+                source_blocked_until = now + source_delay if source_delay else 0
+                _store_throttle(
+                    connection,
+                    source_scope_key,
+                    source_count,
+                    source_started_at,
+                    source_blocked_until,
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            return max(account_delay, source_delay)
+
+        return await self._run(record)
+
+    async def clear_login_throttle(self, scope_key: str) -> None:
+        def clear(connection: sqlite3.Connection) -> None:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM login_throttles WHERE scope_key = ?", (scope_key,)
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        await self._run(clear)
+
 
 def _load_or_create_csrf_key(path: Path) -> bytes:
     try:
@@ -297,6 +376,44 @@ def _user_from_row(row: sqlite3.Row) -> UserRecord:
 
 def _optional_user(row: sqlite3.Row | None) -> UserRecord | None:
     return None if row is None else _user_from_row(row)
+
+
+def _throttle_values(
+    connection: sqlite3.Connection, scope_key: str, now: int
+) -> tuple[int, int, int]:
+    row = connection.execute(
+        """
+        SELECT failure_count, window_started_at, blocked_until
+        FROM login_throttles WHERE scope_key = ?
+        """,
+        (scope_key,),
+    ).fetchone()
+    if row is None:
+        return 0, now, 0
+    return int(row["failure_count"]), int(row["window_started_at"]), int(
+        row["blocked_until"]
+    )
+
+
+def _store_throttle(
+    connection: sqlite3.Connection,
+    scope_key: str,
+    failure_count: int,
+    window_started_at: int,
+    blocked_until: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO login_throttles(
+            scope_key, failure_count, window_started_at, blocked_until
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(scope_key) DO UPDATE SET
+            failure_count = excluded.failure_count,
+            window_started_at = excluded.window_started_at,
+            blocked_until = excluded.blocked_until
+        """,
+        (scope_key, failure_count, window_started_at, blocked_until),
+    )
 
 
 def _append_audit(connection: sqlite3.Connection, occurred_at: int, event: AuditEvent) -> int:
