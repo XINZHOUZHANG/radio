@@ -164,8 +164,8 @@ struct RadioProfile: Codable, Identifiable, Sendable {
             let host = radio["tci"]?["host"]?.stringValue ?? "—"
             let port = radio["tci"]?["port"]?.intValue.map(String.init) ?? "—"
             return "TCI \(host):\(port)"
-        case "none": "仅监听"
-        default: radioType
+        case "none": return "仅监听"
+        default: return radioType
         }
     }
 }
