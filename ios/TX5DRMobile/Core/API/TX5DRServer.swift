@@ -25,7 +25,7 @@ struct TX5DRServer: Codable, Hashable, Sendable {
             throw TX5DRServerError.invalidAddress
         }
         guard scheme == "http" || scheme == "https" else { throw TX5DRServerError.unsupportedScheme }
-        guard components.host != nil else { throw TX5DRServerError.invalidAddress }
+        guard let host = components.host, !host.isEmpty else { throw TX5DRServerError.invalidAddress }
         components.scheme = scheme
         components.path = components.path.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         components.query = nil
