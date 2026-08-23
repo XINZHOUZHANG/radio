@@ -792,6 +792,72 @@ actor TX5DRAPIClient {
         try await download("/logbooks/\(id)/backup/download")
     }
 
+    func prepareLogbookRestore(id: String, revision: String) async throws -> LogbookRestorePreflight {
+        let responseData = try await data(
+            .post,
+            "/logbooks/\(id)/backup/restore/prepare",
+            body: try encoder.encode(JSONValue.object([:])),
+            authenticated: true,
+            headers: [
+                "If-Match": revision,
+                "Idempotency-Key": UUID().uuidString,
+            ]
+        )
+        let response = try decoder.decode(LogbookRestorePreflightResponse.self, from: responseData)
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func restoreLogbookBackup(
+        id: String,
+        preflightToken: String,
+        confirmation: String,
+        revision: String
+    ) async throws -> LogbookBackupStatus {
+        struct Body: Encodable {
+            let preflightToken: String
+            let confirmation: String
+        }
+        let responseData = try await data(
+            .post,
+            "/logbooks/\(id)/backup/restore",
+            body: try encoder.encode(Body(preflightToken: preflightToken, confirmation: confirmation)),
+            authenticated: true,
+            headers: [
+                "If-Match": revision,
+                "Idempotency-Key": UUID().uuidString,
+            ]
+        )
+        let response = try decoder.decode(LogbookBackupStatusResponse.self, from: responseData)
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func downloadPreRestoreLogbookBackup(id: String) async throws -> Data {
+        try await download("/logbooks/\(id)/backup/pre-restore/download")
+    }
+
+    func retryUnsavedQSO(logbookId: String, attemptId: String) async throws -> QSORecord {
+        let responseData = try await data(
+            .post,
+            "/logbooks/\(logbookId)/unsaved-qsos/\(pathSegment(attemptId))/retry",
+            body: nil,
+            authenticated: true,
+            headers: ["Idempotency-Key": UUID().uuidString]
+        )
+        let response = try decoder.decode(LogbookUnsavedQSORetryResponse.self, from: responseData)
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func discardUnsavedQSO(logbookId: String, attemptId: String) async throws {
+        let response: LogbookUnsavedQSODiscardResponse = try await request(
+            .delete,
+            "/logbooks/\(logbookId)/unsaved-qsos/\(pathSegment(attemptId))"
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
     func qsos(logbookId: String, limit: Int = 100, offset: Int = 0, callsign: String? = nil) async throws -> QSOListResponse {
         var query = [
             URLQueryItem(name: "limit", value: String(limit)),

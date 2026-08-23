@@ -1335,6 +1335,44 @@ struct LogbookBackupStatusResponse: Codable, Sendable {
     let data: LogbookBackupStatus
 }
 
+struct LogbookRestoreFileSummary: Codable, Sendable {
+    let size: Int
+    let recordCount: Int
+    let opaqueRecordCount: Int
+    let incompleteTail: Bool
+    let issueCount: Int
+}
+
+struct LogbookRestorePreflight: Codable, Sendable {
+    let preflightToken: String
+    let expiresAt: Double
+    let revision: String
+    let main: LogbookRestoreFileSummary
+    let backup: LogbookRestoreFileSummary
+    let recordDelta: Int
+    let estimatedLoss: Int
+    let highRisk: Bool
+}
+
+struct LogbookRestorePreflightResponse: Codable, Sendable {
+    let success: Bool
+    let data: LogbookRestorePreflight
+}
+
+struct LogbookUnsavedQSORetryResponse: Codable, Sendable {
+    let success: Bool
+    let data: QSORecord
+}
+
+struct LogbookUnsavedQSODiscardResponse: Codable, Sendable {
+    struct Result: Codable, Sendable {
+        let attemptId: String
+    }
+
+    let success: Bool
+    let data: Result
+}
+
 struct QSORecord: Codable, Identifiable, Sendable {
     let id: String
     let callsign: String

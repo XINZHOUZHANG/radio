@@ -780,6 +780,44 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(interruption.recommendation, "Check the CAT cable")
     }
 
+    func testLogbookRestorePreflightDecodesSafetyComparison() throws {
+        let data = Data(#"""
+        {
+          "success": true,
+          "data": {
+            "preflightToken": "preflight-token-1",
+            "expiresAt": 1700000600000,
+            "revision": "revision-1",
+            "main": {
+              "size": 256,
+              "recordCount": 3,
+              "opaqueRecordCount": 0,
+              "incompleteTail": false,
+              "issueCount": 0
+            },
+            "backup": {
+              "size": 128,
+              "recordCount": 2,
+              "opaqueRecordCount": 0,
+              "incompleteTail": false,
+              "issueCount": 0
+            },
+            "recordDelta": -1,
+            "estimatedLoss": 1,
+            "highRisk": true
+          }
+        }
+        """#.utf8)
+
+        let response = try JSONDecoder().decode(LogbookRestorePreflightResponse.self, from: data)
+
+        XCTAssertEqual(response.data.revision, "revision-1")
+        XCTAssertEqual(response.data.main.recordCount, 3)
+        XCTAssertEqual(response.data.backup.size, 128)
+        XCTAssertEqual(response.data.estimatedLoss, 1)
+        XCTAssertTrue(response.data.highRisk)
+    }
+
     private var idlePTT: PTTStatus {
         PTTStatus(
             isTransmitting: false,

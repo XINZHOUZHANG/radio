@@ -1247,6 +1247,77 @@ final class TX5DRSession: ObservableObject {
         return try await apiClient.downloadLogbookBackup(id: id)
     }
 
+    func prepareLogbookRestore(id: String, revision: String) async throws -> LogbookRestorePreflight {
+        guard isAdmin else { throw TX5DRSessionError.adminRequired }
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        isWorking = true
+        defer { isWorking = false }
+        return try await apiClient.prepareLogbookRestore(id: id, revision: revision)
+    }
+
+    func restoreLogbookBackup(
+        id: String,
+        preflightToken: String,
+        confirmation: String,
+        revision: String
+    ) async throws {
+        guard isAdmin else { throw TX5DRSessionError.adminRequired }
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        isWorking = true
+        defer { isWorking = false }
+
+        logbookBackups[id] = try await apiClient.restoreLogbookBackup(
+            id: id,
+            preflightToken: preflightToken,
+            confirmation: confirmation,
+            revision: revision
+        )
+        logbooks = try await apiClient.logbooks()
+        logbookDetails[id] = try await apiClient.logbookDetail(id: id)
+        if selectedLogbookId == id {
+            qsos = try await apiClient.qsos(
+                logbookId: id,
+                limit: 100,
+                callsign: qsoCallsignFilter
+            ).data
+        }
+        noticeMessage = "日志本已从备份恢复；恢复前快照已保留"
+    }
+
+    func downloadPreRestoreLogbookBackup(id: String) async throws -> Data {
+        guard isAdmin else { throw TX5DRSessionError.adminRequired }
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.downloadPreRestoreLogbookBackup(id: id)
+    }
+
+    func retryUnsavedQSO(logbookId: String, attemptId: String) async throws {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        isWorking = true
+        defer { isWorking = false }
+
+        _ = try await apiClient.retryUnsavedQSO(logbookId: logbookId, attemptId: attemptId)
+        logbookBackups[logbookId] = try await apiClient.logbookBackupStatus(id: logbookId)
+        logbookDetails[logbookId] = try await apiClient.logbookDetail(id: logbookId)
+        if selectedLogbookId == logbookId {
+            qsos = try await apiClient.qsos(
+                logbookId: logbookId,
+                limit: 100,
+                callsign: qsoCallsignFilter
+            ).data
+        }
+        noticeMessage = "未保存 QSO 已重新写入"
+    }
+
+    func discardUnsavedQSO(logbookId: String, attemptId: String) async throws {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        isWorking = true
+        defer { isWorking = false }
+
+        try await apiClient.discardUnsavedQSO(logbookId: logbookId, attemptId: attemptId)
+        logbookBackups[logbookId] = try await apiClient.logbookBackupStatus(id: logbookId)
+        noticeMessage = "未保存 QSO 已丢弃"
+    }
+
     func refreshAccounts() async {
         guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
         do { accounts = try await apiClient.accounts() }

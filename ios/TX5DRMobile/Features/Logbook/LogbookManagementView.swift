@@ -171,13 +171,20 @@ private struct LogbookMaintenanceView: View {
     @State private var exportFileName = "logbook.adi"
     @State private var showingExporter = false
     @State private var fileError: String?
+    @State private var restorePreflight: LogbookRestorePreflight?
+    @State private var restoreRiskAccepted = false
+    @State private var restoreConfirmation = ""
+    @State private var recoveryBusy = false
+    @State private var pendingUnsavedDiscard: LogbookUnsavedAttempt?
 
     var body: some View {
         List {
             healthSection
+            unsavedSection
             operatorsSection
             transferSection
             backupSection
+            restoreSection
         }
         .scrollContentBackground(.hidden)
         .background(RadioPalette.background.ignoresSafeArea())
@@ -199,13 +206,30 @@ private struct LogbookMaintenanceView: View {
             if case .failure(let error) = result { fileError = error.localizedDescription }
             exportDocument = nil
         }
-        .alert("文件操作失败", isPresented: Binding(
+        .alert("操作失败", isPresented: Binding(
             get: { fileError != nil },
             set: { if !$0 { fileError = nil } }
         )) {
             Button("好") { fileError = nil }
         } message: {
             Text(fileError ?? "未知错误")
+        }
+        .confirmationDialog(
+            "丢弃这条未保存 QSO？",
+            isPresented: Binding(
+                get: { pendingUnsavedDiscard != nil },
+                set: { if !$0 { pendingUnsavedDiscard = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("永久丢弃", role: .destructive) {
+                guard let attempt = pendingUnsavedDiscard else { return }
+                pendingUnsavedDiscard = nil
+                discardUnsaved(attempt)
+            }
+            Button("取消", role: .cancel) { pendingUnsavedDiscard = nil }
+        } message: {
+            Text("丢弃后无法再从 TX-5DR 的待写入队列恢复。")
         }
     }
 
@@ -262,6 +286,45 @@ private struct LogbookMaintenanceView: View {
     }
 
     @ViewBuilder
+    private var unsavedSection: some View {
+        if !unsavedAttempts.isEmpty {
+            Section {
+                ForEach(unsavedAttempts) { attempt in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(attempt.callsign).font(.headline.monospaced())
+                                Text("\(attempt.mode) · \(latestDate(attempt.createdAt))")
+                                    .font(.caption)
+                                    .foregroundStyle(RadioPalette.muted)
+                            }
+                            Spacer()
+                            Button("重试") { retryUnsaved(attempt) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(recoveryBusy || backup?.mainHealth.writable != true)
+                            Button(role: .destructive) { pendingUnsavedDiscard = attempt } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(recoveryBusy)
+                        }
+                        if let error = attempt.error, !error.isEmpty {
+                            Text(error)
+                                .font(.caption2)
+                                .foregroundStyle(RadioPalette.warning)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+            } header: {
+                Text("未保存 QSO（\(unsavedAttempts.count)）")
+            } footer: {
+                Text("写入失败的 QSO 保留在 TX-5DR 内存队列；日志本恢复可写后可以重试。")
+            }
+        }
+    }
+
+    @ViewBuilder
     private var transferSection: some View {
         Section("导入与导出") {
             Button { showingImporter = true } label: {
@@ -292,24 +355,82 @@ private struct LogbookMaintenanceView: View {
                 Button { Task { await session.createLogbookBackup(id: logbookId) } } label: {
                     Label("立即创建备份", systemImage: "externaldrive.badge.plus")
                 }
-                .disabled(!backup.capabilities.canCreate)
+                .disabled(!backup.capabilities.canCreate || recoveryBusy || serverOperationBusy)
                 Button { downloadBackup() } label: {
                     Label("下载最新备份", systemImage: "externaldrive.badge.icloud")
                 }
-                .disabled(!backup.capabilities.canDownload)
+                .disabled(!backup.capabilities.canDownload || recoveryBusy || serverOperationBusy)
+                if backup.capabilities.canDownloadPreRestore {
+                    Button { downloadPreRestoreBackup() } label: {
+                        Label("下载恢复前快照", systemImage: "clock.arrow.circlepath")
+                    }
+                    .disabled(recoveryBusy || serverOperationBusy)
+                }
             } else {
                 ProgressView("读取备份状态")
             }
         } header: {
             Text("服务端备份")
         } footer: {
-            Text("恢复备份会覆盖日志本，原生恢复流程将在展示预检差异并二次确认后才允许执行。")
+            Text("每次恢复前，TX-5DR 会自动保留一份恢复前快照。")
+        }
+    }
+
+    @ViewBuilder
+    private var restoreSection: some View {
+        if session.isAdmin, let backup, backup.capabilities.canRestore {
+            Section {
+                if let restorePreflight {
+                    LabeledContent("当前日志", value: restoreSummary(restorePreflight.main))
+                    LabeledContent("备份文件", value: restoreSummary(restorePreflight.backup))
+                    LabeledContent("记录变化", value: signed(restorePreflight.recordDelta))
+                    LabeledContent("预计丢失", value: String(restorePreflight.estimatedLoss))
+                    LabeledContent("预检到期", value: latestDate(restorePreflight.expiresAt))
+
+                    if restorePreflight.highRisk {
+                        Label("高风险：备份内容可能少于当前日志本", systemImage: "exclamationmark.octagon.fill")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(RadioPalette.transmit)
+                    }
+
+                    Toggle("我了解恢复会替换当前日志本", isOn: $restoreRiskAccepted)
+                    TextField("输入日志本 ID：\(logbookId)", text: $restoreConfirmation)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button("确认从备份恢复", role: .destructive) { restoreBackup(restorePreflight) }
+                        .disabled(!canConfirmRestore || recoveryBusy || serverOperationBusy)
+                } else {
+                    Text("先比较当前文件与最新备份；确认记录差异后才会开放恢复按钮。")
+                        .font(.caption)
+                        .foregroundStyle(RadioPalette.muted)
+                    Button { prepareRestore(revision: backup.revision) } label: {
+                        Label("比较当前日志与备份", systemImage: "arrow.left.arrow.right")
+                    }
+                    .disabled(recoveryBusy || serverOperationBusy || backup.latest == nil)
+                }
+            } header: {
+                Text("从备份恢复")
+            } footer: {
+                Text("确认文字区分大小写，必须与日志本 ID 完全一致。预检过期或修订变化时需重新比较。")
+            }
         }
     }
 
     private var logbook: LogbookInfo? { session.logbooks.first { $0.id == logbookId } }
     private var detail: LogbookDetail? { session.logbookDetails[logbookId] }
     private var backup: LogbookBackupStatus? { session.logbookBackups[logbookId] }
+    private var unsavedAttempts: [LogbookUnsavedAttempt] {
+        (backup?.unsaved ?? []).compactMap { LogbookUnsavedAttempt($0) }
+    }
+    private var serverOperationBusy: Bool {
+        guard let operation = backup?.operation,
+              let state = operation["state"]?.stringValue else { return false }
+        return state == "pending" || state == "running"
+    }
+    private var canConfirmRestore: Bool {
+        restoreRiskAccepted && restoreConfirmation == logbookId
+    }
 
     private var importTypes: [UTType] {
         [UTType(filenameExtension: "adi"), UTType(filenameExtension: "adif"), .commaSeparatedText, .plainText]
@@ -348,6 +469,80 @@ private struct LogbookMaintenanceView: View {
         }
     }
 
+    private func downloadPreRestoreBackup() {
+        Task {
+            do {
+                exportDocument = TX5DRFileDocument(
+                    data: try await session.downloadPreRestoreLogbookBackup(id: logbookId)
+                )
+                exportFileName = "\(logbook?.name ?? "logbook")-pre-restore.adi"
+                showingExporter = true
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func prepareRestore(revision: String) {
+        Task {
+            recoveryBusy = true
+            defer { recoveryBusy = false }
+            do {
+                restorePreflight = try await session.prepareLogbookRestore(id: logbookId, revision: revision)
+                restoreRiskAccepted = false
+                restoreConfirmation = ""
+                await session.loadLogbookBackup(id: logbookId)
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func restoreBackup(_ preflight: LogbookRestorePreflight) {
+        guard canConfirmRestore else { return }
+        Task {
+            recoveryBusy = true
+            defer { recoveryBusy = false }
+            do {
+                try await session.restoreLogbookBackup(
+                    id: logbookId,
+                    preflightToken: preflight.preflightToken,
+                    confirmation: restoreConfirmation,
+                    revision: preflight.revision
+                )
+                restorePreflight = nil
+                restoreRiskAccepted = false
+                restoreConfirmation = ""
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func retryUnsaved(_ attempt: LogbookUnsavedAttempt) {
+        Task {
+            recoveryBusy = true
+            defer { recoveryBusy = false }
+            do {
+                try await session.retryUnsavedQSO(logbookId: logbookId, attemptId: attempt.id)
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func discardUnsaved(_ attempt: LogbookUnsavedAttempt) {
+        Task {
+            recoveryBusy = true
+            defer { recoveryBusy = false }
+            do {
+                try await session.discardUnsavedQSO(logbookId: logbookId, attemptId: attempt.id)
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
     private func handleImport(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
@@ -363,5 +558,32 @@ private struct LogbookMaintenanceView: View {
     private func latestDate(_ milliseconds: Double) -> String {
         let seconds = milliseconds > 10_000_000_000 ? milliseconds / 1_000 : milliseconds
         return Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func restoreSummary(_ summary: LogbookRestoreFileSummary) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(summary.size), countStyle: .file)
+        return "\(summary.recordCount) 条 · \(size)"
+    }
+
+    private func signed(_ value: Int) -> String { value > 0 ? "+\(value)" : String(value) }
+}
+
+private struct LogbookUnsavedAttempt: Identifiable {
+    let id: String
+    let callsign: String
+    let mode: String
+    let createdAt: Double
+    let error: String?
+
+    init?(_ value: JSONValue) {
+        guard let id = value["attemptId"]?.stringValue,
+              let callsign = value["callsign"]?.stringValue,
+              let mode = value["mode"]?.stringValue,
+              let createdAt = value["createdAt"]?.doubleValue else { return nil }
+        self.id = id
+        self.callsign = callsign
+        self.mode = mode
+        self.createdAt = createdAt
+        error = value["lastError"]?.stringValue ?? value["error"]?.stringValue
     }
 }
