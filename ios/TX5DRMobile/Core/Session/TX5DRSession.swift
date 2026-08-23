@@ -67,6 +67,7 @@ final class TX5DRSession: ObservableObject {
     @Published var noticeMessage: String?
 
     let radio = RadioWebSocket()
+    let logbookSocket = LogbookWebSocket()
     let audio = TX5DRAudioClient()
     let openWebRXAudio = TX5DRAudioClient()
 
@@ -76,12 +77,19 @@ final class TX5DRSession: ObservableObject {
     private var jwt: String?
     private var pttTask: Task<Void, Never>?
     private var pttGeneration = 0
+    private var logbookRefreshTask: Task<Void, Never>?
+    private var qsoCallsignFilter: String?
 
     private static let serverDefaultsKey = "tx5dr.serverAddress"
     private static let operatorDefaultsKey = "tx5dr.selectedOperator"
 
     init() {
         serverAddress = UserDefaults.standard.string(forKey: Self.serverDefaultsKey) ?? "http://localhost:8076"
+        let logbookEventHandler: (LogbookRealtimeEvent) -> Void = { [weak self] event in
+            self?.handleLogbookRealtimeEvent(event)
+        }
+        radio.onLogbookEvent = logbookEventHandler
+        logbookSocket.onEvent = logbookEventHandler
     }
 
     var isAuthenticated: Bool {
@@ -192,6 +200,9 @@ final class TX5DRSession: ObservableObject {
         endVoicePTT()
         audio.stopAll()
         openWebRXAudio.stopAll()
+        logbookRefreshTask?.cancel()
+        logbookRefreshTask = nil
+        logbookSocket.disconnect()
         radio.disconnect()
         try? tokenStore.delete()
         apiClient = nil
@@ -223,6 +234,7 @@ final class TX5DRSession: ObservableObject {
         openWebRXListenStatus = nil
         selectedOperatorId = nil
         selectedLogbookId = nil
+        qsoCallsignFilter = nil
         phase = .signedOut
     }
 
@@ -251,6 +263,8 @@ final class TX5DRSession: ObservableObject {
                 selectedLogbookId = logbooks.first(where: \.isActive)?.id ?? logbooks.first?.id
             }
         } catch { recordNonfatal("读取日志本失败", error: error) }
+
+        syncLogbookSocket()
 
         if isAdmin {
             do { accounts = try await apiClient.accounts() }
@@ -380,6 +394,7 @@ final class TX5DRSession: ObservableObject {
         if let id { UserDefaults.standard.set(id, forKey: Self.operatorDefaultsKey) }
         else { UserDefaults.standard.removeObject(forKey: Self.operatorDefaultsKey) }
         radio.setSelectedOperator(id)
+        syncLogbookSocket()
         Task { await loadKeyerPanels() }
     }
 
@@ -436,6 +451,7 @@ final class TX5DRSession: ObservableObject {
 
     func selectLogbook(_ id: String?) {
         selectedLogbookId = id
+        syncLogbookSocket()
         Task { await loadQSOs() }
     }
 
@@ -850,8 +866,13 @@ final class TX5DRSession: ObservableObject {
 
     func loadQSOs(callsign: String? = nil) async {
         guard let apiClient, let selectedLogbookId else { return }
+        let normalizedFilter = callsign?.trimmingCharacters(in: .whitespacesAndNewlines)
+        qsoCallsignFilter = normalizedFilter?.isEmpty == false ? normalizedFilter : nil
         do {
-            qsos = try await apiClient.qsos(logbookId: selectedLogbookId, callsign: callsign).data
+            qsos = try await apiClient.qsos(
+                logbookId: selectedLogbookId,
+                callsign: qsoCallsignFilter
+            ).data
         } catch {
             recordNonfatal("读取 QSO 失败", error: error)
         }
@@ -894,6 +915,7 @@ final class TX5DRSession: ObservableObject {
             let logbook = try await apiClient.createLogbook(id: id, name: name, description: description)
             self.logbooks = try await apiClient.logbooks()
             self.selectedLogbookId = logbook.id
+            self.syncLogbookSocket()
             created = true
         }
         return created
@@ -929,6 +951,7 @@ final class TX5DRSession: ObservableObject {
             if self.selectedLogbookId == logbook.id {
                 self.selectedLogbookId = self.logbooks.first(where: \.isActive)?.id ?? self.logbooks.first?.id
             }
+            self.syncLogbookSocket()
         }
     }
 
@@ -1250,6 +1273,84 @@ final class TX5DRSession: ObservableObject {
     func requestJSON(_ path: String, method: HTTPMethod, value: JSONValue? = nil) async throws -> JSONValue {
         guard let apiClient else { throw TX5DRSessionError.notConnected }
         return try await apiClient.json(method, path, body: value)
+    }
+
+    private func syncLogbookSocket() {
+        guard let server, let jwt else {
+            logbookSocket.disconnect()
+            return
+        }
+        logbookSocket.configure(
+            server: server,
+            jwt: jwt,
+            operatorId: selectedOperatorId,
+            logBookId: selectedLogbookId
+        )
+        logbookSocket.connect()
+    }
+
+    private func handleLogbookRealtimeEvent(_ event: LogbookRealtimeEvent) {
+        switch event.kind {
+        case .operatorStatus, .operatorsList:
+            return
+        case .changeNotice, .qsoAdded, .qsoUpdated, .logbookUpdated, .healthChanged, .writeFailed:
+            break
+        }
+
+        guard let logBookId = LogbookRealtimeRefreshPolicy.logBookId(
+            for: event,
+            selectedLogBookId: selectedLogbookId,
+            selectedOperatorId: selectedOperatorId
+        ) else { return }
+
+        if event.kind == .writeFailed {
+            let count = event.unsavedCount.map { "（\($0) 条记录尚未保存）" } ?? ""
+            errorMessage = "日志本写入失败\(count)：\(event.writeFailureMessage ?? "服务器存储不可写")"
+        }
+
+        scheduleLogbookRefresh(logBookId: logBookId)
+    }
+
+    private func scheduleLogbookRefresh(logBookId: String) {
+        logbookRefreshTask?.cancel()
+        logbookRefreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return }
+            guard let self, !Task.isCancelled else { return }
+            await self.refreshLogbookFromRealtime(logBookId: logBookId)
+            self.logbookRefreshTask = nil
+        }
+    }
+
+    private func refreshLogbookFromRealtime(logBookId: String) async {
+        guard let apiClient else { return }
+
+        if let refreshed = try? await apiClient.logbooks() {
+            logbooks = refreshed
+            if selectedLogbookId == nil || !refreshed.contains(where: { $0.id == selectedLogbookId }) {
+                selectedLogbookId = refreshed.first(where: \.isActive)?.id ?? refreshed.first?.id
+            }
+        }
+
+        if selectedLogbookId == logBookId,
+           let response = try? await apiClient.qsos(
+               logbookId: logBookId,
+               callsign: qsoCallsignFilter
+           ) {
+            qsos = response.data
+        }
+
+        if logbookDetails[logBookId] != nil,
+           let detail = try? await apiClient.logbookDetail(id: logBookId) {
+            logbookDetails[logBookId] = detail
+        }
+
+        if logbookBackups[logBookId] != nil,
+           let backup = try? await apiClient.logbookBackupStatus(id: logBookId) {
+            logbookBackups[logBookId] = backup
+        }
+
+        syncLogbookSocket()
     }
 
     private func performAuthentication(_ operation: @escaping () async throws -> Void) async {

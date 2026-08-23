@@ -40,7 +40,7 @@ export function extractOutboundMessageTypes(source) {
 
 export function extractInboundMessageTypes(source) {
   const start = source.indexOf('private func handle(');
-  const end = source.indexOf('private func mergeFrames', start);
+  const end = source.indexOf('\n    private func ', start + 'private func handle('.length);
   assert(start >= 0 && end > start, 'RadioWebSocket.handle could not be located');
   const handler = source.slice(start, end);
   const caseGroups = [...handler.matchAll(/case\s+((?:"[^"]+"\s*,?\s*)+):/g)];
@@ -76,6 +76,7 @@ export function verifyIOSContract(root = DEFAULT_ROOT) {
   const apiSource = readText(join(root, 'ios', 'TX5DRMobile', 'Core', 'API', 'TX5DRAPIClient.swift'));
   const advancedSettingsSource = readText(join(root, 'ios', 'TX5DRMobile', 'Features', 'Settings', 'AdvancedSettingsView.swift'));
   const socketSource = readText(join(root, 'ios', 'TX5DRMobile', 'Core', 'WebSocket', 'RadioWebSocket.swift'));
+  const logbookSocketSource = readText(join(root, 'ios', 'TX5DRMobile', 'Core', 'WebSocket', 'LogbookWebSocket.swift'));
   const audioSource = readText(join(root, 'ios', 'TX5DRMobile', 'Core', 'Audio', 'TX5DRAudioClient.swift'));
   const codecSource = readText(join(root, 'ios', 'TX5DRMobile', 'Core', 'Audio', 'RealtimeAudioFrameCodec.swift'));
   const patchSource = readText(join(root, extension.implementationPatch));
@@ -108,7 +109,10 @@ export function verifyIOSContract(root = DEFAULT_ROOT) {
   ].includes(messageDirections.get(type)));
   assert.deepEqual(invalidOutbound, [], `Undeclared iOS outbound WebSocket messages: ${invalidOutbound.join(', ')}`);
 
-  const inbound = extractInboundMessageTypes(socketSource);
+  const inbound = [...new Set([
+    ...extractInboundMessageTypes(socketSource),
+    ...extractInboundMessageTypes(logbookSocketSource),
+  ])];
   const invalidInbound = inbound.filter((type) => ![
     'server-to-client',
     'bidirectional',
@@ -118,6 +122,15 @@ export function verifyIOSContract(root = DEFAULT_ROOT) {
 
   assert.equal(contract.websocket.controlPath, '/api/ws');
   assert(socketSource.includes('webSocketURL("/ws")'), 'iOS control socket path changed without a contract update');
+  assert.equal(contract.websocket.logbookPath, '/api/ws/logbook');
+  assert(
+    logbookSocketSource.includes('webSocketURL("/ws/logbook", queryItems: queryItems)'),
+    'iOS logbook socket path changed without a contract update',
+  );
+  assert(
+    logbookSocketSource.includes('URLQueryItem(name: "token", value: jwt)'),
+    'iOS logbook socket no longer authenticates with the TX-5DR JWT query parameter',
+  );
   assert(contract.realtimeAudio.compatibilityFrameMagic.includes('TX5D'));
   assert(codecSource.includes('0x5458_3544'), 'iOS TX5D frame magic changed without a contract update');
   for (const direction of ['recv', 'send']) {

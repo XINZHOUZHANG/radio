@@ -86,6 +86,8 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var pluginList: JSONValue?
     @Published private(set) var latestEvents: [String: JSONValue] = [:]
 
+    var onLogbookEvent: ((LogbookRealtimeEvent) -> Void)?
+
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -561,6 +563,11 @@ final class RadioWebSocket: ObservableObject {
                     let id = value["id"]?.stringValue ?? value["operatorId"]?.stringValue
                     return id.map { ($0, value) }
                 })
+            }
+        case "qsoRecordAdded", "qsoRecordUpdated", "logbookUpdated",
+             "logbookHealthChanged", "logbookWriteFailed":
+            if let event = LogbookRealtimeEvent(envelope: envelope) {
+                onLogbookEvent?(event)
             }
         case "systemStatus":
             systemStatus = envelope.data

@@ -36,8 +36,9 @@ does not offer TX-5DR public-viewer mode.
 
 The native client uses TX-5DR's REST and control WebSocket protocols, its
 base64-wrapped Int16 little-endian spectrum frames, and the `TX5D` v1/v2 PCM
-compatibility audio framing. Run the protocol guard whenever the pinned server
-revision or iOS client changes:
+compatibility audio framing. It also keeps a filtered `/api/ws/logbook`
+connection open for live QSO, health, and write-failure refreshes. Run the
+protocol guard whenever the pinned server revision or iOS client changes:
 
 ```sh
 node scripts/check-ios-tx5dr-contract.mjs

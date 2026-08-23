@@ -24,6 +24,26 @@ final class TX5DRServerTests: XCTestCase {
         XCTAssertEqual(try insecure.webSocketURL("/ws").absoluteString, "ws://192.0.2.10:8076/api/ws")
     }
 
+    func testBuildsFilteredLogbookWebSocketURL() throws {
+        let server = try TX5DRServer(address: "https://radio.example/tx5dr")
+        let url = try server.webSocketURL(
+            "/ws/logbook",
+            queryItems: [
+                URLQueryItem(name: "operatorId", value: "operator 1"),
+                URLQueryItem(name: "logBookId", value: "field-log"),
+                URLQueryItem(name: "token", value: "jwt+token"),
+            ]
+        )
+
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.scheme, "wss")
+        XCTAssertEqual(components.host, "radio.example")
+        XCTAssertEqual(components.path, "/tx5dr/api/ws/logbook")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "operatorId" }?.value, "operator 1")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "logBookId" }?.value, "field-log")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "token" }?.value, "jwt+token")
+    }
+
     func testExternalizesInternalRealtimeOfferAndReplacesToken() throws {
         let server = try TX5DRServer(address: "https://radio.example:8443")
         let offer = try XCTUnwrap(URL(string: "ws://127.0.0.1:4000/api/realtime/ws-compat?token=old&mode=pcm"))

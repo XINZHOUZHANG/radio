@@ -50,8 +50,8 @@ struct TX5DRServer: Codable, Hashable, Sendable {
         return url
     }
 
-    func webSocketURL(_ path: String) throws -> URL {
-        let httpURL = try apiURL(path)
+    func webSocketURL(_ path: String, queryItems: [URLQueryItem] = []) throws -> URL {
+        let httpURL = try apiURL(path, queryItems: queryItems)
         guard var components = URLComponents(url: httpURL, resolvingAgainstBaseURL: false) else {
             throw TX5DRServerError.invalidAddress
         }
