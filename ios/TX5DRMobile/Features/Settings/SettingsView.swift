@@ -36,6 +36,11 @@ struct SettingsView: View {
 
             Section("控制与配置") {
                 NavigationLink {
+                    ProfileManagementView()
+                } label: {
+                    Label("Profile、Hamlib 与物理电源", systemImage: "radio")
+                }
+                NavigationLink {
                     OperatorsView()
                 } label: {
                     Label("操作员与 FT8 身份", systemImage: "person.wave.2")

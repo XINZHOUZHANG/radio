@@ -75,4 +75,9 @@ extension JSONValue {
             value.map { (key, $0) }
         }))
     }
+
+    func decoded<Value: Decodable>(as type: Value.Type = Value.self) -> Value? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
 }

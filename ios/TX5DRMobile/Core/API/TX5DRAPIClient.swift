@@ -129,6 +129,108 @@ actor TX5DRAPIClient {
         return response
     }
 
+    /// The upstream server does not advertise optional native-app pairing. A
+    /// malformed (non-rate-limited) probe distinguishes the extension's 400
+    /// response from an upstream 404 without consuming a six-digit attempt.
+    func supportsMobilePairing() async -> Bool {
+        struct Body: Encodable { let code: String }
+        do {
+            let _: LoginResponse = try await request(
+                .post,
+                "/auth/mobile-pairing-codes/exchange",
+                body: Body(code: ""),
+                authenticated: false
+            )
+            return true
+        } catch TX5DRAPIError.http(let status, let payload) {
+            return status == 400 && payload?.code == "INVALID_PAIRING_CODE_FORMAT"
+        } catch {
+            return false
+        }
+    }
+
+    func profiles() async throws -> ProfileListResponse {
+        try await request(.get, "/profiles")
+    }
+
+    func supportedRigs() async throws -> [SupportedRig] {
+        let response: SupportedRigsResponse = try await request(.get, "/radio/rigs")
+        return response.rigs
+    }
+
+    func serialPorts() async throws -> [SerialPortInfo] {
+        let response: SerialPortsResponse = try await request(.get, "/radio/serial-ports")
+        return response.ports
+    }
+
+    func audioDevices() async throws -> AudioDevicesResponse {
+        try await request(.get, "/audio/devices")
+    }
+
+    func createProfile(name: String, description: String?, radio: JSONValue, audio: JSONValue) async throws -> RadioProfile {
+        struct Body: Encodable {
+            let name: String
+            let radio: JSONValue
+            let audio: JSONValue
+            let description: String?
+        }
+        let response: ProfileActionResponse = try await request(
+            .post,
+            "/profiles",
+            body: Body(name: name, radio: radio, audio: audio, description: description)
+        )
+        guard response.success, let profile = response.profile else { throw TX5DRAPIError.invalidResponse }
+        return profile
+    }
+
+    func updateProfile(id: String, name: String, description: String?, radio: JSONValue, audio: JSONValue) async throws -> RadioProfile {
+        struct Body: Encodable {
+            let name: String
+            let radio: JSONValue
+            let audio: JSONValue
+            let description: String?
+        }
+        let response: ProfileActionResponse = try await request(
+            .put,
+            "/profiles/\(id)",
+            body: Body(name: name, radio: radio, audio: audio, description: description)
+        )
+        guard response.success, let profile = response.profile else { throw TX5DRAPIError.invalidResponse }
+        return profile
+    }
+
+    func deleteProfile(id: String) async throws {
+        let response: GenericSuccessResponse = try await request(.delete, "/profiles/\(id)")
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func activateProfile(id: String) async throws -> ActivateProfileResponse {
+        try await request(.post, "/profiles/\(id)/activate")
+    }
+
+    func reorderProfiles(ids: [String]) async throws {
+        struct Body: Encodable { let profileIds: [String] }
+        let response: GenericSuccessResponse = try await request(.put, "/profiles/reorder", body: Body(profileIds: ids))
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func radioPowerSupport(profileId: String) async throws -> RadioPowerSupportInfo {
+        try await request(.get, "/radio/power/support", queryItems: [URLQueryItem(name: "profileId", value: profileId)])
+    }
+
+    func setRadioPower(profileId: String, target: RadioPowerTarget, autoEngine: Bool = true) async throws -> RadioPowerResponse {
+        struct Body: Encodable {
+            let profileId: String
+            let state: RadioPowerTarget
+            let autoEngine: Bool
+        }
+        return try await request(
+            .post,
+            "/radio/power",
+            body: Body(profileId: profileId, state: target, autoEngine: autoEngine)
+        )
+    }
+
     func modes() async throws -> [ModeDescriptor] {
         let response: DataResponse<[ModeDescriptor]> = try await request(.get, "/mode")
         return response.data
@@ -210,6 +312,108 @@ actor TX5DRAPIClient {
         return response.data
     }
 
+    func logbookDetail(id: String) async throws -> LogbookDetail {
+        let response: LogbookDetailResponse = try await request(.get, "/logbooks/\(id)")
+        return response.data
+    }
+
+    func createLogbook(id: String, name: String, description: String?) async throws -> LogbookInfo {
+        struct Body: Encodable {
+            let id: String
+            let name: String
+            let description: String?
+            let autoCreateFile = true
+        }
+        let response: LogbookActionResponse = try await request(
+            .post,
+            "/logbooks",
+            body: Body(id: id, name: name, description: description)
+        )
+        guard response.success, let logbook = response.data else { throw TX5DRAPIError.invalidResponse }
+        return logbook
+    }
+
+    func updateLogbook(id: String, name: String, description: String?, isActive: Bool) async throws -> LogbookInfo {
+        struct Body: Encodable {
+            let name: String
+            let description: String?
+            let isActive: Bool
+        }
+        let response: LogbookActionResponse = try await request(
+            .put,
+            "/logbooks/\(id)",
+            body: Body(name: name, description: description, isActive: isActive)
+        )
+        guard response.success, let logbook = response.data else { throw TX5DRAPIError.invalidResponse }
+        return logbook
+    }
+
+    func deleteLogbook(id: String) async throws {
+        let response: GenericSuccessResponse = try await request(.delete, "/logbooks/\(id)")
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func connectOperator(_ operatorId: String, toLogbook id: String) async throws {
+        struct Body: Encodable { let operatorId: String; let logBookId: String }
+        let response: GenericSuccessResponse = try await request(
+            .post,
+            "/logbooks/\(id)/connect",
+            body: Body(operatorId: operatorId, logBookId: id)
+        )
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func disconnectOperator(_ operatorId: String) async throws {
+        let response: GenericSuccessResponse = try await request(.post, "/logbooks/disconnect/\(operatorId)")
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func exportLogbook(id: String, format: String) async throws -> Data {
+        try await download(
+            "/logbooks/\(id)/export",
+            queryItems: [URLQueryItem(name: "format", value: format)]
+        )
+    }
+
+    func importLogbook(id: String, fileName: String, data fileData: Data) async throws -> LogbookImportResponse {
+        let boundary = "tx5dr-ios-\(UUID().uuidString)"
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        let responseData = try await data(
+            .post,
+            "/logbooks/\(id)/import",
+            body: body,
+            authenticated: true,
+            headers: ["Content-Type": "multipart/form-data; boundary=\(boundary)"]
+        )
+        return try decoder.decode(LogbookImportResponse.self, from: responseData)
+    }
+
+    func logbookBackupStatus(id: String) async throws -> LogbookBackupStatus {
+        let response: LogbookBackupStatusResponse = try await request(.get, "/logbooks/\(id)/backup")
+        return response.data
+    }
+
+    func createLogbookBackup(id: String) async throws -> LogbookBackupStatus {
+        let encoded = try encoder.encode(JSONValue.object([:]))
+        let responseData = try await data(
+            .post,
+            "/logbooks/\(id)/backup",
+            body: encoded,
+            authenticated: true,
+            headers: ["Idempotency-Key": UUID().uuidString]
+        )
+        return try decoder.decode(LogbookBackupStatusResponse.self, from: responseData).data
+    }
+
+    func downloadLogbookBackup(id: String) async throws -> Data {
+        try await download("/logbooks/\(id)/backup/download")
+    }
+
     func qsos(logbookId: String, limit: Int = 100, offset: Int = 0, callsign: String? = nil) async throws -> QSOListResponse {
         var query = [
             URLQueryItem(name: "limit", value: String(limit)),
@@ -280,7 +484,8 @@ actor TX5DRAPIClient {
         _ path: String,
         queryItems: [URLQueryItem] = [],
         body: Data?,
-        authenticated: Bool
+        authenticated: Bool,
+        headers: [String: String] = [:]
     ) async throws -> Data {
         var request = URLRequest(url: try server.apiURL(path, queryItems: queryItems))
         request.httpMethod = method.rawValue
@@ -292,6 +497,9 @@ actor TX5DRAPIClient {
         }
         if authenticated, let jwt {
             request.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw TX5DRAPIError.invalidResponse }

@@ -56,6 +56,7 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var radioStatus: JSONValue?
     @Published private(set) var audioStatus: JSONValue?
     @Published private(set) var tunerStatus: JSONValue?
+    @Published private(set) var radioPowerState: RadioPowerStateEvent?
     @Published private(set) var voiceKeyerStatus: JSONValue?
     @Published private(set) var pluginList: JSONValue?
     @Published private(set) var latestEvents: [String: JSONValue] = [:]
@@ -154,6 +155,13 @@ final class RadioWebSocket: ObservableObject {
         send("subscribeSpectrum", data: .object(["kind": kind.map(JSONValue.string) ?? .null]))
     }
 
+    func invokeSpectrumControl(id: String, action: String) {
+        send("invokeSpectrumControl", data: .object([
+            "id": .string(id),
+            "action": .string(action),
+        ]))
+    }
+
     func writeCapability(id: String, value: JSONValue? = nil, action: Bool? = nil) {
         var payload: [String: JSONValue] = ["id": .string(id)]
         if let value { payload["value"] = value }
@@ -195,6 +203,61 @@ final class RadioWebSocket: ObservableObject {
         send("setOperatorTransmitCycles", data: .object([
             "operatorId": .string(operatorId),
             "transmitCycles": .array(cycles.map(JSONValue.number)),
+        ]))
+    }
+
+    func setOperatorRuntimeState(_ state: String, operatorId: String) {
+        send("setOperatorRuntimeState", data: .object([
+            "operatorId": .string(operatorId),
+            "state": .string(state),
+        ]))
+    }
+
+    func setOperatorRuntimeSlotContent(_ content: String, slot: String, operatorId: String) {
+        send("setOperatorRuntimeSlotContent", data: .object([
+            "operatorId": .string(operatorId),
+            "slot": .string(slot),
+            "content": .string(content),
+        ]))
+    }
+
+    func enqueueOperatorTarget(_ callsign: String, operatorId: String, startIfIdle: Bool = true) {
+        send("operatorQueueEnqueue", data: .object([
+            "operatorId": .string(operatorId),
+            "callsign": .string(callsign.uppercased()),
+            "startIfIdle": .bool(startIfIdle),
+        ]))
+    }
+
+    func reorderOperatorTarget(operatorId: String, entryId: String, beforeEntryId: String?, version: Int) {
+        send("operatorQueueReorder", data: .object([
+            "operatorId": .string(operatorId),
+            "entryId": .string(entryId),
+            "beforeEntryId": beforeEntryId.map(JSONValue.string) ?? .null,
+            "expectedVersion": .number(Double(version)),
+        ]))
+    }
+
+    func retryOperatorTarget(operatorId: String, entryId: String, version: Int) {
+        send("operatorQueueRetry", data: .object([
+            "operatorId": .string(operatorId),
+            "entryId": .string(entryId),
+            "expectedVersion": .number(Double(version)),
+        ]))
+    }
+
+    func removeOperatorTarget(operatorId: String, entryId: String, version: Int) {
+        send("operatorQueueRemove", data: .object([
+            "operatorId": .string(operatorId),
+            "entryId": .string(entryId),
+            "expectedVersion": .number(Double(version)),
+        ]))
+    }
+
+    func clearOperatorQueue(operatorId: String, version: Int) {
+        send("operatorQueueClear", data: .object([
+            "operatorId": .string(operatorId),
+            "expectedVersion": .number(Double(version)),
         ]))
     }
 
@@ -370,7 +433,10 @@ final class RadioWebSocket: ObservableObject {
             }
         case "systemStatus", "bootstrapStatusChanged", "clockStatusChanged", "rigctldStatus":
             systemStatus = envelope.data
-        case "radioStatusChanged", "radioPowerState", "profileChanged", "profileListUpdated":
+        case "radioPowerState":
+            radioPowerState = decode(envelope.data)
+            radioStatus = envelope.data
+        case "radioStatusChanged", "profileChanged", "profileListUpdated":
             radioStatus = envelope.data
         case "audioSidecarStatusChanged":
             audioStatus = envelope.data

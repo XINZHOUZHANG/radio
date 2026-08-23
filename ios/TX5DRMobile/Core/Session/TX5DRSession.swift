@@ -32,9 +32,19 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var phase: TX5DRSessionPhase = .launching
     @Published var serverAddress: String
     @Published private(set) var currentUser: AuthMeResponse?
+    @Published private(set) var pairingAvailable = false
+    @Published private(set) var loginServerReachable = false
     @Published private(set) var availableModes: [ModeDescriptor] = []
+    @Published private(set) var profiles: [RadioProfile] = []
+    @Published private(set) var activeProfileId: String?
+    @Published private(set) var supportedRigs: [SupportedRig] = []
+    @Published private(set) var serialPorts: [SerialPortInfo] = []
+    @Published private(set) var audioDevices: AudioDevicesResponse?
+    @Published private(set) var powerSupport: [String: RadioPowerSupportInfo] = [:]
     @Published private(set) var operators: [RadioOperatorConfig] = []
     @Published private(set) var logbooks: [LogbookInfo] = []
+    @Published private(set) var logbookDetails: [String: LogbookDetail] = [:]
+    @Published private(set) var logbookBackups: [String: LogbookBackupStatus] = [:]
     @Published private(set) var qsos: [QSORecord] = []
     @Published private(set) var accounts: [AuthTokenInfo] = []
     @Published private(set) var selectedOperatorId: String?
@@ -71,6 +81,21 @@ final class TX5DRSession: ObservableObject {
     var selectedOperator: RadioOperatorConfig? {
         guard let selectedOperatorId else { return nil }
         return operators.first { $0.id == selectedOperatorId }
+    }
+
+    func probeLoginCapabilities() async {
+        do {
+            let parsedServer = try TX5DRServer(address: serverAddress)
+            let client = TX5DRAPIClient(server: parsedServer)
+            _ = try await client.authStatus()
+            guard !Task.isCancelled else { return }
+            loginServerReachable = true
+            pairingAvailable = await client.supportsMobilePairing()
+        } catch {
+            guard !Task.isCancelled else { return }
+            loginServerReachable = false
+            pairingAvailable = false
+        }
     }
 
     func restoreSession() async {
@@ -143,9 +168,17 @@ final class TX5DRSession: ObservableObject {
         server = nil
         jwt = nil
         currentUser = nil
+        profiles = []
+        activeProfileId = nil
+        supportedRigs = []
+        serialPorts = []
+        audioDevices = nil
+        powerSupport = [:]
         availableModes = []
         operators = []
         logbooks = []
+        logbookDetails = [:]
+        logbookBackups = [:]
         qsos = []
         accounts = []
         selectedOperatorId = nil
@@ -157,6 +190,12 @@ final class TX5DRSession: ObservableObject {
         guard let apiClient else { return }
         isWorking = true
         defer { isWorking = false }
+
+        do {
+            let response = try await apiClient.profiles()
+            profiles = response.profiles
+            activeProfileId = response.activeProfileId
+        } catch { recordNonfatal("读取电台 Profile 失败", error: error) }
 
         do { availableModes = try await apiClient.modes() }
         catch { recordNonfatal("读取模式失败", error: error) }
@@ -176,6 +215,118 @@ final class TX5DRSession: ObservableObject {
         if isAdmin {
             do { accounts = try await apiClient.accounts() }
             catch { recordNonfatal("读取账户失败", error: error) }
+        }
+    }
+
+    func refreshProfiles() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        do {
+            let response = try await apiClient.profiles()
+            profiles = response.profiles
+            activeProfileId = response.activeProfileId
+        } catch {
+            fail(error)
+        }
+    }
+
+    func loadProfileEditorResources() async {
+        guard isAdmin, let apiClient else { return }
+        async let rigsRequest = apiClient.supportedRigs()
+        async let portsRequest = apiClient.serialPorts()
+        async let audioRequest = apiClient.audioDevices()
+        do { supportedRigs = try await rigsRequest }
+        catch { recordNonfatal("读取 Hamlib 型号失败", error: error) }
+        do { serialPorts = try await portsRequest }
+        catch { recordNonfatal("读取串口失败", error: error) }
+        do { audioDevices = try await audioRequest }
+        catch { recordNonfatal("读取音频设备失败", error: error) }
+    }
+
+    func createProfile(name: String, description: String?, radio: JSONValue, audio: JSONValue) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        var created = false
+        await performOperation(success: "Profile 已创建") {
+            let profile = try await apiClient.createProfile(
+                name: name,
+                description: description,
+                radio: radio,
+                audio: audio
+            )
+            let response = try await apiClient.profiles()
+            self.profiles = response.profiles
+            self.activeProfileId = response.activeProfileId
+            created = self.profiles.contains(where: { $0.id == profile.id })
+        }
+        return created
+    }
+
+    func updateProfile(id: String, name: String, description: String?, radio: JSONValue, audio: JSONValue) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "Profile 已更新") {
+            _ = try await apiClient.updateProfile(
+                id: id,
+                name: name,
+                description: description,
+                radio: radio,
+                audio: audio
+            )
+            let response = try await apiClient.profiles()
+            self.profiles = response.profiles
+            self.activeProfileId = response.activeProfileId
+            updated = true
+        }
+        return updated
+    }
+
+    func deleteProfile(_ profile: RadioProfile) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "Profile 已删除") {
+            try await apiClient.deleteProfile(id: profile.id)
+            let response = try await apiClient.profiles()
+            self.profiles = response.profiles
+            self.activeProfileId = response.activeProfileId
+            self.powerSupport[profile.id] = nil
+        }
+    }
+
+    func activateProfile(_ profile: RadioProfile) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "已切换至 \(profile.name)") {
+            let result = try await apiClient.activateProfile(id: profile.id)
+            self.activeProfileId = result.profile.id
+            let response = try await apiClient.profiles()
+            self.profiles = response.profiles
+            self.activeProfileId = response.activeProfileId
+        }
+    }
+
+    func reorderProfiles(_ profileIds: [String]) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation {
+            try await apiClient.reorderProfiles(ids: profileIds)
+            let response = try await apiClient.profiles()
+            self.profiles = response.profiles
+            self.activeProfileId = response.activeProfileId
+        }
+    }
+
+    func loadPowerSupport(profileId: String) async {
+        guard isAdmin, let apiClient else { return }
+        do { powerSupport[profileId] = try await apiClient.radioPowerSupport(profileId: profileId) }
+        catch { powerSupport[profileId] = nil }
+    }
+
+    func setRadioPower(profile: RadioProfile, target: RadioPowerTarget) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "\(profile.name) 电源命令已提交") {
+            _ = try await apiClient.setRadioPower(profileId: profile.id, target: target)
         }
     }
 
@@ -386,6 +537,125 @@ final class TX5DRSession: ObservableObject {
             try await apiClient.deleteQSO(logbookId: selectedLogbookId, qsoId: qso.id)
             self.qsos.removeAll { $0.id == qso.id }
         }
+    }
+
+    func loadLogbookDetail(id: String) async {
+        guard let apiClient else { return }
+        do { logbookDetails[id] = try await apiClient.logbookDetail(id: id) }
+        catch { recordNonfatal("读取日志本详情失败", error: error) }
+    }
+
+    func createLogbook(name: String, description: String?) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        let slug = name
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let id = slug.isEmpty ? "logbook-\(Int(Date().timeIntervalSince1970))" : slug
+        var created = false
+        await performOperation(success: "日志本已创建") {
+            let logbook = try await apiClient.createLogbook(id: id, name: name, description: description)
+            self.logbooks = try await apiClient.logbooks()
+            self.selectedLogbookId = logbook.id
+            created = true
+        }
+        return created
+    }
+
+    func updateLogbook(_ logbook: LogbookInfo, name: String, description: String?, isActive: Bool) async -> Bool {
+        guard let apiClient else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "日志本已更新") {
+            _ = try await apiClient.updateLogbook(
+                id: logbook.id,
+                name: name,
+                description: description,
+                isActive: isActive
+            )
+            self.logbooks = try await apiClient.logbooks()
+            self.logbookDetails[logbook.id] = try await apiClient.logbookDetail(id: logbook.id)
+            updated = true
+        }
+        return updated
+    }
+
+    func deleteLogbook(_ logbook: LogbookInfo) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "日志本已删除") {
+            try await apiClient.deleteLogbook(id: logbook.id)
+            self.logbooks = try await apiClient.logbooks()
+            self.logbookDetails[logbook.id] = nil
+            self.logbookBackups[logbook.id] = nil
+            if self.selectedLogbookId == logbook.id {
+                self.selectedLogbookId = self.logbooks.first(where: \.isActive)?.id ?? self.logbooks.first?.id
+            }
+        }
+    }
+
+    func connectOperator(_ operatorId: String, to logbookId: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "操作员已连接到日志本") {
+            try await apiClient.connectOperator(operatorId, toLogbook: logbookId)
+            self.logbookDetails[logbookId] = try await apiClient.logbookDetail(id: logbookId)
+            self.operators = try await apiClient.operators()
+        }
+    }
+
+    func disconnectOperatorFromLogbook(_ operatorId: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "操作员已与日志本断开") {
+            try await apiClient.disconnectOperator(operatorId)
+            self.operators = try await apiClient.operators()
+        }
+    }
+
+    func exportLogbook(id: String, format: String) async throws -> Data {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.exportLogbook(id: id, format: format)
+    }
+
+    func importLogbook(id: String, fileName: String, data: Data) async -> Bool {
+        guard let apiClient else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        isWorking = true
+        errorMessage = nil
+        defer { isWorking = false }
+        do {
+            let result = try await apiClient.importLogbook(id: id, fileName: fileName, data: data)
+            noticeMessage = "导入完成：新增 \(result.data.imported)，合并 \(result.data.merged)，跳过 \(result.data.skipped)"
+            await loadQSOs()
+            await loadLogbookDetail(id: id)
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    func loadLogbookBackup(id: String) async {
+        guard let apiClient else { return }
+        do { logbookBackups[id] = try await apiClient.logbookBackupStatus(id: id) }
+        catch { recordNonfatal("读取备份状态失败", error: error) }
+    }
+
+    func createLogbookBackup(id: String) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "日志本备份已创建") {
+            self.logbookBackups[id] = try await apiClient.createLogbookBackup(id: id)
+        }
+    }
+
+    func downloadLogbookBackup(id: String) async throws -> Data {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.downloadLogbookBackup(id: id)
     }
 
     func refreshAccounts() async {

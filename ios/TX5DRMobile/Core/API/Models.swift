@@ -94,6 +94,136 @@ struct MobilePairingCodeResponse: Codable, Sendable {
     let expiresAt: Double
 }
 
+struct SupportedRig: Codable, Identifiable, Sendable {
+    var id: Int { rigModel }
+    let rigModel: Int
+    let mfgName: String
+    let modelName: String
+}
+
+struct SupportedRigsResponse: Codable, Sendable {
+    let rigs: [SupportedRig]
+}
+
+struct SerialPortInfo: Codable, Identifiable, Sendable {
+    var id: String { path }
+    let path: String
+    let friendlyName: String?
+    let manufacturer: String?
+    let serialNumber: String?
+}
+
+struct SerialPortsResponse: Codable, Sendable {
+    let ports: [SerialPortInfo]
+}
+
+struct AudioDeviceInfo: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+    let channels: Int
+    let sampleRate: Double
+    let sampleRates: [Int]?
+    let type: String
+    let availability: String?
+    let backend: String?
+    let detail: String?
+    let hardwareId: String?
+}
+
+struct AudioDevicesResponse: Codable, Sendable {
+    let inputDevices: [AudioDeviceInfo]
+    let outputDevices: [AudioDeviceInfo]
+    let inputBufferSizes: [Int]
+    let outputBufferSizes: [Int]
+}
+
+struct RadioProfile: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let radio: JSONValue
+    let audio: JSONValue
+    let audioLockedToRadio: Bool
+    let createdAt: Double
+    let updatedAt: Double
+    let description: String?
+
+    var radioType: String { radio["type"]?.stringValue ?? "unknown" }
+
+    var endpointSummary: String {
+        switch radioType {
+        case "network":
+            let host = radio["network"]?["host"]?.stringValue ?? "—"
+            let port = radio["network"]?["port"]?.intValue.map(String.init) ?? "—"
+            return "Rigctld \(host):\(port)"
+        case "serial":
+            return radio["serial"]?["path"]?.stringValue ?? "串口"
+        case "icom-wlan":
+            return "ICOM WLAN \(radio["icomWlan"]?["ip"]?.stringValue ?? "—")"
+        case "tci":
+            let host = radio["tci"]?["host"]?.stringValue ?? "—"
+            let port = radio["tci"]?["port"]?.intValue.map(String.init) ?? "—"
+            return "TCI \(host):\(port)"
+        case "none": "仅监听"
+        default: radioType
+        }
+    }
+}
+
+struct ProfileListResponse: Codable, Sendable {
+    let profiles: [RadioProfile]
+    let activeProfileId: String?
+}
+
+struct ProfileActionResponse: Codable, Sendable {
+    let success: Bool
+    let profile: RadioProfile?
+    let message: String?
+}
+
+struct ActivateProfileResponse: Codable, Sendable {
+    let success: Bool
+    let profile: RadioProfile
+    let wasRunning: Bool
+}
+
+enum RadioPowerTarget: String, Codable, CaseIterable, Identifiable, Sendable {
+    case on
+    case off
+    case standby
+    case operate
+
+    var id: String { rawValue }
+}
+
+struct RadioPowerSupportInfo: Codable, Sendable {
+    struct RigInfo: Codable, Sendable {
+        let mfgName: String
+        let modelName: String
+    }
+
+    let profileId: String
+    let canPowerOn: Bool
+    let canPowerOff: Bool
+    let supportedStates: [RadioPowerTarget]
+    let reason: String?
+    let rigInfo: RigInfo?
+}
+
+struct RadioPowerResponse: Codable, Sendable {
+    let success: Bool
+    let target: RadioPowerTarget
+    let state: String
+}
+
+struct RadioPowerStateEvent: Codable, Equatable, Sendable {
+    let profileId: String?
+    let state: String
+    let stage: String
+    let errorKey: String?
+    let errorDetail: String?
+}
+
 struct ModeDescriptor: Codable, Hashable, Identifiable, Sendable {
     var id: String { name }
     let name: String
@@ -186,6 +316,28 @@ struct SlotPack: Codable, Sendable {
     let startMs: Double
     let endMs: Double
     let frames: [FrameMessage]
+}
+
+struct AssistedQueueRow: Codable, Identifiable, Sendable {
+    var id: String { entryId }
+    let entryId: String
+    let callsign: String
+    let order: Int
+    let draggable: Bool
+    let displayState: String
+    let tone: String
+    let icon: String
+    let pauseReason: String?
+    let noResponseCycles: Int?
+    let targetGrid: String?
+    let lastSnr: Double?
+    let lastHeardCyclesAgo: Int?
+}
+
+struct AssistedQueueSnapshot: Codable, Sendable {
+    let version: Int
+    let activeEntryId: String?
+    let rows: [AssistedQueueRow]
 }
 
 struct RadioOperatorConfig: Codable, Identifiable, Hashable, Sendable {
@@ -336,6 +488,87 @@ struct LogbookInfo: Codable, Identifiable, Sendable {
 struct LogbookListResponse: Codable, Sendable {
     let success: Bool
     let data: [LogbookInfo]
+}
+
+struct LogbookStatistics: Codable, Sendable {
+    let totalQSOs: Int
+    let totalOperators: Int
+    let uniqueCallsigns: Int
+    let lastQSO: String?
+    let firstQSO: String?
+    let dxcc: JSONValue?
+}
+
+struct LogbookDetail: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let description: String?
+    let fileName: String
+    let storageKind: String
+    let createdAt: Double
+    let lastUsed: Double
+    let isActive: Bool
+    let health: LogbookHealth
+    let statistics: LogbookStatistics
+    let connectedOperators: [String]
+}
+
+struct LogbookDetailResponse: Codable, Sendable {
+    let success: Bool
+    let data: LogbookDetail
+}
+
+struct LogbookActionResponse: Codable, Sendable {
+    let success: Bool
+    let message: String
+    let data: LogbookInfo?
+}
+
+struct LogbookImportResult: Codable, Sendable {
+    let detectedFormat: String
+    let totalRead: Int
+    let imported: Int
+    let merged: Int
+    let skipped: Int
+}
+
+struct LogbookImportResponse: Codable, Sendable {
+    let success: Bool
+    let message: String
+    let data: LogbookImportResult
+}
+
+struct LogbookBackupArtifact: Codable, Sendable {
+    let createdAt: Double
+    let size: Int
+    let recordCount: Int?
+    let opaqueRecordCount: Int?
+}
+
+struct LogbookBackupCapabilities: Codable, Sendable {
+    let canCreate: Bool
+    let canDownload: Bool
+    let canRestore: Bool
+    let canDownloadPreRestore: Bool
+}
+
+struct LogbookBackupStatus: Codable, Sendable {
+    let logBookId: String
+    let revision: String
+    let mainHealth: LogbookHealth
+    let dirty: Bool
+    let pendingMutations: Int
+    let latest: LogbookBackupArtifact?
+    let preRestore: LogbookBackupArtifact?
+    let operation: JSONValue?
+    let unsaved: [JSONValue]?
+    let capabilities: LogbookBackupCapabilities
+    let error: JSONValue?
+}
+
+struct LogbookBackupStatusResponse: Codable, Sendable {
+    let success: Bool
+    let data: LogbookBackupStatus
 }
 
 struct QSORecord: Codable, Identifiable, Sendable {

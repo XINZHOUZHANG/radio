@@ -25,7 +25,7 @@ struct LoginView: View {
                         VStack(spacing: 18) {
                             serverField
                             Picker("登录方式", selection: $method) {
-                                ForEach(LoginMethod.allCases) { item in
+                                ForEach(availableMethods) { item in
                                     Text(item.rawValue).tag(item)
                                 }
                             }
@@ -54,6 +54,14 @@ struct LoginView: View {
                 .padding(.horizontal, 22)
                 .padding(.vertical, 44)
                 .frame(maxWidth: .infinity)
+            }
+        }
+        .task(id: session.serverAddress) {
+            try? await Task.sleep(for: .milliseconds(550))
+            guard !Task.isCancelled else { return }
+            await session.probeLoginCapabilities()
+            if method == .pairing && !session.pairingAvailable {
+                method = .account
             }
         }
     }
@@ -87,7 +95,22 @@ struct LoginView: View {
                 .textFieldStyle(.plain)
                 .padding(14)
                 .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(session.loginServerReachable ? RadioPalette.accent : RadioPalette.muted)
+                    .frame(width: 7, height: 7)
+                Text(session.loginServerReachable ? "已识别 TX-5DR" : "输入地址后自动检测")
+                if session.pairingAvailable {
+                    Text("· 支持 6 位配对")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(RadioPalette.muted)
         }
+    }
+
+    private var availableMethods: [LoginMethod] {
+        session.pairingAvailable ? [.account, .pairing, .token] : [.account, .token]
     }
 
     @ViewBuilder

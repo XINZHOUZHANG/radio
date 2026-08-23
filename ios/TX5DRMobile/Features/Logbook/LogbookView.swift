@@ -16,7 +16,12 @@ struct LogbookView: View {
         .navigationTitle("通联日志")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                NavigationLink {
+                    LogbookManagementView()
+                } label: {
+                    Image(systemName: "books.vertical")
+                }
                 Button { showingNewQSO = true } label: { Image(systemName: "plus") }
                     .disabled(session.selectedLogbookId == nil)
             }

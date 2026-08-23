@@ -1,0 +1,56 @@
+name: iOS native client
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - ios/**
+      - docs/tx5dr/**
+      - scripts/check-ios-tx5dr-contract.mjs
+      - scripts/tests/**
+      - .github/workflows/ios.yml
+  pull_request:
+    paths:
+      - ios/**
+      - docs/tx5dr/**
+      - scripts/check-ios-tx5dr-contract.mjs
+      - scripts/tests/**
+      - .github/workflows/ios.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  protocol-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test scripts/tests/*.test.mjs
+      - run: node scripts/check-ios-tx5dr-contract.mjs
+
+  xcode-build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
+      - name: Build and run XCTest
+        run: >-
+          xcodebuild test
+          -project ios/TX5DRMobile/TX5DRMobile.xcodeproj
+          -scheme TX5DRMobile
+          -sdk iphonesimulator
+          -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
