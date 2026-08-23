@@ -381,7 +381,7 @@ final class TX5DRAudioClient: ObservableObject {
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetoothHFP]
+            options: [.defaultToSpeaker, .allowBluetooth]
         )
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.02)
@@ -497,7 +497,7 @@ final class TX5DRAudioClient: ObservableObject {
             } else {
                 guard generation == downlinkGeneration, downlinkSocket === socket else { return }
             }
-            try? await socket.sendPing()
+            socket.sendPing { _ in }
         }
     }
 
