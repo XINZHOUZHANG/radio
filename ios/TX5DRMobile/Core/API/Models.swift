@@ -728,17 +728,212 @@ struct CapabilityList: Codable, Sendable {
     let capabilities: [CapabilityState]
 }
 
-struct SpectrumFrame: Codable, Sendable {
-    struct FrequencyRange: Codable, Sendable { let min: Double; let max: Double }
-    struct BinaryFormat: Codable, Sendable { let type: String; let length: Int; let scale: Double?; let offset: Double? }
-    struct BinaryData: Codable, Sendable { let data: String; let format: BinaryFormat }
+enum SpectrumKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case audio
+    case radioSDR = "radio-sdr"
+    case openWebRXSDR = "openwebrx-sdr"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .audio: "音频"
+        case .radioSDR: "电台 SDR"
+        case .openWebRXSDR: "OpenWebRX"
+        }
+    }
+}
+
+enum SpectrumSourceFrequencyRangeMode: String, Codable, Sendable {
+    case absolute
+    case baseband
+}
+
+struct SpectrumSourceAvailability: Codable, Equatable, Sendable {
+    let kind: SpectrumKind
+    let supported: Bool
+    let available: Bool
+    let defaultSelected: Bool
+    let reason: String?
+    let sourceBinCount: Int?
+    let displayBinCount: Int
+    let supportsWaterfall: Bool
+    let frequencyRangeMode: SpectrumSourceFrequencyRangeMode
+}
+
+struct SpectrumCapabilities: Codable, Equatable, Sendable {
+    let profileId: String?
+    let defaultKind: SpectrumKind
+    let sources: [SpectrumSourceAvailability]
+
+    var availableSources: [SpectrumSourceAvailability] {
+        sources.filter(\.available)
+    }
+
+    func source(for kind: SpectrumKind?) -> SpectrumSourceAvailability? {
+        guard let kind else { return nil }
+        return sources.first { $0.kind == kind }
+    }
+}
+
+struct SpectrumSubscriptionChange: Codable, Equatable, Sendable {
+    let requestedKind: SpectrumKind?
+    let effectiveKind: SpectrumKind?
+    let ok: Bool
+    let reason: String?
+    let capabilities: SpectrumCapabilities?
+}
+
+enum SpectrumSessionSourceMode: String, Codable, Sendable {
+    case baseband
+    case center
+    case fixed
+    case scrollCenter = "scroll-center"
+    case scrollFixed = "scroll-fixed"
+    case full
+    case detail
+    case unknown
+}
+
+enum SpectrumSessionFrequencyRangeMode: String, Codable, Sendable {
+    case baseband
+    case absoluteCenter = "absolute-center"
+    case absoluteFixed = "absolute-fixed"
+    case absoluteWindowed = "absolute-windowed"
+}
+
+enum SpectrumSessionControlID: String, Codable, Sendable {
+    case zoomStep = "zoom-step"
+    case digitalWindowToggle = "digital-window-toggle"
+    case openWebRXDetailToggle = "openwebrx-detail-toggle"
+    case viewportZoom = "viewport-zoom"
+}
+
+enum SpectrumSessionControlAction: String, Codable, Sendable {
+    case zoomIn = "in"
+    case zoomOut = "out"
+    case toggle
+}
+
+enum SpectrumSessionControlKind: String, Codable, Sendable {
+    case server
+    case local
+}
+
+struct SpectrumSessionControl: Codable, Equatable, Sendable {
+    let id: SpectrumSessionControlID
+    let action: SpectrumSessionControlAction
+    let kind: SpectrumSessionControlKind
+    let visible: Bool
+    let enabled: Bool
+    let active: Bool
+    let pending: Bool
+
+    var key: String { "\(id.rawValue)-\(action.rawValue)" }
+}
+
+struct SpectrumSessionVoiceState: Codable, Equatable, Sendable {
+    enum OffsetModel: String, Codable, Sendable {
+        case upper
+        case lower
+        case symmetric
+    }
+
+    let radioMode: String?
+    let bandwidthLabel: String?
+    let occupiedBandwidthHz: Double?
+    let offsetModel: OffsetModel?
+}
+
+struct SpectrumSessionPresetMarker: Codable, Equatable, Identifiable, Sendable {
+    let id: String
+    let frequency: Double
+    let label: String
+    let description: String?
+    let clickable: Bool
+}
+
+struct SpectrumSessionInteractionState: Codable, Equatable, Sendable {
+    enum FrequencyGestureTarget: String, Codable, Sendable {
+        case operatorTX = "operator-tx"
+        case radioFrequency = "radio-frequency"
+    }
+
+    enum RangeMode: String, Codable, Sendable {
+        case automatic = "auto"
+        case manual
+    }
+
+    let showTxMarkers: Bool
+    let showRxMarkers: Bool
+    let canDragTx: Bool
+    let canRightClickSetFrequency: Bool
+    let canDoubleClickSetFrequency: Bool
+    let canDragFrequency: Bool
+    let frequencyGestureTarget: FrequencyGestureTarget?
+    let frequencyStepHz: Int?
+    let presetMarkers: [SpectrumSessionPresetMarker]
+    let canDragVoiceOverlay: Bool
+    let showVoiceOverlay: Bool
+    let canLocalViewportZoom: Bool
+    let canLocalViewportPan: Bool
+    let supportsManualRange: Bool
+    let supportsAutoRange: Bool
+    let defaultRangeMode: RangeMode?
+}
+
+struct SpectrumSessionState: Codable, Equatable, Sendable {
+    let kind: SpectrumKind?
+    let sourceMode: SpectrumSessionSourceMode
+    let frequencyRangeMode: SpectrumSessionFrequencyRangeMode
+    let displayRange: SpectrumFrame.FrequencyRange?
+    let centerFrequency: Double?
+    let currentRadioFrequency: Double?
+    let standardFrequencyHz: Double?
+    let edgeLowHz: Double?
+    let edgeHighHz: Double?
+    let spanHz: Double?
+    let voice: SpectrumSessionVoiceState
+    let interaction: SpectrumSessionInteractionState
+    let controls: [SpectrumSessionControl]
+}
+
+struct SpectrumFrame: Codable, Equatable, Sendable {
+    struct FrequencyRange: Codable, Equatable, Sendable {
+        let min: Double
+        let max: Double
+    }
+
+    struct BinaryFormat: Codable, Equatable, Sendable {
+        let type: String
+        let length: Int
+        let scale: Double?
+        let offset: Double?
+    }
+
+    struct BinaryData: Codable, Equatable, Sendable {
+        let data: String
+        let format: BinaryFormat
+    }
+
+    struct Meta: Codable, Equatable, Sendable {
+        let sourceBinCount: Int
+        let displayBinCount: Int
+        let centerFrequency: Double?
+        let spanHz: Double?
+        let profileId: String?
+        let radioModel: String?
+    }
+
     let timestamp: Double
-    let kind: String
+    let kind: SpectrumKind
     let frequencyRange: FrequencyRange
     let binaryData: BinaryData
+    let meta: Meta?
 
     var normalizedBins: [Double] {
-        guard let data = Data(base64Encoded: binaryData.data) else { return [] }
+        guard binaryData.format.type == "int16",
+              let data = Data(base64Encoded: binaryData.data) else { return [] }
         let scale = binaryData.format.scale ?? 1
         let offset = binaryData.format.offset ?? 0
         return data.withUnsafeBytes { bytes in
@@ -748,6 +943,68 @@ struct SpectrumFrame: Codable, Sendable {
                 return Double(raw) * scale + offset
             }
         }
+    }
+}
+
+enum SpectrumSourceSelector {
+    static let priority: [SpectrumKind] = [.openWebRXSDR, .radioSDR, .audio]
+
+    static func pick(capabilities: SpectrumCapabilities, preferred: SpectrumKind?) -> SpectrumKind? {
+        if let preferred, capabilities.source(for: preferred)?.available == true {
+            return preferred
+        }
+        return priority.first { capabilities.source(for: $0)?.available == true }
+    }
+}
+
+struct SpectrumWaterfallRow: Equatable, Sendable {
+    let timestamp: Double
+    let bins: [Double]
+}
+
+struct SpectrumHistoryBuffer: Equatable, Sendable {
+    private struct Signature: Equatable, Sendable {
+        let kind: SpectrumKind
+        let range: SpectrumFrame.FrequencyRange
+        let binCount: Int
+    }
+
+    let maxRows: Int
+    private(set) var rows: [SpectrumWaterfallRow] = []
+    private(set) var latestBins: [Double] = []
+    private(set) var frequencyRange: SpectrumFrame.FrequencyRange?
+    private(set) var kind: SpectrumKind?
+    private var signature: Signature?
+
+    init(maxRows: Int = 120) {
+        self.maxRows = max(1, maxRows)
+    }
+
+    mutating func append(frame: SpectrumFrame) {
+        let bins = frame.normalizedBins
+        guard !bins.isEmpty else { return }
+
+        let nextSignature = Signature(kind: frame.kind, range: frame.frequencyRange, binCount: bins.count)
+        if signature != nextSignature {
+            rows.removeAll(keepingCapacity: true)
+            signature = nextSignature
+        }
+
+        latestBins = bins
+        frequencyRange = frame.frequencyRange
+        kind = frame.kind
+        rows.append(SpectrumWaterfallRow(timestamp: frame.timestamp, bins: bins))
+        if rows.count > maxRows {
+            rows.removeFirst(rows.count - maxRows)
+        }
+    }
+
+    mutating func reset() {
+        rows.removeAll(keepingCapacity: true)
+        latestBins = []
+        frequencyRange = nil
+        kind = nil
+        signature = nil
     }
 }
 

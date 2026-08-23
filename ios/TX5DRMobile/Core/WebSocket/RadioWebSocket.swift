@@ -45,7 +45,16 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var meters: MeterData?
     @Published private(set) var decodedFrames: [FrameMessage] = []
     @Published private(set) var spectrumBins: [Double] = []
+    @Published private(set) var spectrumHistory: [SpectrumWaterfallRow] = []
     @Published private(set) var spectrumRange: SpectrumFrame.FrequencyRange?
+    @Published private(set) var spectrumKind: SpectrumKind?
+    @Published private(set) var spectrumCapabilities: SpectrumCapabilities?
+    @Published private(set) var selectedSpectrumKind: SpectrumKind?
+    @Published private(set) var requestedSpectrumKind: SpectrumKind?
+    @Published private(set) var subscribedSpectrumKind: SpectrumKind?
+    @Published private(set) var spectrumSubscription: SpectrumSubscriptionChange?
+    @Published private(set) var spectrumSessionState: SpectrumSessionState?
+    @Published private(set) var spectrumSelectionIsAutomatic = true
     @Published private(set) var capabilityDescriptors: [CapabilityDescriptor] = []
     @Published private(set) var capabilities: [String: CapabilityState] = [:]
     @Published private(set) var lastNotice: String?
@@ -82,6 +91,7 @@ final class RadioWebSocket: ObservableObject {
     private let instanceId: String
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var spectrumHistoryBuffer = SpectrumHistoryBuffer(maxRows: 120)
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -96,6 +106,9 @@ final class RadioWebSocket: ObservableObject {
     }
 
     func configure(server: TX5DRServer, jwt: String, operatorIds: [String]?, selectedOperatorId: String?) {
+        if self.server != server {
+            resetSpectrumState()
+        }
         self.server = server
         self.jwt = jwt
         enabledOperatorIds = operatorIds
@@ -131,6 +144,7 @@ final class RadioWebSocket: ObservableObject {
         heartbeatTask = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        resetSpectrumState()
         state = .disconnected
     }
 
@@ -168,14 +182,39 @@ final class RadioWebSocket: ObservableObject {
         send("setMode", data: .object(["mode": encoded]))
     }
 
-    func subscribeSpectrum(kind: String?) {
-        send("subscribeSpectrum", data: .object(["kind": kind.map(JSONValue.string) ?? .null]))
+    func selectSpectrumSource(_ kind: SpectrumKind) {
+        guard spectrumCapabilities?.source(for: kind)?.available == true else {
+            lastNotice = spectrumCapabilities?.source(for: kind)?.reason ?? "该频谱源当前不可用"
+            return
+        }
+        saveSpectrumPreference(kind)
+        spectrumSelectionIsAutomatic = false
+        selectedSpectrumKind = kind
+        requestSpectrumSubscription(kind)
     }
 
-    func invokeSpectrumControl(id: String, action: String) {
+    func selectAutomaticSpectrumSource() {
+        removeSpectrumPreference()
+        spectrumSelectionIsAutomatic = true
+        guard let spectrumCapabilities,
+              let kind = SpectrumSourceSelector.pick(capabilities: spectrumCapabilities, preferred: nil) else {
+            selectedSpectrumKind = nil
+            requestSpectrumSubscription(nil)
+            return
+        }
+        selectedSpectrumKind = kind
+        requestSpectrumSubscription(kind)
+    }
+
+    func clearSpectrumHistory() {
+        spectrumHistoryBuffer.reset()
+        publishSpectrumHistory()
+    }
+
+    func invokeSpectrumControl(id: SpectrumSessionControlID, action: SpectrumSessionControlAction) {
         send("invokeSpectrumControl", data: .object([
-            "id": .string(id),
-            "action": .string(action),
+            "id": .string(id.rawValue),
+            "action": .string(action.rawValue),
         ]))
     }
 
@@ -362,6 +401,7 @@ final class RadioWebSocket: ObservableObject {
             receiveTask = nil
             heartbeatTask?.cancel()
             heartbeatTask = nil
+            resetSpectrumState()
             if shouldReconnect {
                 state = .failed(error.localizedDescription)
                 scheduleReconnect()
@@ -402,7 +442,9 @@ final class RadioWebSocket: ObservableObject {
             state = .ready
             send("getStatus")
             send("getOperators")
-            subscribeSpectrum(kind: "audio")
+            if let spectrumCapabilities {
+                applySpectrumCapabilities(spectrumCapabilities)
+            }
         case "authExpired":
             state = .failed("登录已过期，请重新登录")
             shouldReconnect = false
@@ -424,10 +466,19 @@ final class RadioWebSocket: ObservableObject {
             if let pack: SlotPack = decode(envelope.data) { mergeFrames(pack.frames) }
         case "slotPacksReset":
             if envelope.data?["phase"]?.stringValue == "start" { decodedFrames = [] }
+        case "spectrumCapabilities":
+            if let value: SpectrumCapabilities = decode(envelope.data) {
+                applySpectrumCapabilities(value)
+            }
+        case "spectrumSubscriptionChanged":
+            if let value: SpectrumSubscriptionChange = decode(envelope.data) {
+                applySpectrumSubscriptionChange(value)
+            }
         case "spectrumFrame":
-            if let frame: SpectrumFrame = decode(envelope.data) {
-                spectrumBins = frame.normalizedBins
-                spectrumRange = frame.frequencyRange
+            if let frame: SpectrumFrame = decode(envelope.data) { applySpectrumFrame(frame) }
+        case "spectrumSessionStateChanged":
+            if let value: SpectrumSessionState = decode(envelope.data) {
+                spectrumSessionState = value
             }
         case "radioCapabilityList":
             if let list: CapabilityList = decode(envelope.data) {
@@ -493,6 +544,123 @@ final class RadioWebSocket: ObservableObject {
         var seen = Set<String>()
         merged = merged.filter { seen.insert($0.id).inserted }
         decodedFrames = Array(merged.prefix(200))
+    }
+
+    private func applySpectrumCapabilities(_ value: SpectrumCapabilities) {
+        let profileChanged = spectrumCapabilities == nil || spectrumCapabilities?.profileId != value.profileId
+        spectrumCapabilities = value
+
+        if profileChanged {
+            selectedSpectrumKind = nil
+            requestedSpectrumKind = nil
+            subscribedSpectrumKind = nil
+            spectrumSubscription = nil
+            spectrumSessionState = nil
+            clearSpectrumHistory()
+            spectrumSelectionIsAutomatic = loadSpectrumPreference(profileId: value.profileId) == nil
+        }
+
+        let savedPreference = loadSpectrumPreference(profileId: value.profileId)
+        let preferred = spectrumSelectionIsAutomatic ? nil : savedPreference
+        guard let selected = SpectrumSourceSelector.pick(capabilities: value, preferred: preferred) else {
+            selectedSpectrumKind = nil
+            if state == .ready { requestSpectrumSubscription(nil) }
+            return
+        }
+
+        selectedSpectrumKind = selected
+        guard state == .ready else { return }
+        if spectrumSubscription?.ok == false || selected != requestedSpectrumKind {
+            requestSpectrumSubscription(selected)
+        }
+    }
+
+    private func applySpectrumSubscriptionChange(_ value: SpectrumSubscriptionChange) {
+        spectrumSubscription = value
+        requestedSpectrumKind = value.requestedKind
+        subscribedSpectrumKind = value.effectiveKind
+
+        if value.ok {
+            if let effectiveKind = value.effectiveKind {
+                selectedSpectrumKind = effectiveKind
+            }
+        } else {
+            requestedSpectrumKind = nil
+            lastNotice = spectrumSubscriptionReason(value.reason)
+        }
+
+        if spectrumKind != value.effectiveKind {
+            clearSpectrumHistory()
+        }
+        if let capabilities = value.capabilities {
+            applySpectrumCapabilities(capabilities)
+        }
+    }
+
+    private func applySpectrumFrame(_ frame: SpectrumFrame) {
+        if let subscribedSpectrumKind, frame.kind != subscribedSpectrumKind { return }
+        if subscribedSpectrumKind == nil,
+           let selectedSpectrumKind,
+           frame.kind != selectedSpectrumKind { return }
+        spectrumHistoryBuffer.append(frame: frame)
+        publishSpectrumHistory()
+    }
+
+    private func publishSpectrumHistory() {
+        spectrumBins = spectrumHistoryBuffer.latestBins
+        spectrumHistory = spectrumHistoryBuffer.rows
+        spectrumRange = spectrumHistoryBuffer.frequencyRange
+        spectrumKind = spectrumHistoryBuffer.kind
+    }
+
+    private func requestSpectrumSubscription(_ kind: SpectrumKind?) {
+        if spectrumKind != kind { clearSpectrumHistory() }
+        requestedSpectrumKind = kind
+        spectrumSubscription = nil
+        send("subscribeSpectrum", data: .object(["kind": kind.map { .string($0.rawValue) } ?? .null]))
+    }
+
+    private func resetSpectrumState() {
+        spectrumCapabilities = nil
+        selectedSpectrumKind = nil
+        requestedSpectrumKind = nil
+        subscribedSpectrumKind = nil
+        spectrumSubscription = nil
+        spectrumSessionState = nil
+        spectrumSelectionIsAutomatic = true
+        clearSpectrumHistory()
+    }
+
+    private func spectrumPreferenceKey(profileId: String?) -> String {
+        let serverKey = server?.displayAddress ?? "unconfigured"
+        return "tx5dr.spectrum.preferred.\(serverKey).\(profileId ?? "default")"
+    }
+
+    private func loadSpectrumPreference(profileId: String?) -> SpectrumKind? {
+        guard let raw = UserDefaults.standard.string(forKey: spectrumPreferenceKey(profileId: profileId)) else {
+            return nil
+        }
+        return SpectrumKind(rawValue: raw)
+    }
+
+    private func saveSpectrumPreference(_ kind: SpectrumKind) {
+        UserDefaults.standard.set(kind.rawValue, forKey: spectrumPreferenceKey(profileId: spectrumCapabilities?.profileId))
+    }
+
+    private func removeSpectrumPreference() {
+        UserDefaults.standard.removeObject(forKey: spectrumPreferenceKey(profileId: spectrumCapabilities?.profileId))
+    }
+
+    private func spectrumSubscriptionReason(_ reason: String?) -> String {
+        switch reason {
+        case "radio_disconnected": "电台未连接，无法启用电台 SDR"
+        case "openwebrx_disconnected": "OpenWebRX 未连接"
+        case "capabilities_timeout": "读取频谱能力超时"
+        case "subscription_failed": "切换频谱源失败"
+        case "not_authenticated_or_handshake_pending": "频谱控制通道尚未就绪"
+        case .some(let reason): "频谱源不可用：\(reason)"
+        case nil: "频谱源不可用"
+        }
     }
 
     private func handleCWDecoderEvent(_ data: JSONValue?) {

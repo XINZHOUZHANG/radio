@@ -193,4 +193,196 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(response.status.state, .listening)
         XCTAssertTrue(response.status.isRunning)
     }
+
+    func testSpectrumCapabilitiesAndSessionStateDecodeTX5DRContract() throws {
+        let capabilitiesData = Data(#"""
+        {
+          "profileId": "home",
+          "defaultKind": "openwebrx-sdr",
+          "sources": [
+            {
+              "kind": "audio",
+              "supported": true,
+              "available": true,
+              "defaultSelected": false,
+              "sourceBinCount": 2048,
+              "displayBinCount": 1024,
+              "supportsWaterfall": true,
+              "frequencyRangeMode": "baseband"
+            },
+            {
+              "kind": "radio-sdr",
+              "supported": true,
+              "available": true,
+              "defaultSelected": false,
+              "sourceBinCount": null,
+              "displayBinCount": 1024,
+              "supportsWaterfall": true,
+              "frequencyRangeMode": "absolute"
+            },
+            {
+              "kind": "openwebrx-sdr",
+              "supported": true,
+              "available": true,
+              "defaultSelected": true,
+              "displayBinCount": 1024,
+              "supportsWaterfall": true,
+              "frequencyRangeMode": "absolute"
+            }
+          ]
+        }
+        """#.utf8)
+        let sessionData = Data(#"""
+        {
+          "kind": "openwebrx-sdr",
+          "sourceMode": "detail",
+          "frequencyRangeMode": "absolute-windowed",
+          "displayRange": {"min": 14073000, "max": 14077000},
+          "centerFrequency": 14075000,
+          "currentRadioFrequency": 14074000,
+          "standardFrequencyHz": 14074000,
+          "edgeLowHz": 14073000,
+          "edgeHighHz": 14077000,
+          "spanHz": 4000,
+          "voice": {
+            "radioMode": null,
+            "bandwidthLabel": null,
+            "occupiedBandwidthHz": null,
+            "offsetModel": null
+          },
+          "interaction": {
+            "showTxMarkers": true,
+            "showRxMarkers": true,
+            "canDragTx": true,
+            "canRightClickSetFrequency": true,
+            "canDoubleClickSetFrequency": true,
+            "canDragFrequency": true,
+            "frequencyGestureTarget": "radio-frequency",
+            "frequencyStepHz": 10,
+            "presetMarkers": [{
+              "id": "ft8",
+              "frequency": 14074000,
+              "label": "FT8",
+              "description": "20 m",
+              "clickable": true
+            }],
+            "canDragVoiceOverlay": false,
+            "showVoiceOverlay": false,
+            "canLocalViewportZoom": true,
+            "canLocalViewportPan": true,
+            "supportsManualRange": true,
+            "supportsAutoRange": false,
+            "defaultRangeMode": "manual"
+          },
+          "controls": [
+            {
+              "id": "openwebrx-detail-toggle",
+              "action": "toggle",
+              "kind": "server",
+              "visible": true,
+              "enabled": true,
+              "active": true,
+              "pending": false
+            },
+            {
+              "id": "viewport-zoom",
+              "action": "in",
+              "kind": "local",
+              "visible": true,
+              "enabled": true,
+              "active": false,
+              "pending": false
+            }
+          ]
+        }
+        """#.utf8)
+
+        let capabilities = try JSONDecoder().decode(SpectrumCapabilities.self, from: capabilitiesData)
+        let session = try JSONDecoder().decode(SpectrumSessionState.self, from: sessionData)
+
+        XCTAssertEqual(capabilities.defaultKind, .openWebRXSDR)
+        XCTAssertEqual(capabilities.sources.count, 3)
+        XCTAssertEqual(capabilities.sources[1].frequencyRangeMode, .absolute)
+        XCTAssertEqual(session.sourceMode, .detail)
+        XCTAssertEqual(session.frequencyRangeMode, .absoluteWindowed)
+        XCTAssertEqual(session.interaction.frequencyStepHz, 10)
+        XCTAssertEqual(session.controls.first?.id, .openWebRXDetailToggle)
+        XCTAssertEqual(session.controls.last?.kind, .local)
+    }
+
+    func testSpectrumFrameDecodesScaledLittleEndianBins() throws {
+        let data = Data(#"""
+        {
+          "timestamp": 1720000000000,
+          "kind": "audio",
+          "frequencyRange": {"min": 0, "max": 3000},
+          "binaryData": {
+            "data": "GPwAAOgD",
+            "format": {"type": "int16", "length": 3, "scale": 0.1, "offset": -20}
+          },
+          "meta": {
+            "sourceBinCount": 3,
+            "displayBinCount": 3,
+            "spanHz": 3000,
+            "profileId": "home"
+          }
+        }
+        """#.utf8)
+
+        let frame = try JSONDecoder().decode(SpectrumFrame.self, from: data)
+
+        XCTAssertEqual(frame.kind, .audio)
+        XCTAssertEqual(frame.meta?.displayBinCount, 3)
+        XCTAssertEqual(frame.normalizedBins, [-120, -20, 80])
+    }
+
+    func testSpectrumSourceSelectionHonorsPreferenceThenPriority() throws {
+        let data = Data(#"""
+        {
+          "profileId": "home",
+          "defaultKind": "audio",
+          "sources": [
+            {"kind":"audio","supported":true,"available":true,"defaultSelected":true,"displayBinCount":1024,"supportsWaterfall":true,"frequencyRangeMode":"baseband"},
+            {"kind":"radio-sdr","supported":true,"available":true,"defaultSelected":false,"displayBinCount":1024,"supportsWaterfall":true,"frequencyRangeMode":"absolute"},
+            {"kind":"openwebrx-sdr","supported":true,"available":false,"defaultSelected":false,"reason":"openwebrx_disconnected","displayBinCount":1024,"supportsWaterfall":true,"frequencyRangeMode":"absolute"}
+          ]
+        }
+        """#.utf8)
+        let capabilities = try JSONDecoder().decode(SpectrumCapabilities.self, from: data)
+
+        XCTAssertEqual(SpectrumSourceSelector.pick(capabilities: capabilities, preferred: .audio), .audio)
+        XCTAssertEqual(SpectrumSourceSelector.pick(capabilities: capabilities, preferred: nil), .radioSDR)
+        XCTAssertEqual(SpectrumSourceSelector.pick(capabilities: capabilities, preferred: .openWebRXSDR), .radioSDR)
+    }
+
+    func testSpectrumHistoryResetsForChangedStreamAndHonorsLimit() throws {
+        func frame(timestamp: Double, kind: String = "audio", min: Double = 0) throws -> SpectrumFrame {
+            let json = #"""
+            {
+              "timestamp": \#(timestamp),
+              "kind": "\#(kind)",
+              "frequencyRange": {"min": \#(min), "max": \#(min + 3000)},
+              "binaryData": {"data":"AQACAAMA","format":{"type":"int16","length":3}},
+              "meta": {"sourceBinCount":3,"displayBinCount":3}
+            }
+            """#
+            return try JSONDecoder().decode(SpectrumFrame.self, from: Data(json.utf8))
+        }
+
+        var history = SpectrumHistoryBuffer(maxRows: 2)
+        history.append(frame: try frame(timestamp: 1))
+        history.append(frame: try frame(timestamp: 2))
+        history.append(frame: try frame(timestamp: 3))
+
+        XCTAssertEqual(history.rows.map(\.timestamp), [2, 3])
+        XCTAssertEqual(history.latestBins, [1, 2, 3])
+
+        history.append(frame: try frame(timestamp: 4, min: 100))
+        XCTAssertEqual(history.rows.map(\.timestamp), [4])
+        XCTAssertEqual(history.frequencyRange?.min, 100)
+
+        history.append(frame: try frame(timestamp: 5, kind: "radio-sdr", min: 100))
+        XCTAssertEqual(history.rows.map(\.timestamp), [5])
+        XCTAssertEqual(history.kind, .radioSDR)
+    }
 }

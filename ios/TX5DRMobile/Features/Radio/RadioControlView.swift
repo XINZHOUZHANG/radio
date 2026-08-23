@@ -13,8 +13,7 @@ struct RadioControlView: View {
             VStack(spacing: 14) {
                 statusStrip
                 frequencyPanel
-                SpectrumPlot(bins: radio.spectrumBins)
-                    .frame(height: 190)
+                SpectrumPanelView()
                 meterGrid
                 primaryControls
                 if !surfaceCapabilities.isEmpty {
@@ -351,51 +350,6 @@ private struct StatusPill: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(color.opacity(0.1), in: Capsule())
-    }
-}
-
-struct SpectrumPlot: View {
-    let bins: [Double]
-
-    var body: some View {
-        Canvas { context, size in
-            let rect = CGRect(origin: .zero, size: size)
-            context.fill(Path(roundedRect: rect, cornerRadius: 20), with: .color(RadioPalette.panel))
-
-            for line in 1..<5 {
-                let y = size.height * CGFloat(line) / 5
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-                context.stroke(path, with: .color(.white.opacity(0.055)), lineWidth: 1)
-            }
-
-            guard bins.count > 1 else {
-                let text = Text("等待频谱数据").font(.caption).foregroundColor(RadioPalette.muted)
-                context.draw(text, at: CGPoint(x: size.width / 2, y: size.height / 2))
-                return
-            }
-            let finite = bins.filter(\.isFinite)
-            guard let minimum = finite.min(), let maximum = finite.max(), maximum > minimum else { return }
-            var line = Path()
-            for (index, value) in bins.enumerated() {
-                let x = CGFloat(index) / CGFloat(bins.count - 1) * size.width
-                let normalized = (value - minimum) / (maximum - minimum)
-                let y = size.height - CGFloat(min(1, max(0, normalized))) * (size.height - 12) - 6
-                if index == 0 { line.move(to: CGPoint(x: x, y: y)) }
-                else { line.addLine(to: CGPoint(x: x, y: y)) }
-            }
-            context.stroke(line, with: .linearGradient(
-                Gradient(colors: [RadioPalette.cyan, RadioPalette.accent]),
-                startPoint: .zero,
-                endPoint: CGPoint(x: size.width, y: 0)
-            ), lineWidth: 1.5)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.055))
-        }
     }
 }
 
