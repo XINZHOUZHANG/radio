@@ -298,6 +298,13 @@ final class RadioWebSocket: ObservableObject {
         ]))
     }
 
+    func setOperatorContext(_ context: [String: JSONValue], operatorId: String) {
+        send("setOperatorContext", data: .object([
+            "operatorId": .string(operatorId),
+            "context": .object(context),
+        ]))
+    }
+
     func setOperatorRuntimeState(_ state: String, operatorId: String) {
         send("setOperatorRuntimeState", data: .object([
             "operatorId": .string(operatorId),

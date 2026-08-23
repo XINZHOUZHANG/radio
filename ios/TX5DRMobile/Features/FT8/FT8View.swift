@@ -8,6 +8,8 @@ struct FT8View: View {
     @State private var filter = ""
     @State private var runtimeExpanded = false
     @State private var slotDrafts: [String: String] = [:]
+    @State private var contextDraft = FT8OperatorContextDraft()
+    @State private var contextDirty = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,6 +29,15 @@ struct FT8View: View {
                 }
                 .disabled(radio.decodedFrames.isEmpty)
             }
+        }
+        .onAppear { syncContextDraft(force: true) }
+        .onChange(of: session.selectedOperatorId) { _, _ in
+            slotDrafts = [:]
+            contextDirty = false
+            syncContextDraft(force: true)
+        }
+        .onChange(of: selectedStatus) { _, _ in
+            syncContextDraft(force: false)
         }
     }
 
@@ -50,6 +61,7 @@ struct FT8View: View {
                     session.setOperatorRunning(!operatorActive)
                 }
                 .buttonStyle(RadioActionButtonStyle(tint: operatorActive ? RadioPalette.warning : RadioPalette.accent))
+                .disabled(!controlsReady)
             }
 
             HStack(spacing: 8) {
@@ -59,10 +71,10 @@ struct FT8View: View {
                     .padding(12)
                     .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 Button("呼叫") {
-                    session.requestFT8Call(callsign)
-                    callsign = ""
+                    callTarget(callsign)
                 }
                 .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
+                .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controlsReady)
                 Menu {
                     Button("加入队列并在空闲时启动") { enqueue(startIfIdle: true) }
                     Button("仅加入等待队列") { enqueue(startIfIdle: false) }
@@ -71,7 +83,7 @@ struct FT8View: View {
                         .frame(width: 42, height: 42)
                         .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
-                .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controlsReady)
             }
 
             HStack {
@@ -92,6 +104,8 @@ struct FT8View: View {
     private var runtimeControls: some View {
         DisclosureGroup(isExpanded: $runtimeExpanded) {
             VStack(alignment: .leading, spacing: 12) {
+                contextEditor
+
                 HStack {
                     Text("发射周期")
                         .font(.caption.weight(.semibold))
@@ -147,7 +161,73 @@ struct FT8View: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(RadioPalette.panel)
-        .onChange(of: session.selectedOperatorId) { _, _ in slotDrafts = [:] }
+    }
+
+    private var contextEditor: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("通联上下文")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(RadioPalette.muted)
+                Spacer()
+                if contextDirty {
+                    Text("未应用")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(RadioPalette.warning)
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("目标呼号", text: contextBinding(\.targetCallsign))
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                TextField("目标网格", text: contextBinding(\.targetGrid))
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                TextField("TX 报告", text: contextBinding(\.reportSent))
+                    .keyboardType(.numbersAndPunctuation)
+                    .textFieldStyle(.roundedBorder)
+                TextField("RX 报告", text: contextBinding(\.reportReceived))
+                    .keyboardType(.numbersAndPunctuation)
+                    .textFieldStyle(.roundedBorder)
+                TextField("音频 Hz", text: contextBinding(\.audioFrequencyHz))
+                    .keyboardType(.numberPad)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    applyContext()
+                } label: {
+                    Label("应用上下文", systemImage: "checkmark.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent))
+                .disabled(!contextDirty || contextDraft.validationMessage != nil || !controlsReady)
+
+                Button {
+                    resetToCQ()
+                } label: {
+                    Label("回 CQ", systemImage: "arrow.counterclockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
+                .disabled(!controlsReady)
+            }
+
+            if let validation = contextDraft.validationMessage {
+                Label(validation, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(RadioPalette.warning)
+            }
+        }
+        .padding(10)
+        .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
@@ -212,9 +292,7 @@ struct FT8View: View {
             } else {
                 List(filteredFrames) { frame in
                     Button {
-                        if let candidate = candidateCallsign(in: frame.message) {
-                            callsign = candidate
-                        }
+                        selectDecodedFrame(frame)
                     } label: {
                         HStack(spacing: 12) {
                             Text(String(format: "%+.0f", frame.snr))
@@ -245,7 +323,7 @@ struct FT8View: View {
                     .listRowBackground(RadioPalette.panel)
                     .contextMenu {
                         if let candidate = candidateCallsign(in: frame.message) {
-                            Button("呼叫 \(candidate)") { session.requestFT8Call(candidate) }
+                            Button("呼叫 \(candidate)") { callTarget(candidate, frequency: frame.freq) }
                         }
                         Button("复制消息") { UIPasteboard.general.string = frame.message }
                     }
@@ -262,6 +340,10 @@ struct FT8View: View {
     }
 
     private var operatorActive: Bool { selectedStatus?["isActive"]?.boolValue ?? false }
+
+    private var controlsReady: Bool {
+        session.selectedOperatorId != nil && radio.state == .ready
+    }
 
     private var runtime: JSONValue? { selectedStatus?["runtime"] }
 
@@ -295,6 +377,79 @@ struct FT8View: View {
         guard let id = session.selectedOperatorId else { return }
         let content = slotDrafts[slot] ?? runtime?["slots"]?[slot]?.stringValue ?? ""
         radio.setOperatorRuntimeSlotContent(content, slot: slot, operatorId: id)
+    }
+
+    private func contextBinding(_ keyPath: WritableKeyPath<FT8OperatorContextDraft, String>) -> Binding<String> {
+        Binding(
+            get: { contextDraft[keyPath: keyPath] },
+            set: { value in
+                contextDraft[keyPath: keyPath] = value
+                contextDirty = true
+            }
+        )
+    }
+
+    private func syncContextDraft(force: Bool) {
+        guard force || !contextDirty else { return }
+        contextDraft = FT8OperatorContextDraft(status: selectedStatus)
+        contextDirty = false
+    }
+
+    private func applyContext() {
+        _ = sendContext(contextDraft, notice: "FT8 通联上下文已应用")
+    }
+
+    private func resetToCQ() {
+        guard let id = session.selectedOperatorId else { return }
+        var draft = contextDraft
+        draft.targetCallsign = ""
+        draft.targetGrid = ""
+        draft.reportSent = "0"
+        draft.reportReceived = "0"
+        guard sendContext(draft, notice: "已重置为 CQ") else { return }
+        contextDraft = draft
+        callsign = ""
+        radio.setOperatorRuntimeState("TX6", operatorId: id)
+    }
+
+    private func selectDecodedFrame(_ frame: FrameMessage) {
+        guard let candidate = candidateCallsign(in: frame.message) else { return }
+        callsign = candidate
+        contextDraft.targetCallsign = candidate
+        contextDraft.audioFrequencyHz = String(max(1, min(3_000, Int(frame.freq.rounded()))))
+        contextDirty = true
+    }
+
+    private func callTarget(_ rawTarget: String, frequency: Double? = nil) {
+        let target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !target.isEmpty else { return }
+
+        var draft = contextDraft
+        draft.targetCallsign = target
+        if let frequency {
+            draft.audioFrequencyHz = String(max(1, min(3_000, Int(frequency.rounded()))))
+        }
+        guard sendContext(draft, notice: nil) else { return }
+        contextDraft = draft
+        session.requestFT8Call(target)
+        callsign = ""
+    }
+
+    @discardableResult
+    private func sendContext(_ draft: FT8OperatorContextDraft, notice: String?) -> Bool {
+        guard let id = session.selectedOperatorId else {
+            session.errorMessage = "请先选择操作员"
+            return false
+        }
+        do {
+            radio.setOperatorContext(try draft.commandContext(), operatorId: id)
+            contextDirty = false
+            if let notice { session.noticeMessage = notice }
+            return true
+        } catch {
+            session.errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     private func enqueue(startIfIdle: Bool) {
