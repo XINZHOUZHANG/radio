@@ -395,9 +395,9 @@ struct SpectrumPanelView: View {
     private func localControlDisabled(_ control: SpectrumSessionControl) -> Bool {
         guard control.kind == .local, control.id == .viewportZoom else { return false }
         switch control.action {
-        case .zoomIn: localZoom >= 16
-        case .zoomOut: localZoom <= 1
-        case .toggle: false
+        case .zoomIn: return localZoom >= 16
+        case .zoomOut: return localZoom <= 1
+        case .toggle: return false
         }
     }
 
