@@ -15,6 +15,7 @@ enum TX5DRSessionError: LocalizedError {
     case invalidFrequency
     case operatorRequired
     case adminRequired
+    case rigctldPermissionRequired
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +24,7 @@ enum TX5DRSessionError: LocalizedError {
         case .invalidFrequency: "请输入有效的 MHz 频率"
         case .operatorRequired: "请先选择一个操作员"
         case .adminRequired: "此操作需要管理员账户"
+        case .rigctldPermissionRequired: "当前账户没有 Rigctld 桥管理权限"
         }
     }
 }
@@ -56,6 +58,7 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var cwDecoderBackends: [CWDecoderBackendDescriptor] = []
     @Published private(set) var pskReporterConfig: PSKReporterConfig?
     @Published private(set) var pskReporterStatus: PSKReporterStatus?
+    @Published private(set) var rigctldStatus: RigctldStatus?
     @Published private(set) var openWebRXStations: [OpenWebRXStation] = []
     @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
     @Published private(set) var isVoicePTTHeld = false
@@ -87,6 +90,13 @@ final class TX5DRSession: ObservableObject {
     }
 
     var isAdmin: Bool { currentUser?.role == .admin }
+
+    var canManageRigctld: Bool {
+        if isAdmin { return true }
+        return currentUser?.permissionGrants?.contains {
+            $0["permission"]?.stringValue == "rigctld:bridge"
+        } == true
+    }
 
     var selectedOperator: RadioOperatorConfig? {
         guard let selectedOperatorId else { return nil }
@@ -208,6 +218,7 @@ final class TX5DRSession: ObservableObject {
         cwDecoderBackends = []
         pskReporterConfig = nil
         pskReporterStatus = nil
+        rigctldStatus = nil
         openWebRXStations = []
         openWebRXListenStatus = nil
         selectedOperatorId = nil
@@ -803,6 +814,36 @@ final class TX5DRSession: ObservableObject {
             pskReporterConfig = try await apiClient.pskReporterConfig()
             pskReporterStatus = try await apiClient.pskReporterStatus()
         }
+    }
+
+    func loadRigctldStatus(reportErrors: Bool = true) async {
+        guard let apiClient else { return }
+        do {
+            rigctldStatus = try await apiClient.rigctldStatus()
+        } catch {
+            if reportErrors { fail(error) }
+        }
+    }
+
+    func applyRigctldSnapshot(_ status: RigctldStatus) {
+        rigctldStatus = status
+    }
+
+    func updateRigctld(_ config: RigctldBridgeConfig) async -> Bool {
+        guard canManageRigctld else {
+            fail(TX5DRSessionError.rigctldPermissionRequired)
+            return false
+        }
+        guard let apiClient else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "Rigctld 桥配置已保存") {
+            rigctldStatus = try await apiClient.updateRigctldConfig(config)
+            updated = true
+        }
+        return updated
     }
 
     func loadQSOs(callsign: String? = nil) async {

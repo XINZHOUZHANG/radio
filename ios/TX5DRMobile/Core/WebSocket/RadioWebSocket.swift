@@ -73,6 +73,7 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var cwDecoderError: String?
     @Published private(set) var operatorStatuses: [String: JSONValue] = [:]
     @Published private(set) var systemStatus: JSONValue?
+    @Published private(set) var rigctldStatus: RigctldStatus?
     @Published private(set) var radioStatus: JSONValue?
     @Published private(set) var audioStatus: JSONValue?
     @Published private(set) var tunerStatus: JSONValue?
@@ -536,7 +537,10 @@ final class RadioWebSocket: ObservableObject {
                     return id.map { ($0, value) }
                 })
             }
-        case "systemStatus", "bootstrapStatusChanged", "clockStatusChanged", "rigctldStatus":
+        case "systemStatus", "bootstrapStatusChanged", "clockStatusChanged":
+            systemStatus = envelope.data
+        case "rigctldStatus":
+            rigctldStatus = decode(envelope.data)
             systemStatus = envelope.data
         case "radioPowerState":
             radioPowerState = decode(envelope.data)

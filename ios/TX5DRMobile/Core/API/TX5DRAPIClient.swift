@@ -502,6 +502,14 @@ actor TX5DRAPIClient {
         guard response.success else { throw TX5DRAPIError.invalidResponse }
     }
 
+    func rigctldStatus() async throws -> RigctldStatus {
+        try await request(.get, "/rigctld/status")
+    }
+
+    func updateRigctldConfig(_ config: RigctldBridgeConfig) async throws -> RigctldStatus {
+        try await request(.put, "/rigctld/config", body: config)
+    }
+
     func logbooks() async throws -> [LogbookInfo] {
         let response: LogbookListResponse = try await request(.get, "/logbooks")
         return response.data

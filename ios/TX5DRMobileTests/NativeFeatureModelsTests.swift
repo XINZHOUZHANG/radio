@@ -533,4 +533,49 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertNil(object?["stats"])
         XCTAssertNil(object?["decodingSoftware"])
     }
+
+    func testRigctldStatusDecodesListenerAndClients() throws {
+        let data = Data(#"""
+        {
+          "config": {
+            "enabled": true,
+            "bindAddress": "0.0.0.0",
+            "port": 4532,
+            "readOnly": true
+          },
+          "running": true,
+          "address": {"host": "0.0.0.0", "port": 4532},
+          "clients": [{
+            "id": 7,
+            "peer": "100.64.0.8:51822",
+            "connectedAt": 1720000000000,
+            "lastCommand": "\\get_freq",
+            "lastCommandAt": 1720000005000
+          }]
+        }
+        """#.utf8)
+
+        let status = try JSONDecoder().decode(RigctldStatus.self, from: data)
+
+        XCTAssertTrue(status.running)
+        XCTAssertTrue(status.config.readOnly)
+        XCTAssertEqual(status.address?.port, 4532)
+        XCTAssertEqual(status.clients.first?.id, 7)
+        XCTAssertEqual(status.clients.first?.lastCommand, "\\get_freq")
+    }
+
+    func testRigctldWriteControlConfigurationEncodesContractShape() throws {
+        let config = RigctldBridgeConfig(
+            enabled: true,
+            bindAddress: "127.0.0.1",
+            port: 4532,
+            readOnly: false
+        )
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config)) as? [String: Any]
+
+        XCTAssertEqual(object?["enabled"] as? Bool, true)
+        XCTAssertEqual(object?["bindAddress"] as? String, "127.0.0.1")
+        XCTAssertEqual(object?["port"] as? Int, 4532)
+        XCTAssertEqual(object?["readOnly"] as? Bool, false)
+    }
 }

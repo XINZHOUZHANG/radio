@@ -1048,6 +1048,34 @@ struct PSKReporterStatus: Codable, Equatable, Sendable {
     let lastError: String?
 }
 
+struct RigctldBridgeConfig: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let bindAddress: String
+    let port: Int
+    let readOnly: Bool
+}
+
+struct RigctldListenAddress: Codable, Equatable, Sendable {
+    let host: String
+    let port: Int
+}
+
+struct RigctldClientSnapshot: Codable, Equatable, Identifiable, Sendable {
+    let id: Int
+    let peer: String
+    let connectedAt: Double
+    let lastCommand: String?
+    let lastCommandAt: Double?
+}
+
+struct RigctldStatus: Codable, Equatable, Sendable {
+    let config: RigctldBridgeConfig
+    let running: Bool
+    let address: RigctldListenAddress?
+    let clients: [RigctldClientSnapshot]
+    let error: String?
+}
+
 struct OpenWebRXProfileCoverage: Codable, Equatable, Sendable {
     let profileId: String
     let profileName: String

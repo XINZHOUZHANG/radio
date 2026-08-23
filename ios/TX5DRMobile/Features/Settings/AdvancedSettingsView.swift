@@ -24,7 +24,6 @@ private struct SettingsEndpoint: Identifiable, Hashable {
         .init(title: "远程访问安全", subtitle: "来源、连接限制与公开访问", loadPath: "/auth/remote-access", savePath: "/auth/remote-access", saveMethod: .patch, adminOnly: true),
         .init(title: "可观测性", subtitle: "遥测与诊断选项", loadPath: "/settings/observability", savePath: "/settings/observability", saveMethod: .put, adminOnly: true),
         .init(title: "服务端日志", subtitle: "日志级别和模块开关", loadPath: "/system/logging", savePath: "/system/logging", saveMethod: .put, adminOnly: true),
-        .init(title: "Rigctld 状态", subtitle: "Hamlib 桥当前状态", loadPath: "/rigctld/status", savePath: nil, saveMethod: .get, adminOnly: true),
         .init(title: "发射音频统计", subtitle: "PTT 上行各阶段诊断", loadPath: "/realtime/tx-stats", savePath: nil, saveMethod: .get, adminOnly: false),
         .init(title: "系统网络", subtitle: "服务端接口和地址", loadPath: "/system/network-info", savePath: nil, saveMethod: .get, adminOnly: true),
         .init(title: "系统时钟", subtitle: "时钟同步状态", loadPath: "/system/clock", savePath: nil, saveMethod: .get, adminOnly: true),
@@ -46,6 +45,16 @@ struct AdvancedSettingsView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("PSK Reporter")
                         Text("上报身份、运行状态与统计")
+                            .font(.caption)
+                            .foregroundStyle(RadioPalette.muted)
+                    }
+                }
+                NavigationLink {
+                    RigctldBridgeSettingsView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Rigctld 桥")
+                        Text("Hamlib TCP 监听、权限与客户端")
                             .font(.caption)
                             .foregroundStyle(RadioPalette.muted)
                     }
