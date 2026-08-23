@@ -46,11 +46,17 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec ios/TX5DRMobile/project.yml
       - name: Build and run XCTest
-        run: >-
-          xcodebuild test
-          -project ios/TX5DRMobile/TX5DRMobile.xcodeproj
-          -scheme TX5DRMobile
-          -sdk iphonesimulator
-          -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
-          CODE_SIGNING_ALLOWED=NO
-          CODE_SIGNING_REQUIRED=NO
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
+            -scheme TX5DRMobile \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee xcodebuild.log
+      - name: Publish Swift compiler diagnostics
+        if: failure()
+        run: python3 scripts/annotate-xcodebuild.py xcodebuild.log
