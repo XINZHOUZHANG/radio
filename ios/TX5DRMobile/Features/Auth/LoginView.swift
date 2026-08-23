@@ -160,9 +160,9 @@ struct LoginView: View {
     private var canSubmit: Bool {
         guard !session.serverAddress.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         switch method {
-        case .account: !username.isEmpty && !password.isEmpty
-        case .pairing: pairingCode.count == 6
-        case .token: !token.isEmpty
+        case .account: return !username.isEmpty && !password.isEmpty
+        case .pairing: return pairingCode.count == 6
+        case .token: return !token.isEmpty
         }
     }
 

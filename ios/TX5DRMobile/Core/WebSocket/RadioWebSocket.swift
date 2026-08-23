@@ -303,7 +303,7 @@ final class RadioWebSocket: ObservableObject {
     }
 
     func playCWMessage(callsign: String, slotId: String, repeatPlayback: Bool = false, operatorId: String) {
-        var payload: [String: JSONValue] = [
+        let payload: [String: JSONValue] = [
             "callsign": .string(callsign),
             "slotId": .string(slotId),
             "operatorId": .string(operatorId),

@@ -174,78 +174,10 @@ private struct LogbookMaintenanceView: View {
 
     var body: some View {
         List {
-            Section("健康与统计") {
-                if let detail {
-                    LabeledContent("状态", value: detail.health.state)
-                    LabeledContent("QSO", value: String(detail.statistics.totalQSOs))
-                    LabeledContent("唯一呼号", value: String(detail.statistics.uniqueCallsigns))
-                    LabeledContent("操作员", value: String(detail.statistics.totalOperators))
-                    if let first = detail.statistics.firstQSO { LabeledContent("首次 QSO", value: first) }
-                    if let last = detail.statistics.lastQSO { LabeledContent("最近 QSO", value: last) }
-                } else {
-                    ProgressView("读取统计")
-                }
-            }
-
-            Section("操作员连接") {
-                ForEach(session.operators) { radioOperator in
-                    let connected = detail?.connectedOperators.contains(radioOperator.id) == true
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(radioOperator.myCallsign)
-                            Text(radioOperator.id)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(RadioPalette.muted)
-                        }
-                        Spacer()
-                        if connected {
-                            Button("断开", role: .destructive) {
-                                Task { await session.disconnectOperatorFromLogbook(radioOperator.id) }
-                            }
-                        } else {
-                            Button("连接") {
-                                Task { await session.connectOperator(radioOperator.id, to: logbookId) }
-                            }
-                        }
-                    }
-                    .disabled(!session.isAdmin)
-                }
-            }
-
-            Section("导入与导出") {
-                Button { showingImporter = true } label: {
-                    Label("导入 ADIF / CSV", systemImage: "square.and.arrow.down")
-                }
-                Button { export(format: "adif") } label: {
-                    Label("导出 ADIF", systemImage: "square.and.arrow.up")
-                }
-                Button { export(format: "csv") } label: {
-                    Label("导出 CSV", systemImage: "tablecells")
-                }
-            }
-
-            Section("服务端备份") {
-                if let backup {
-                    LabeledContent("修订", value: backup.revision)
-                    LabeledContent("待写入", value: String(backup.pendingMutations))
-                    if let latest = backup.latest {
-                        LabeledContent("最新备份", value: latestDate(latest.createdAt))
-                        LabeledContent("大小", value: ByteCountFormatter.string(fromByteCount: Int64(latest.size), countStyle: .file))
-                    }
-                    Button { Task { await session.createLogbookBackup(id: logbookId) } } label: {
-                        Label("立即创建备份", systemImage: "externaldrive.badge.plus")
-                    }
-                    .disabled(!backup.capabilities.canCreate)
-                    Button { downloadBackup() } label: {
-                        Label("下载最新备份", systemImage: "externaldrive.badge.icloud")
-                    }
-                    .disabled(!backup.capabilities.canDownload)
-                } else {
-                    ProgressView("读取备份状态")
-                }
-            } footer: {
-                Text("恢复备份会覆盖日志本，原生恢复流程将在展示预检差异并二次确认后才允许执行。")
-            }
+            healthSection
+            operatorsSection
+            transferSection
+            backupSection
         }
         .scrollContentBackground(.hidden)
         .background(RadioPalette.background.ignoresSafeArea())
@@ -274,6 +206,102 @@ private struct LogbookMaintenanceView: View {
             Button("好") { fileError = nil }
         } message: {
             Text(fileError ?? "未知错误")
+        }
+    }
+
+    @ViewBuilder
+    private var healthSection: some View {
+        Section("健康与统计") {
+            if let detail {
+                LabeledContent("状态", value: detail.health.state)
+                LabeledContent("QSO", value: String(detail.statistics.totalQSOs))
+                LabeledContent("唯一呼号", value: String(detail.statistics.uniqueCallsigns))
+                LabeledContent("操作员", value: String(detail.statistics.totalOperators))
+                if let first = detail.statistics.firstQSO {
+                    LabeledContent("首次 QSO", value: first)
+                }
+                if let last = detail.statistics.lastQSO {
+                    LabeledContent("最近 QSO", value: last)
+                }
+            } else {
+                ProgressView("读取统计")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var operatorsSection: some View {
+        Section("操作员连接") {
+            ForEach(session.operators) { radioOperator in
+                operatorRow(radioOperator)
+            }
+        }
+    }
+
+    private func operatorRow(_ radioOperator: RadioOperatorConfig) -> some View {
+        let connected = detail?.connectedOperators.contains(radioOperator.id) == true
+        return HStack {
+            VStack(alignment: .leading) {
+                Text(radioOperator.myCallsign)
+                Text(radioOperator.id)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(RadioPalette.muted)
+            }
+            Spacer()
+            if connected {
+                Button("断开", role: .destructive) {
+                    Task { await session.disconnectOperatorFromLogbook(radioOperator.id) }
+                }
+            } else {
+                Button("连接") {
+                    Task { await session.connectOperator(radioOperator.id, to: logbookId) }
+                }
+            }
+        }
+        .disabled(!session.isAdmin)
+    }
+
+    @ViewBuilder
+    private var transferSection: some View {
+        Section("导入与导出") {
+            Button { showingImporter = true } label: {
+                Label("导入 ADIF / CSV", systemImage: "square.and.arrow.down")
+            }
+            Button { export(format: "adif") } label: {
+                Label("导出 ADIF", systemImage: "square.and.arrow.up")
+            }
+            Button { export(format: "csv") } label: {
+                Label("导出 CSV", systemImage: "tablecells")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var backupSection: some View {
+        Section("服务端备份") {
+            if let backup {
+                LabeledContent("修订", value: backup.revision)
+                LabeledContent("待写入", value: String(backup.pendingMutations))
+                if let latest = backup.latest {
+                    LabeledContent("最新备份", value: latestDate(latest.createdAt))
+                    LabeledContent(
+                        "大小",
+                        value: ByteCountFormatter.string(fromByteCount: Int64(latest.size), countStyle: .file)
+                    )
+                }
+                Button { Task { await session.createLogbookBackup(id: logbookId) } } label: {
+                    Label("立即创建备份", systemImage: "externaldrive.badge.plus")
+                }
+                .disabled(!backup.capabilities.canCreate)
+                Button { downloadBackup() } label: {
+                    Label("下载最新备份", systemImage: "externaldrive.badge.icloud")
+                }
+                .disabled(!backup.capabilities.canDownload)
+            } else {
+                ProgressView("读取备份状态")
+            }
+        } footer: {
+            Text("恢复备份会覆盖日志本，原生恢复流程将在展示预检差异并二次确认后才允许执行。")
         }
     }
 
