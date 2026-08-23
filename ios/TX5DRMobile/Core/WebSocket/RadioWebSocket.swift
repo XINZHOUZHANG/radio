@@ -748,11 +748,11 @@ final class RadioWebSocket: ObservableObject {
             let limit = data?["limit"]?.intValue
             if let current, let limit { return "服务器连接数已满（\(current)/\(limit)）" }
             return "服务器连接数已满"
-        case "origin_not_allowed": "服务器拒绝了此客户端来源"
-        case "authentication_timeout": "WebSocket 认证超时"
-        case "handshake_timeout": "客户端握手超时"
-        case "ip_limit_reached": "当前地址的连接数已达到上限"
-        default: "服务器拒绝访问：\(reason)"
+        case "origin_not_allowed": return "服务器拒绝了此客户端来源"
+        case "authentication_timeout": return "WebSocket 认证超时"
+        case "handshake_timeout": return "客户端握手超时"
+        case "ip_limit_reached": return "当前地址的连接数已达到上限"
+        default: return "服务器拒绝访问：\(reason)"
         }
     }
 
