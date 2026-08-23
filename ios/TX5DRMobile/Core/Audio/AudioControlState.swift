@@ -26,9 +26,11 @@ struct AudioMonitorGateState: Equatable, Sendable {
         let voiceKeyerIsTransmitting = voiceLock?["locked"]?.boolValue == true
             && voiceLock?["lockedBy"]?.stringValue?.hasPrefix("voice-keyer:") == true
 
-        if voiceMode && !voiceKeyerIsTransmitting && (ptt.isTransmitting || localVoicePTTHeld) {
+        if !voiceMode || voiceKeyerIsTransmitting {
+            muteReason = nil
+        } else if ptt.isTransmitting || localVoicePTTHeld {
             muteReason = .transmitting
-        } else if voiceMode && squelch.supported && squelch.open == false {
+        } else if squelch.supported && squelch.open == false {
             muteReason = .squelchClosed
         } else {
             muteReason = nil
