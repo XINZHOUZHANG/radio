@@ -469,6 +469,39 @@ actor TX5DRAPIClient {
         try await request(.post, "/cw/decoder/clear")
     }
 
+    func pskReporterConfig() async throws -> PSKReporterConfig {
+        let response: DataResponse<PSKReporterConfig> = try await request(.get, "/pskreporter/config")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func updatePSKReporterConfig(_ update: PSKReporterConfigUpdate) async throws -> PSKReporterConfig {
+        let response: DataResponse<PSKReporterConfig> = try await request(
+            .put,
+            "/pskreporter/config",
+            body: update
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func pskReporterStatus() async throws -> PSKReporterStatus {
+        let response: DataResponse<PSKReporterStatus> = try await request(.get, "/pskreporter/status")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func sendPendingPSKReporterSpots() async throws -> PSKReporterStatus {
+        let response: DataResponse<PSKReporterStatus> = try await request(.post, "/pskreporter/report")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.data
+    }
+
+    func resetPSKReporterStats() async throws {
+        let response: GenericSuccessResponse = try await request(.post, "/pskreporter/reset-stats")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
     func logbooks() async throws -> [LogbookInfo] {
         let response: LogbookListResponse = try await request(.get, "/logbooks")
         return response.data

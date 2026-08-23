@@ -466,4 +466,71 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(result.profileName, "40 m")
         XCTAssertFalse(result.success)
     }
+
+    func testPSKReporterConfigAndStatusDecodeTX5DRContract() throws {
+        let configData = Data(#"""
+        {
+          "success": true,
+          "data": {
+            "enabled": true,
+            "receiverCallsign": "BG2TEST",
+            "receiverLocator": "PN35AA",
+            "decodingSoftware": "TX-5DR",
+            "antennaInformation": "EFHW",
+            "reportIntervalSeconds": 30,
+            "useTestServer": false,
+            "stats": {
+              "lastReportTime": 1720000000000,
+              "todayReportCount": 12,
+              "totalReportCount": 345,
+              "lastError": null,
+              "consecutiveFailures": 0
+            }
+          }
+        }
+        """#.utf8)
+        let statusData = Data(#"""
+        {
+          "success": true,
+          "data": {
+            "enabled": true,
+            "configValid": true,
+            "activeCallsign": "BG2TEST",
+            "activeLocator": "PN35AA",
+            "pendingSpots": 4,
+            "lastReportTime": 1720000000000,
+            "nextReportIn": 18,
+            "isReporting": false,
+            "lastError": null
+          }
+        }
+        """#.utf8)
+
+        let config = try JSONDecoder().decode(DataResponse<PSKReporterConfig>.self, from: configData).data
+        let status = try JSONDecoder().decode(DataResponse<PSKReporterStatus>.self, from: statusData).data
+
+        XCTAssertEqual(config.stats.todayReportCount, 12)
+        XCTAssertEqual(config.reportIntervalSeconds, 30)
+        XCTAssertEqual(status.pendingSpots, 4)
+        XCTAssertEqual(status.nextReportIn, 18)
+        XCTAssertTrue(status.configValid)
+    }
+
+    func testPSKReporterUpdateSendsOnlyEditableContractFields() throws {
+        let update = PSKReporterConfigUpdate(
+            enabled: true,
+            receiverCallsign: "BG2TEST",
+            receiverLocator: "PN35AA",
+            antennaInformation: "EFHW",
+            reportIntervalSeconds: 15,
+            useTestServer: true
+        )
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(update)) as? [String: Any]
+
+        XCTAssertEqual(object?["enabled"] as? Bool, true)
+        XCTAssertEqual(object?["reportIntervalSeconds"] as? Int, 15)
+        XCTAssertEqual(object?["useTestServer"] as? Bool, true)
+        XCTAssertNil(object?["stats"])
+        XCTAssertNil(object?["decodingSoftware"])
+    }
 }

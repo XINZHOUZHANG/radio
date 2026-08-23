@@ -18,7 +18,6 @@ private struct SettingsEndpoint: Identifiable, Hashable {
         .init(title: "语音", subtitle: "语音 PTT 与音频配置", loadPath: "/voice/config", savePath: "/voice/config", saveMethod: .post, adminOnly: false),
         .init(title: "CW 键控", subtitle: "键速、音调和硬件键控", loadPath: "/cw/config", savePath: "/cw/config", saveMethod: .put, adminOnly: false),
         .init(title: "CW 解码器", subtitle: "解码后端和调谐参数", loadPath: "/cw/decoder/config", savePath: "/cw/decoder/config", saveMethod: .put, adminOnly: false),
-        .init(title: "PSK Reporter", subtitle: "上报与统计配置", loadPath: "/pskreporter/config", savePath: "/pskreporter/config", saveMethod: .put, adminOnly: false),
         .init(title: "实时音频", subtitle: "传输策略与公网 UDP 入口", loadPath: "/settings/realtime", savePath: "/settings/realtime", saveMethod: .put, adminOnly: true),
         .init(title: "音频设备", subtitle: "输入、输出和采样配置", loadPath: "/audio/settings", savePath: "/audio/settings", saveMethod: .post, adminOnly: true),
         .init(title: "电台 / Hamlib", subtitle: "电台型号、串口或 rigctld", loadPath: "/radio/config", savePath: "/radio/config", saveMethod: .post, adminOnly: true),
@@ -41,6 +40,16 @@ struct AdvancedSettingsView: View {
     var body: some View {
         List {
             Section {
+                NavigationLink {
+                    PSKReporterSettingsView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("PSK Reporter")
+                        Text("上报身份、运行状态与统计")
+                            .font(.caption)
+                            .foregroundStyle(RadioPalette.muted)
+                    }
+                }
                 ForEach(visibleEndpoints) { endpoint in
                     NavigationLink {
                         JSONSettingsEditorView(endpoint: endpoint)

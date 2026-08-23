@@ -1008,6 +1008,46 @@ struct SpectrumHistoryBuffer: Equatable, Sendable {
     }
 }
 
+struct PSKReporterStats: Codable, Equatable, Sendable {
+    let lastReportTime: Double?
+    let todayReportCount: Int
+    let totalReportCount: Int
+    let lastError: String?
+    let consecutiveFailures: Int
+}
+
+struct PSKReporterConfig: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let receiverCallsign: String
+    let receiverLocator: String
+    let decodingSoftware: String
+    let antennaInformation: String
+    let reportIntervalSeconds: Int
+    let useTestServer: Bool
+    let stats: PSKReporterStats
+}
+
+struct PSKReporterConfigUpdate: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let receiverCallsign: String
+    let receiverLocator: String
+    let antennaInformation: String
+    let reportIntervalSeconds: Int
+    let useTestServer: Bool
+}
+
+struct PSKReporterStatus: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let configValid: Bool
+    let activeCallsign: String?
+    let activeLocator: String?
+    let pendingSpots: Int
+    let lastReportTime: Double?
+    let nextReportIn: Int?
+    let isReporting: Bool
+    let lastError: String?
+}
+
 struct OpenWebRXProfileCoverage: Codable, Equatable, Sendable {
     let profileId: String
     let profileName: String

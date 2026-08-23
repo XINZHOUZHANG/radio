@@ -54,6 +54,8 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var cwKeyerConfig: CWKeyerConfig?
     @Published private(set) var cwDecoderConfig: CWDecoderConfig?
     @Published private(set) var cwDecoderBackends: [CWDecoderBackendDescriptor] = []
+    @Published private(set) var pskReporterConfig: PSKReporterConfig?
+    @Published private(set) var pskReporterStatus: PSKReporterStatus?
     @Published private(set) var openWebRXStations: [OpenWebRXStation] = []
     @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
     @Published private(set) var isVoicePTTHeld = false
@@ -204,6 +206,8 @@ final class TX5DRSession: ObservableObject {
         cwKeyerConfig = nil
         cwDecoderConfig = nil
         cwDecoderBackends = []
+        pskReporterConfig = nil
+        pskReporterStatus = nil
         openWebRXStations = []
         openWebRXListenStatus = nil
         selectedOperatorId = nil
@@ -748,6 +752,56 @@ final class TX5DRSession: ObservableObject {
             self.cwDecoderConfig = response.config
             self.radio.applyCWDecoderSnapshot(response.status)
             self.radio.clearCWDecoderTranscript()
+        }
+    }
+
+    func loadPSKReporter() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        do {
+            pskReporterConfig = try await apiClient.pskReporterConfig()
+            pskReporterStatus = try await apiClient.pskReporterStatus()
+        } catch {
+            fail(error)
+        }
+    }
+
+    func refreshPSKReporterStatus(reportErrors: Bool = false) async {
+        guard let apiClient else { return }
+        do {
+            pskReporterStatus = try await apiClient.pskReporterStatus()
+        } catch {
+            if reportErrors { fail(error) }
+        }
+    }
+
+    func updatePSKReporter(_ update: PSKReporterConfigUpdate) async -> Bool {
+        guard let apiClient else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "PSK Reporter 配置已保存") {
+            pskReporterConfig = try await apiClient.updatePSKReporterConfig(update)
+            pskReporterStatus = try await apiClient.pskReporterStatus()
+            updated = true
+        }
+        return updated
+    }
+
+    func sendPendingPSKReporterSpots() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "PSK Reporter 上报已触发") {
+            pskReporterStatus = try await apiClient.sendPendingPSKReporterSpots()
+            pskReporterConfig = try await apiClient.pskReporterConfig()
+        }
+    }
+
+    func resetPSKReporterStats() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "PSK Reporter 统计已重置") {
+            try await apiClient.resetPSKReporterStats()
+            pskReporterConfig = try await apiClient.pskReporterConfig()
+            pskReporterStatus = try await apiClient.pskReporterStatus()
         }
     }
 
