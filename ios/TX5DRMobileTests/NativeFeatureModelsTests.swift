@@ -385,4 +385,85 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(history.rows.map(\.timestamp), [5])
         XCTAssertEqual(history.kind, .radioSDR)
     }
+
+    func testOpenWebRXStationAndListenStatusDecodeTX5DRContract() throws {
+        let stationsData = Data(#"""
+        {
+          "stations": [{
+            "id": "sdr-1",
+            "name": "Public SDR",
+            "url": "wss://sdr.example.test/ws/",
+            "description": "20 metre receiver",
+            "profileCoverages": [{
+              "profileId": "rtl|20m",
+              "profileName": "20 m",
+              "centerFreq": 14100000,
+              "sampRate": 2400000,
+              "lastUpdated": 1720000000000
+            }]
+          }]
+        }
+        """#.utf8)
+        let listenData = Data(#"""
+        {
+          "success": true,
+          "status": {
+            "previewSessionId": "preview-1",
+            "stationId": "sdr-1",
+            "connected": true,
+            "serverVersion": "1.2.3",
+            "profiles": [{"id":"rtl|20m","name":"20 m"}],
+            "currentProfileId": "rtl|20m",
+            "centerFreq": 14100000,
+            "sampleRate": 2400000,
+            "frequency": 14074000,
+            "modulation": "usb",
+            "smeterDb": -61.5,
+            "isListening": true
+          }
+        }
+        """#.utf8)
+
+        let stations = try JSONDecoder().decode(OpenWebRXStationListResponse.self, from: stationsData)
+        let listen = try JSONDecoder().decode(OpenWebRXListenStartResponse.self, from: listenData)
+
+        XCTAssertEqual(stations.stations.first?.profileCoverages?.first?.sampRate, 2_400_000)
+        XCTAssertEqual(listen.status.previewSessionId, "preview-1")
+        XCTAssertEqual(listen.status.currentProfileId, "rtl|20m")
+        XCTAssertEqual(listen.status.smeterDb, -61.5)
+        XCTAssertTrue(listen.status.isListening)
+    }
+
+    func testOpenWebRXProfileSelectionEventsDecodeTX5DRContract() throws {
+        let requestData = Data(#"""
+        {
+          "requestId": "request-1",
+          "targetFrequency": 14074000,
+          "profiles": [
+            {"id":"rtl|20m","name":"20 m"},
+            {"id":"rtl|40m","name":"40 m"}
+          ],
+          "currentProfileId": "rtl|40m"
+        }
+        """#.utf8)
+        let resultData = Data(#"""
+        {
+          "requestId": "request-1",
+          "success": false,
+          "profileId": "rtl|40m",
+          "profileName": "40 m",
+          "centerFreq": 7100000,
+          "sampRate": 2400000,
+          "error": "target_out_of_range"
+        }
+        """#.utf8)
+
+        let request = try JSONDecoder().decode(OpenWebRXProfileSelectRequest.self, from: requestData)
+        let result = try JSONDecoder().decode(OpenWebRXProfileVerifyResult.self, from: resultData)
+
+        XCTAssertEqual(request.id, "request-1")
+        XCTAssertEqual(request.profiles.count, 2)
+        XCTAssertEqual(result.profileName, "40 m")
+        XCTAssertFalse(result.success)
+    }
 }

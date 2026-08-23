@@ -595,10 +595,91 @@ actor TX5DRAPIClient {
         let _: GenericSuccessResponse = try await request(.delete, "/logbooks/\(logbookId)/qsos/\(qsoId)")
     }
 
-    func realtimeSession(direction: String) async throws -> RealtimeTransportOffer {
+    func openWebRXStations() async throws -> [OpenWebRXStation] {
+        let response: OpenWebRXStationListResponse = try await request(.get, "/openwebrx/stations")
+        return response.stations
+    }
+
+    func addOpenWebRXStation(name: String, url: String, description: String?) async throws -> OpenWebRXStation {
+        struct Body: Encodable {
+            let name: String
+            let url: String
+            let description: String?
+        }
+        let response: OpenWebRXStationActionResponse = try await request(
+            .post,
+            "/openwebrx/stations",
+            body: Body(name: name, url: url, description: description)
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.station
+    }
+
+    func updateOpenWebRXStation(id: String, name: String, url: String, description: String?) async throws {
+        struct Body: Encodable {
+            let name: String
+            let url: String
+            let description: String?
+        }
+        let response: GenericSuccessResponse = try await request(
+            .put,
+            "/openwebrx/stations/\(pathSegment(id))",
+            body: Body(name: name, url: url, description: description)
+        )
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func deleteOpenWebRXStation(id: String) async throws {
+        let response: GenericSuccessResponse = try await request(
+            .delete,
+            "/openwebrx/stations/\(pathSegment(id))"
+        )
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func testOpenWebRX(url: String) async throws -> OpenWebRXTestResult {
+        struct Body: Encodable { let url: String }
+        return try await request(.post, "/openwebrx/test-url", body: Body(url: url))
+    }
+
+    func startOpenWebRXListen(_ options: OpenWebRXListenStart) async throws -> OpenWebRXListenStatus {
+        let response: OpenWebRXListenStartResponse = try await request(
+            .post,
+            "/openwebrx/listen/start",
+            body: options
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+        return response.status
+    }
+
+    func stopOpenWebRXListen() async throws {
+        let response: GenericSuccessResponse = try await request(.post, "/openwebrx/listen/stop")
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func tuneOpenWebRXListen(_ options: OpenWebRXListenTune) async throws {
+        let response: GenericSuccessResponse = try await request(
+            .post,
+            "/openwebrx/listen/tune",
+            body: options
+        )
+        if !response.success { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func openWebRXListenStatus() async throws -> OpenWebRXListenStatus? {
+        let response: OpenWebRXListenStatusResponse = try await request(.get, "/openwebrx/listen/status")
+        return response.status
+    }
+
+    func realtimeSession(
+        scope: String = "radio",
+        direction: String,
+        previewSessionId: String? = nil
+    ) async throws -> RealtimeTransportOffer {
         let body = RealtimeSessionRequest(
-            scope: "radio",
+            scope: scope,
             direction: direction,
+            previewSessionId: previewSessionId,
             transportOverride: "ws-compat",
             audioCodecPreference: "pcm",
             audioCodecCapabilities: .init(pcmS16le: true)

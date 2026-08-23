@@ -97,7 +97,7 @@ final class TX5DRAudioClient: ObservableObject {
         self.apiClient = apiClient
     }
 
-    func startListening() async throws {
+    func startListening(scope: String = "radio", previewSessionId: String? = nil) async throws {
         if listeningState == .streaming || listeningState == .ready || listeningState == .connecting { return }
         guard let server, let apiClient else { throw TX5DRAudioError.notConfigured }
 
@@ -109,7 +109,16 @@ final class TX5DRAudioClient: ObservableObject {
 
         do {
             try configureAudioSession()
-            let offer = try await apiClient.realtimeSession(direction: "recv")
+            let offer: RealtimeTransportOffer
+            if scope == "radio", previewSessionId == nil {
+                offer = try await apiClient.realtimeSession(direction: "recv")
+            } else {
+                offer = try await apiClient.realtimeSession(
+                    scope: scope,
+                    direction: "recv",
+                    previewSessionId: previewSessionId
+                )
+            }
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
             let socket = urlSession.webSocketTask(with: url)
             downlinkSocket = socket

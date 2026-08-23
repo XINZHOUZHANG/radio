@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var session: TX5DRSession
+    @EnvironmentObject private var radio: RadioWebSocket
 
     var body: some View {
         Group {
@@ -35,15 +36,25 @@ struct RootView: View {
             message: { Text(session.errorMessage ?? "未知错误") }
         )
         .overlay(alignment: .top) {
-            if let notice = session.noticeMessage {
+            if let notice = session.noticeMessage ?? radio.lastNotice {
                 NoticeBanner(text: notice) {
-                    session.noticeMessage = nil
+                    if session.noticeMessage != nil {
+                        session.noticeMessage = nil
+                    } else {
+                        radio.dismissLastNotice()
+                    }
                 }
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.snappy, value: session.noticeMessage)
+        .animation(.snappy, value: session.noticeMessage ?? radio.lastNotice)
+        .sheet(item: Binding(
+            get: { radio.openWebRXProfileRequest },
+            set: { if $0 == nil { radio.dismissOpenWebRXProfileRequest() } }
+        )) { request in
+            OpenWebRXProfileSelectionView(request: request)
+        }
     }
 
     private var launchView: some View {

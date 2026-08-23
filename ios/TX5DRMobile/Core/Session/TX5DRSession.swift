@@ -54,6 +54,8 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var cwKeyerConfig: CWKeyerConfig?
     @Published private(set) var cwDecoderConfig: CWDecoderConfig?
     @Published private(set) var cwDecoderBackends: [CWDecoderBackendDescriptor] = []
+    @Published private(set) var openWebRXStations: [OpenWebRXStation] = []
+    @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
     @Published private(set) var isVoicePTTHeld = false
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
@@ -61,6 +63,7 @@ final class TX5DRSession: ObservableObject {
 
     let radio = RadioWebSocket()
     let audio = TX5DRAudioClient()
+    let openWebRXAudio = TX5DRAudioClient()
 
     private let tokenStore = KeychainTokenStore()
     private var apiClient: TX5DRAPIClient?
@@ -176,6 +179,7 @@ final class TX5DRSession: ObservableObject {
     func logout() {
         endVoicePTT()
         audio.stopAll()
+        openWebRXAudio.stopAll()
         radio.disconnect()
         try? tokenStore.delete()
         apiClient = nil
@@ -200,6 +204,8 @@ final class TX5DRSession: ObservableObject {
         cwKeyerConfig = nil
         cwDecoderConfig = nil
         cwDecoderBackends = []
+        openWebRXStations = []
+        openWebRXListenStatus = nil
         selectedOperatorId = nil
         selectedLogbookId = nil
         phase = .signedOut
@@ -234,6 +240,9 @@ final class TX5DRSession: ObservableObject {
         if isAdmin {
             do { accounts = try await apiClient.accounts() }
             catch { recordNonfatal("读取账户失败", error: error) }
+
+            do { openWebRXStations = try await apiClient.openWebRXStations() }
+            catch { recordNonfatal("读取 OpenWebRX 站点失败", error: error) }
         }
     }
 
@@ -892,6 +901,181 @@ final class TX5DRSession: ObservableObject {
         catch { fail(error) }
     }
 
+    func refreshOpenWebRXStations() async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        do {
+            openWebRXStations = try await apiClient.openWebRXStations()
+        } catch {
+            fail(error)
+        }
+    }
+
+    func addOpenWebRXStation(name: String, url: String, description: String?) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        var created = false
+        await performOperation(success: "OpenWebRX 站点已添加") {
+            _ = try await apiClient.addOpenWebRXStation(name: name, url: url, description: description)
+            openWebRXStations = try await apiClient.openWebRXStations()
+            created = true
+        }
+        return created
+    }
+
+    func updateOpenWebRXStation(
+        id: String,
+        name: String,
+        url: String,
+        description: String?
+    ) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "OpenWebRX 站点已更新") {
+            try await apiClient.updateOpenWebRXStation(
+                id: id,
+                name: name,
+                url: url,
+                description: description
+            )
+            openWebRXStations = try await apiClient.openWebRXStations()
+            updated = true
+        }
+        return updated
+    }
+
+    func deleteOpenWebRXStation(_ station: OpenWebRXStation) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        if openWebRXListenStatus?.stationId == station.id {
+            await stopOpenWebRXListen()
+        }
+        await performOperation(success: "OpenWebRX 站点已删除") {
+            try await apiClient.deleteOpenWebRXStation(id: station.id)
+            openWebRXStations.removeAll { $0.id == station.id }
+        }
+    }
+
+    func testOpenWebRX(url: String) async -> OpenWebRXTestResult? {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return nil
+        }
+        do {
+            return try await apiClient.testOpenWebRX(url: url)
+        } catch {
+            fail(error)
+            return nil
+        }
+    }
+
+    func startOpenWebRXListen(
+        stationId: String,
+        profileId: String,
+        frequency: Double?,
+        modulation: String
+    ) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        isWorking = true
+        errorMessage = nil
+        defer { isWorking = false }
+        do {
+            openWebRXAudio.stopListening()
+            let status = try await apiClient.startOpenWebRXListen(.init(
+                stationId: stationId,
+                profileId: profileId,
+                frequency: frequency,
+                modulation: modulation
+            ))
+            openWebRXListenStatus = status
+            try await openWebRXAudio.startListening(
+                scope: "openwebrx-preview",
+                previewSessionId: status.previewSessionId
+            )
+            noticeMessage = "OpenWebRX 试听已启动"
+            return true
+        } catch {
+            openWebRXAudio.stopListening()
+            try? await apiClient.stopOpenWebRXListen()
+            openWebRXListenStatus = nil
+            fail(error)
+            return false
+        }
+    }
+
+    func tuneOpenWebRXListen(
+        profileId: String?,
+        frequency: Double?,
+        modulation: String?,
+        bandpassLow: Double? = nil,
+        bandpassHigh: Double? = nil
+    ) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        var tuned = false
+        await performOperation(success: "OpenWebRX 调谐已应用") {
+            try await apiClient.tuneOpenWebRXListen(.init(
+                profileId: profileId,
+                frequency: frequency,
+                modulation: modulation,
+                bandpassLow: bandpassLow,
+                bandpassHigh: bandpassHigh
+            ))
+            openWebRXListenStatus = try await apiClient.openWebRXListenStatus()
+            tuned = true
+        }
+        return tuned
+    }
+
+    func refreshOpenWebRXListenStatus() async {
+        guard isAdmin, let apiClient else { return }
+        do {
+            openWebRXListenStatus = try await apiClient.openWebRXListenStatus()
+            if openWebRXListenStatus?.isListening != true {
+                openWebRXAudio.stopListening()
+            }
+        } catch {
+            recordNonfatal("读取 OpenWebRX 试听状态失败", error: error)
+        }
+    }
+
+    func connectOpenWebRXPreviewAudio() async -> Bool {
+        guard let status = openWebRXListenStatus, status.isListening else {
+            fail(TX5DRAPIError.invalidResponse)
+            return false
+        }
+        do {
+            try await openWebRXAudio.startListening(
+                scope: "openwebrx-preview",
+                previewSessionId: status.previewSessionId
+            )
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    func stopOpenWebRXListen() async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        openWebRXAudio.stopListening()
+        do {
+            try await apiClient.stopOpenWebRXListen()
+            openWebRXListenStatus = nil
+            noticeMessage = "OpenWebRX 试听已停止"
+        } catch {
+            fail(error)
+        }
+    }
+
     func createAccount(
         label: String,
         username: String,
@@ -1000,6 +1184,7 @@ final class TX5DRSession: ObservableObject {
         try tokenStore.save(jwt)
 
         audio.configure(server: server, apiClient: client)
+        openWebRXAudio.configure(server: server, apiClient: client)
         await refreshPrimaryData()
         let enabledOperators: [String]? = user.role == .admin ? nil : user.operatorIds
         radio.configure(

@@ -55,6 +55,11 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var spectrumSubscription: SpectrumSubscriptionChange?
     @Published private(set) var spectrumSessionState: SpectrumSessionState?
     @Published private(set) var spectrumSelectionIsAutomatic = true
+    @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
+    @Published private(set) var openWebRXProfileRequest: OpenWebRXProfileSelectRequest?
+    @Published private(set) var openWebRXProfileVerifyResult: OpenWebRXProfileVerifyResult?
+    @Published private(set) var openWebRXClientCount = 0
+    @Published private(set) var openWebRXCooldownUntil: Date?
     @Published private(set) var capabilityDescriptors: [CapabilityDescriptor] = []
     @Published private(set) var capabilities: [String: CapabilityState] = [:]
     @Published private(set) var lastNotice: String?
@@ -209,6 +214,25 @@ final class RadioWebSocket: ObservableObject {
     func clearSpectrumHistory() {
         spectrumHistoryBuffer.reset()
         publishSpectrumHistory()
+    }
+
+    func respondToOpenWebRXProfileRequest(profileId: String) {
+        guard let request = openWebRXProfileRequest else { return }
+        openWebRXProfileVerifyResult = nil
+        send("openwebrxProfileSelectResponse", data: .object([
+            "requestId": .string(request.requestId),
+            "profileId": .string(profileId),
+            "targetFrequency": .number(request.targetFrequency),
+        ]))
+    }
+
+    func dismissOpenWebRXProfileRequest() {
+        openWebRXProfileRequest = nil
+        openWebRXProfileVerifyResult = nil
+    }
+
+    func dismissLastNotice() {
+        lastNotice = nil
     }
 
     func invokeSpectrumControl(id: SpectrumSessionControlID, action: SpectrumSessionControlAction) {
@@ -480,6 +504,19 @@ final class RadioWebSocket: ObservableObject {
             if let value: SpectrumSessionState = decode(envelope.data) {
                 spectrumSessionState = value
             }
+        case "openwebrxListenStatus":
+            openWebRXListenStatus = decode(envelope.data)
+        case "openwebrxProfileSelectRequest":
+            openWebRXProfileRequest = decode(envelope.data)
+            openWebRXProfileVerifyResult = nil
+        case "openwebrxProfileVerifyResult":
+            openWebRXProfileVerifyResult = decode(envelope.data)
+        case "openwebrxClientCount":
+            openWebRXClientCount = envelope.data?["count"]?.intValue ?? 0
+        case "openwebrxCooldownNotice":
+            let waitMs = envelope.data?["waitMs"]?.doubleValue ?? 0
+            openWebRXCooldownUntil = Date().addingTimeInterval(max(0, waitMs) / 1_000)
+            lastNotice = "OpenWebRX 正在等待服务器冷却（约 \(Int(ceil(waitMs / 1_000))) 秒）"
         case "radioCapabilityList":
             if let list: CapabilityList = decode(envelope.data) {
                 capabilityDescriptors = list.descriptors
@@ -629,6 +666,11 @@ final class RadioWebSocket: ObservableObject {
         spectrumSessionState = nil
         spectrumSelectionIsAutomatic = true
         clearSpectrumHistory()
+        openWebRXListenStatus = nil
+        openWebRXProfileRequest = nil
+        openWebRXProfileVerifyResult = nil
+        openWebRXClientCount = 0
+        openWebRXCooldownUntil = nil
     }
 
     private func spectrumPreferenceKey(profileId: String?) -> String {

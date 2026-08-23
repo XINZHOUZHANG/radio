@@ -69,6 +69,11 @@ struct SettingsView: View {
                     } label: {
                         Label("账户与 6 位配对", systemImage: "person.2.badge.gearshape")
                     }
+                    NavigationLink {
+                        OpenWebRXSettingsView()
+                    } label: {
+                        Label("OpenWebRX 站点与试听", systemImage: "dot.radiowaves.left.and.right")
+                    }
                 }
             }
 

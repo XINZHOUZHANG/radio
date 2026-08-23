@@ -1008,9 +1008,106 @@ struct SpectrumHistoryBuffer: Equatable, Sendable {
     }
 }
 
+struct OpenWebRXProfileCoverage: Codable, Equatable, Sendable {
+    let profileId: String
+    let profileName: String
+    let centerFreq: Double
+    let sampRate: Double
+    let lastUpdated: Double
+}
+
+struct OpenWebRXStation: Codable, Equatable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let url: String
+    let description: String?
+    let profileCoverages: [OpenWebRXProfileCoverage]?
+}
+
+struct OpenWebRXProfile: Codable, Equatable, Identifiable, Sendable {
+    let id: String
+    let name: String
+}
+
+struct OpenWebRXTestResult: Codable, Equatable, Sendable {
+    let success: Bool
+    let serverVersion: String?
+    let profiles: [OpenWebRXProfile]?
+    let error: String?
+}
+
+struct OpenWebRXListenStatus: Codable, Equatable, Sendable {
+    let previewSessionId: String?
+    let stationId: String
+    let connected: Bool
+    let serverVersion: String?
+    let profiles: [OpenWebRXProfile]
+    let currentProfileId: String?
+    let centerFreq: Double?
+    let sampleRate: Double?
+    let frequency: Double?
+    let modulation: String?
+    let smeterDb: Double?
+    let isListening: Bool
+    let error: String?
+}
+
+struct OpenWebRXListenStart: Codable, Sendable {
+    let stationId: String
+    let profileId: String?
+    let frequency: Double?
+    let modulation: String?
+}
+
+struct OpenWebRXListenTune: Codable, Sendable {
+    let profileId: String?
+    let frequency: Double?
+    let modulation: String?
+    let bandpassLow: Double?
+    let bandpassHigh: Double?
+}
+
+struct OpenWebRXProfileSelectRequest: Codable, Equatable, Identifiable, Sendable {
+    let requestId: String
+    let targetFrequency: Double
+    let profiles: [OpenWebRXProfile]
+    let currentProfileId: String?
+
+    var id: String { requestId }
+}
+
+struct OpenWebRXProfileVerifyResult: Codable, Equatable, Sendable {
+    let requestId: String
+    let success: Bool
+    let profileId: String
+    let profileName: String?
+    let centerFreq: Double?
+    let sampRate: Double?
+    let error: String?
+}
+
+struct OpenWebRXStationListResponse: Codable, Sendable {
+    let stations: [OpenWebRXStation]
+}
+
+struct OpenWebRXStationActionResponse: Codable, Sendable {
+    let success: Bool
+    let station: OpenWebRXStation
+}
+
+struct OpenWebRXListenStartResponse: Codable, Sendable {
+    let success: Bool
+    let status: OpenWebRXListenStatus
+}
+
+struct OpenWebRXListenStatusResponse: Codable, Sendable {
+    let status: OpenWebRXListenStatus?
+}
+
 struct RealtimeSessionRequest: Codable, Sendable {
     let scope: String
     let direction: String
+    let previewSessionId: String?
     let transportOverride: String
     let audioCodecPreference: String
     let audioCodecCapabilities: AudioCodecCapabilities
