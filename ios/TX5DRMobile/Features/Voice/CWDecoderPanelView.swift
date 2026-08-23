@@ -94,7 +94,7 @@ struct CWDecoderPanelView: View {
             ScrollView {
                 Text(transcriptText)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(RadioPalette.text)
+                    .foregroundStyle(Color.primary)
                     .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .textSelection(.enabled)
             }
