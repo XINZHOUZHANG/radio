@@ -84,6 +84,10 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var voiceKeyerStatus: JSONValue?
     @Published private(set) var voiceRadioMode: JSONValue?
     @Published private(set) var pluginList: JSONValue?
+    @Published private(set) var pluginSnapshot: TX5DRPluginSystemSnapshot?
+    @Published private(set) var pluginPanelData: [String: JSONValue] = [:]
+    @Published private(set) var pluginLogs: [TX5DRPluginLogEntry] = []
+    @Published private(set) var pluginRuntimeLogs: [TX5DRPluginRuntimeLogEntry] = []
     @Published private(set) var latestEvents: [String: JSONValue] = [:]
 
     var onLogbookEvent: ((LogbookRealtimeEvent) -> Void)?
@@ -120,6 +124,7 @@ final class RadioWebSocket: ObservableObject {
         if self.server != server {
             resetSpectrumState()
             resetLiveControlState()
+            resetPluginState()
             transmissionInterruption = nil
             transmitGainDecibels = -10
         }
@@ -160,6 +165,7 @@ final class RadioWebSocket: ObservableObject {
         task = nil
         resetSpectrumState()
         resetLiveControlState()
+        resetPluginState()
         state = .disconnected
     }
 
@@ -418,6 +424,32 @@ final class RadioWebSocket: ObservableObject {
 
     func stopCWMessage() { send("cwStopMessage") }
 
+    func invokePluginAction(
+        pluginName: String,
+        actionId: String,
+        operatorId: String? = nil,
+        payload: JSONValue? = nil
+    ) {
+        var data: [String: JSONValue] = [
+            "pluginName": .string(pluginName),
+            "actionId": .string(actionId),
+        ]
+        if let operatorId { data["operatorId"] = .string(operatorId) }
+        if let payload { data["payload"] = payload }
+        send("pluginUserAction", data: .object(data))
+    }
+
+    func requestPluginRuntimeLogHistory(limit: Int = 500) {
+        send("getPluginRuntimeLogHistory", data: .object([
+            "limit": .number(Double(min(5_000, max(1, limit)))),
+        ]))
+    }
+
+    func clearPluginLogs() {
+        pluginLogs = []
+        pluginRuntimeLogs = []
+    }
+
     /// Escape hatch for TX-5DR commands added after this app version. Authentication
     /// and the server handshake are still enforced before a command is emitted.
     func sendCommand(_ type: String, data: JSONValue? = nil, id: String? = nil) {
@@ -450,6 +482,7 @@ final class RadioWebSocket: ObservableObject {
             heartbeatTask = nil
             resetSpectrumState()
             resetLiveControlState()
+            resetPluginState()
             if shouldReconnect {
                 state = .failed(error.localizedDescription)
                 scheduleReconnect()
@@ -614,8 +647,34 @@ final class RadioWebSocket: ObservableObject {
             cwDecoderStatus = envelope.data
             handleCWDecoderEvent(envelope.data)
             cwStatus = envelope.data
-        case "pluginList", "pluginStatusChanged", "pluginPanelMeta", "pluginPanelContributionsChanged":
+        case "pluginList":
             pluginList = envelope.data
+            pluginSnapshot = decode(envelope.data)
+        case "pluginStatusChanged":
+            pluginList = envelope.data
+            if let change: TX5DRPluginStatusChange = decode(envelope.data) {
+                mergePluginStatus(change)
+            }
+        case "pluginData":
+            if let payload: TX5DRPluginDataPayload = decode(envelope.data) {
+                pluginPanelData[payload.key] = payload.data
+            }
+        case "pluginLog":
+            if let entry: TX5DRPluginLogEntry = decode(envelope.data) {
+                pluginLogs.append(entry)
+                if pluginLogs.count > 500 { pluginLogs.removeFirst(pluginLogs.count - 500) }
+            }
+        case "pluginRuntimeLog":
+            if let entry: TX5DRPluginRuntimeLogEntry = decode(envelope.data) {
+                pluginRuntimeLogs.append(entry)
+                if pluginRuntimeLogs.count > 500 { pluginRuntimeLogs.removeFirst(pluginRuntimeLogs.count - 500) }
+            }
+        case "pluginRuntimeLogHistory":
+            applyPluginLogHistory(envelope.data)
+        case "pluginPanelMeta", "pluginPanelContributionsChanged":
+            pluginList = envelope.data
+        case "pluginPagePush":
+            break
         case "textMessage", "error", "radioError":
             lastNotice = envelope.data?["text"]?.stringValue
                 ?? envelope.data?["message"]?.stringValue
@@ -631,6 +690,40 @@ final class RadioWebSocket: ObservableObject {
         var seen = Set<String>()
         merged = merged.filter { seen.insert($0.id).inserted }
         decodedFrames = Array(merged.prefix(200))
+    }
+
+    private func mergePluginStatus(_ change: TX5DRPluginStatusChange) {
+        guard let snapshot = pluginSnapshot else { return }
+        var plugins = snapshot.plugins
+        if let index = plugins.firstIndex(where: { $0.name == change.plugin.name }) {
+            plugins[index] = change.plugin
+        } else {
+            plugins.append(change.plugin)
+        }
+        pluginSnapshot = TX5DRPluginSystemSnapshot(
+            state: snapshot.state,
+            generation: change.generation,
+            plugins: plugins.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending },
+            panelMeta: snapshot.panelMeta,
+            panelContributions: snapshot.panelContributions,
+            lastError: snapshot.lastError
+        )
+    }
+
+    private func applyPluginLogHistory(_ payload: JSONValue?) {
+        guard let entries = payload?["entries"]?.arrayValue else { return }
+        var pluginEntries: [TX5DRPluginLogEntry] = []
+        var runtimeEntries: [TX5DRPluginRuntimeLogEntry] = []
+        for entry in entries {
+            if entry["source"]?.stringValue == "system",
+               let decoded: TX5DRPluginRuntimeLogEntry = decode(entry) {
+                runtimeEntries.append(decoded)
+            } else if let decoded: TX5DRPluginLogEntry = decode(entry) {
+                pluginEntries.append(decoded)
+            }
+        }
+        pluginLogs = Array(pluginEntries.suffix(500))
+        pluginRuntimeLogs = Array(runtimeEntries.suffix(500))
     }
 
     private func applySpectrumCapabilities(_ value: SpectrumCapabilities) {
@@ -747,6 +840,12 @@ final class RadioWebSocket: ObservableObject {
         )
         meters = nil
         voiceLock = nil
+    }
+
+    private func resetPluginState() {
+        pluginList = nil
+        pluginSnapshot = nil
+        pluginPanelData = [:]
     }
 
     private func applyVolumeGain(_ payload: JSONValue?) {

@@ -58,6 +58,26 @@ final class TX5DRServerTests: XCTestCase {
         XCTAssertEqual(components.queryItems?.first { $0.name == "mode" }?.value, "pcm")
     }
 
+    func testBuildsAuthenticatedPluginPageURL() throws {
+        let server = try TX5DRServer(address: "https://radio.example/tx5dr")
+        let url = try server.pluginPageURL(
+            pluginName: "log-sync",
+            pageId: "settings",
+            params: ["operatorId": "operator 1", "callsign": "BG2XYZ"],
+            token: "jwt+token",
+            locale: "zh-Hant",
+            theme: "dark"
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(components.path, "/tx5dr/api/plugins/log-sync/ui/settings.html")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "auth_token" }?.value, "jwt+token")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "operatorId" }?.value, "operator 1")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "callsign" }?.value, "BG2XYZ")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "_locale" }?.value, "zh-Hant")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "_theme" }?.value, "dark")
+    }
+
     func testRejectsUnsupportedOrMissingAddresses() {
         XCTAssertThrowsError(try TX5DRServer(address: ""))
         XCTAssertThrowsError(try TX5DRServer(address: "ftp://radio.example"))

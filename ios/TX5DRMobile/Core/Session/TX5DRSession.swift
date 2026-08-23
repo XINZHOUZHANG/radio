@@ -59,6 +59,10 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var pskReporterConfig: PSKReporterConfig?
     @Published private(set) var pskReporterStatus: PSKReporterStatus?
     @Published private(set) var rigctldStatus: RigctldStatus?
+    @Published private(set) var pluginSnapshot: TX5DRPluginSystemSnapshot?
+    @Published private(set) var pluginRuntimeInfo: TX5DRPluginRuntimeInfo?
+    @Published private(set) var pluginMarketCatalog: TX5DRPluginMarketCatalogResponse?
+    @Published private(set) var pluginOperatorStates: [String: TX5DRPluginOperatorState] = [:]
     @Published private(set) var openWebRXStations: [OpenWebRXStation] = []
     @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
     @Published private(set) var isVoicePTTHeld = false
@@ -230,6 +234,10 @@ final class TX5DRSession: ObservableObject {
         pskReporterConfig = nil
         pskReporterStatus = nil
         rigctldStatus = nil
+        pluginSnapshot = nil
+        pluginRuntimeInfo = nil
+        pluginMarketCatalog = nil
+        pluginOperatorStates = [:]
         openWebRXStations = []
         openWebRXListenStatus = nil
         selectedOperatorId = nil
@@ -263,6 +271,9 @@ final class TX5DRSession: ObservableObject {
                 selectedLogbookId = logbooks.first(where: \.isActive)?.id ?? logbooks.first?.id
             }
         } catch { recordNonfatal("读取日志本失败", error: error) }
+
+        do { pluginSnapshot = try await apiClient.pluginSnapshot() }
+        catch { recordNonfatal("读取插件状态失败", error: error) }
 
         syncLogbookSocket()
 
@@ -832,6 +843,227 @@ final class TX5DRSession: ObservableObject {
             pskReporterConfig = try await apiClient.pskReporterConfig()
             pskReporterStatus = try await apiClient.pskReporterStatus()
         }
+    }
+
+    func loadPluginCenter(channel: String = "stable") async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        isWorking = true
+        defer { isWorking = false }
+
+        do { pluginSnapshot = try await apiClient.pluginSnapshot() }
+        catch { recordNonfatal("读取插件状态失败", error: error) }
+
+        do { pluginMarketCatalog = try await apiClient.pluginMarketCatalog(channel: channel) }
+        catch { recordNonfatal("读取插件市场失败", error: error) }
+
+        if isAdmin {
+            do { pluginRuntimeInfo = try await apiClient.pluginRuntimeInfo() }
+            catch { recordNonfatal("读取插件运行目录失败", error: error) }
+        }
+
+        if let selectedOperatorId {
+            do { pluginOperatorStates[selectedOperatorId] = try await apiClient.pluginOperatorState(operatorId: selectedOperatorId) }
+            catch { recordNonfatal("读取操作员插件状态失败", error: error) }
+        }
+    }
+
+    func refreshPlugins(reportErrors: Bool = true) async {
+        guard let apiClient else { return }
+        do {
+            pluginSnapshot = try await apiClient.pluginSnapshot()
+            if let selectedOperatorId {
+                pluginOperatorStates[selectedOperatorId] = try await apiClient.pluginOperatorState(
+                    operatorId: selectedOperatorId
+                )
+            }
+        } catch {
+            if reportErrors { fail(error) }
+        }
+    }
+
+    func reloadAllPlugins() async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "全部插件已重新加载") {
+            try await apiClient.reloadPlugins()
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func rescanPlugins() async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "插件目录已重新扫描") {
+            try await apiClient.rescanPlugins()
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func reloadPlugin(name: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "插件 \(name) 已重新加载") {
+            try await apiClient.reloadPlugin(name: name)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func setPluginEnabled(name: String, enabled: Bool) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: enabled ? "插件已启用" : "插件已停用") {
+            try await apiClient.setPluginEnabled(name: name, enabled: enabled)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func loadPluginSettings(name: String, operatorId: String? = nil) async throws -> [String: JSONValue] {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        if let operatorId {
+            return try await apiClient.pluginOperatorSettings(name: name, operatorId: operatorId)
+        }
+        return try await apiClient.pluginSettings(name: name)
+    }
+
+    func savePluginSettings(
+        name: String,
+        operatorId: String? = nil,
+        settings: [String: JSONValue]
+    ) async -> Bool {
+        guard let apiClient else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        if operatorId == nil && !isAdmin {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+
+        var saved = false
+        await performOperation(success: "插件设置已保存") {
+            if let operatorId {
+                try await apiClient.updatePluginOperatorSettings(
+                    name: name,
+                    operatorId: operatorId,
+                    settings: settings
+                )
+                self.pluginOperatorStates[operatorId] = try await apiClient.pluginOperatorState(
+                    operatorId: operatorId
+                )
+            } else {
+                try await apiClient.updatePluginSettings(name: name, settings: settings)
+            }
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+            saved = true
+        }
+        return saved
+    }
+
+    func setPluginPaused(name: String, operatorId: String, paused: Bool) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: paused ? "操作员插件已暂停" : "操作员插件已恢复") {
+            _ = try await apiClient.setPluginPaused(name: name, operatorId: operatorId, paused: paused)
+            self.pluginOperatorStates[operatorId] = try await apiClient.pluginOperatorState(operatorId: operatorId)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func setAllTransmitControlPluginsPaused(operatorId: String, paused: Bool) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: paused ? "发射控制插件已全部暂停" : "发射控制插件已全部恢复") {
+            _ = try await apiClient.setAllTransmitControlPluginsPaused(operatorId: operatorId, paused: paused)
+            self.pluginOperatorStates[operatorId] = try await apiClient.pluginOperatorState(operatorId: operatorId)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func setPluginStrategy(operatorId: String, pluginName: String) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "操作员策略插件已切换") {
+            try await apiClient.setPluginStrategy(operatorId: operatorId, pluginName: pluginName)
+            self.pluginOperatorStates[operatorId] = try await apiClient.pluginOperatorState(operatorId: operatorId)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+        }
+    }
+
+    func loadPluginMarket(channel: String) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        do { pluginMarketCatalog = try await apiClient.pluginMarketCatalog(channel: channel) }
+        catch { fail(error) }
+    }
+
+    func installPlugin(name: String, channel: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "插件 \(name) 已安装") {
+            _ = try await apiClient.installPlugin(name: name, channel: channel)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+            self.pluginMarketCatalog = try await apiClient.pluginMarketCatalog(channel: channel)
+        }
+    }
+
+    func updatePlugin(name: String, channel: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "插件 \(name) 已更新") {
+            _ = try await apiClient.updatePlugin(name: name, channel: channel)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+            self.pluginMarketCatalog = try await apiClient.pluginMarketCatalog(channel: channel)
+        }
+    }
+
+    func uninstallPlugin(name: String, channel: String) async {
+        guard isAdmin, let apiClient else { return fail(TX5DRSessionError.adminRequired) }
+        await performOperation(success: "插件 \(name) 已卸载") {
+            _ = try await apiClient.uninstallPlugin(name: name)
+            self.pluginSnapshot = try await apiClient.pluginSnapshot()
+            self.pluginMarketCatalog = try await apiClient.pluginMarketCatalog(channel: channel)
+        }
+    }
+
+    func pluginPageConfiguration(
+        plugin: TX5DRPluginStatus,
+        page: TX5DRPluginUIPage,
+        params: [String: String],
+        locale: String,
+        theme: String
+    ) throws -> TX5DRPluginPageConfiguration {
+        guard let server, let jwt else { throw TX5DRSessionError.notConnected }
+
+        var resolvedParams = params
+        let requiresOperator = (plugin.instanceScope ?? "operator") == "operator"
+            || page.resourceBinding == "operator"
+        if requiresOperator {
+            guard let selectedOperatorId else { throw TX5DRSessionError.operatorRequired }
+            resolvedParams["operatorId"] = selectedOperatorId
+        } else if let selectedOperatorId {
+            resolvedParams["operatorId"] = selectedOperatorId
+        }
+
+        if page.resourceBinding == "callsign" {
+            guard let keyerCallsign else { throw TX5DRSessionError.operatorRequired }
+            resolvedParams["callsign"] = keyerCallsign
+        }
+
+        return TX5DRPluginPageConfiguration(
+            pageURL: try server.pluginPageURL(
+                pluginName: plugin.name,
+                pageId: page.id,
+                params: resolvedParams,
+                token: jwt,
+                locale: locale,
+                theme: theme
+            ),
+            serverBaseURL: server.baseURL,
+            pluginName: plugin.name,
+            pageId: page.id,
+            params: resolvedParams,
+            locale: locale,
+            theme: theme
+        )
+    }
+
+    func performPluginPageRequest(
+        pluginName: String,
+        endpoint: TX5DRPluginPageEndpoint,
+        body: JSONValue
+    ) async throws -> JSONValue? {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.pluginPageRequest(name: pluginName, endpoint: endpoint, body: body)
     }
 
     func loadRigctldStatus(reportErrors: Bool = true) async {

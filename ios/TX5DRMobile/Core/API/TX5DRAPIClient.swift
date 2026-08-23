@@ -502,6 +502,181 @@ actor TX5DRAPIClient {
         guard response.success else { throw TX5DRAPIError.invalidResponse }
     }
 
+    func pluginSnapshot() async throws -> TX5DRPluginSystemSnapshot {
+        try await request(.get, "/plugins")
+    }
+
+    func pluginRuntimeInfo() async throws -> TX5DRPluginRuntimeInfo {
+        try await request(.get, "/plugins/runtime-info")
+    }
+
+    func setPluginEnabled(name: String, enabled: Bool) async throws {
+        if enabled {
+            let response: GenericSuccessResponse = try await request(
+                .post,
+                "/plugins/\(pathSegment(name))/enable"
+            )
+            guard response.success else { throw TX5DRAPIError.invalidResponse }
+        } else {
+            let response: GenericSuccessResponse = try await request(
+                .post,
+                "/plugins/\(pathSegment(name))/disable"
+            )
+            guard response.success else { throw TX5DRAPIError.invalidResponse }
+        }
+    }
+
+    func reloadPlugins() async throws {
+        let response: GenericSuccessResponse = try await request(.post, "/plugins/reload")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func rescanPlugins() async throws {
+        let response: GenericSuccessResponse = try await request(.post, "/plugins/rescan")
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func reloadPlugin(name: String) async throws {
+        let response: GenericSuccessResponse = try await request(
+            .post,
+            "/plugins/\(pathSegment(name))/reload"
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func pluginSettings(name: String) async throws -> [String: JSONValue] {
+        let response: TX5DRPluginSettingsResponse = try await request(
+            .get,
+            "/plugins/\(pathSegment(name))/settings"
+        )
+        return response.settings
+    }
+
+    func updatePluginSettings(name: String, settings: [String: JSONValue]) async throws {
+        struct Body: Encodable { let settings: [String: JSONValue] }
+        let response: GenericSuccessResponse = try await request(
+            .put,
+            "/plugins/\(pathSegment(name))/settings",
+            body: Body(settings: settings)
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func pluginOperatorState(operatorId: String) async throws -> TX5DRPluginOperatorState {
+        try await request(.get, "/plugins/operators/\(pathSegment(operatorId))")
+    }
+
+    func pluginOperatorSettings(name: String, operatorId: String) async throws -> [String: JSONValue] {
+        let response: TX5DRPluginSettingsResponse = try await request(
+            .get,
+            "/plugins/\(pathSegment(name))/operator/\(pathSegment(operatorId))/settings"
+        )
+        return response.settings
+    }
+
+    func updatePluginOperatorSettings(
+        name: String,
+        operatorId: String,
+        settings: [String: JSONValue]
+    ) async throws {
+        struct Body: Encodable { let settings: [String: JSONValue] }
+        let response: GenericSuccessResponse = try await request(
+            .put,
+            "/plugins/\(pathSegment(name))/operator/\(pathSegment(operatorId))/settings",
+            body: Body(settings: settings)
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func setPluginPaused(name: String, operatorId: String, paused: Bool) async throws -> TX5DRPluginPauseResponse {
+        struct Body: Encodable { let paused: Bool }
+        return try await request(
+            .put,
+            "/plugins/\(pathSegment(name))/operator/\(pathSegment(operatorId))/pause",
+            body: Body(paused: paused)
+        )
+    }
+
+    func setAllTransmitControlPluginsPaused(
+        operatorId: String,
+        paused: Bool
+    ) async throws -> TX5DRPluginPauseResponse {
+        if paused {
+            return try await request(
+                .post,
+                "/plugins/operators/\(pathSegment(operatorId))/transmit-control/pause-all"
+            )
+        }
+        return try await request(
+            .post,
+            "/plugins/operators/\(pathSegment(operatorId))/transmit-control/resume-all"
+        )
+    }
+
+    func setPluginStrategy(operatorId: String, pluginName: String) async throws {
+        struct Body: Encodable { let pluginName: String }
+        let response: GenericSuccessResponse = try await request(
+            .put,
+            "/plugins/operators/\(pathSegment(operatorId))/strategy",
+            body: Body(pluginName: pluginName)
+        )
+        guard response.success else { throw TX5DRAPIError.invalidResponse }
+    }
+
+    func pluginMarketCatalog(channel: String) async throws -> TX5DRPluginMarketCatalogResponse {
+        try await request(
+            .get,
+            "/plugins/market/catalog",
+            queryItems: [URLQueryItem(name: "channel", value: channel)]
+        )
+    }
+
+    func installPlugin(name: String, channel: String) async throws -> TX5DRPluginMarketInstallResult {
+        struct Body: Encodable { let channel: String }
+        return try await request(
+            .post,
+            "/plugins/market/\(pathSegment(name))/install",
+            body: Body(channel: channel)
+        )
+    }
+
+    func updatePlugin(name: String, channel: String) async throws -> TX5DRPluginMarketInstallResult {
+        struct Body: Encodable { let channel: String }
+        return try await request(
+            .post,
+            "/plugins/market/\(pathSegment(name))/update",
+            body: Body(channel: channel)
+        )
+    }
+
+    func uninstallPlugin(name: String) async throws -> TX5DRPluginMarketInstallResult {
+        try await request(.delete, "/plugins/market/\(pathSegment(name))")
+    }
+
+    func pluginPageRequest(
+        name: String,
+        endpoint: TX5DRPluginPageEndpoint,
+        body: JSONValue
+    ) async throws -> JSONValue? {
+        let envelope: JSONValue
+        switch endpoint {
+        case .invoke:
+            envelope = try await json(.post, "/plugins/\(pathSegment(name))/ui-invoke", body: body)
+        case .store:
+            envelope = try await json(.post, "/plugins/\(pathSegment(name))/ui-store", body: body)
+        case .files:
+            envelope = try await json(.post, "/plugins/\(pathSegment(name))/ui-files", body: body)
+        case .heartbeat:
+            envelope = try await json(.post, "/plugins/\(pathSegment(name))/ui-session/heartbeat", body: body)
+        case .pushes:
+            envelope = try await json(.post, "/plugins/\(pathSegment(name))/ui-session/pushes", body: body)
+        }
+        if let error = envelope["error"]?.stringValue, !error.isEmpty {
+            throw TX5DRPluginPageBridgeError.server(error)
+        }
+        return envelope["result"]
+    }
+
     func rigctldStatus() async throws -> RigctldStatus {
         try await request(.get, "/rigctld/status")
     }

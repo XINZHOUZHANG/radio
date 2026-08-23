@@ -60,6 +60,27 @@ struct TX5DRServer: Codable, Hashable, Sendable {
         return url
     }
 
+    func pluginPageURL(
+        pluginName: String,
+        pageId: String,
+        params: [String: String],
+        token: String,
+        locale: String,
+        theme: String
+    ) throws -> URL {
+        var values = params
+        values["auth_token"] = token
+        values["_locale"] = locale
+        values["_theme"] = theme
+        let queryItems = values.keys.sorted().map { key in
+            URLQueryItem(name: key, value: values[key])
+        }
+        return try apiURL(
+            "/plugins/\(pathSegment(pluginName))/ui/\(pathSegment(pageId)).html",
+            queryItems: queryItems
+        )
+    }
+
     func externalizedOfferURL(_ offeredURL: URL, token: String) throws -> URL {
         guard var components = URLComponents(url: offeredURL, resolvingAgainstBaseURL: false),
               let baseComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
@@ -76,5 +97,10 @@ struct TX5DRServer: Codable, Hashable, Sendable {
         components.queryItems = items
         guard let url = components.url else { throw TX5DRServerError.invalidAddress }
         return url
+    }
+
+    private func pathSegment(_ value: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }
 }

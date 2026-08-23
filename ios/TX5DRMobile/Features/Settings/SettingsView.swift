@@ -51,6 +51,11 @@ struct SettingsView: View {
                     Label("全部电台能力", systemImage: "slider.horizontal.3")
                 }
                 NavigationLink {
+                    PluginCenterView()
+                } label: {
+                    Label("插件中心与自动化", systemImage: "puzzlepiece.extension")
+                }
+                NavigationLink {
                     AdvancedSettingsView()
                 } label: {
                     Label("TX-5DR 服务端设置", systemImage: "server.rack")
