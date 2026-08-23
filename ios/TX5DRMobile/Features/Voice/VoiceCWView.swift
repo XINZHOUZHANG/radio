@@ -11,6 +11,7 @@ struct VoiceCWView: View {
     @EnvironmentObject private var radio: RadioWebSocket
     @EnvironmentObject private var audio: TX5DRAudioClient
     @State private var page: VoiceCWPage = .voice
+    @StateObject private var keyerAudio = VoiceKeyerAudioController()
 
     var body: some View {
         ScrollView {
@@ -28,10 +29,13 @@ struct VoiceCWView: View {
         .background(RadioPalette.background.ignoresSafeArea())
         .navigationTitle("语音 / CW")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: session.selectedOperatorId) { await session.loadKeyerPanels() }
         .onDisappear {
             session.endVoicePTT()
             radio.stopTuneTone()
             session.setCWKey(down: false)
+            keyerAudio.cancelRecording()
+            keyerAudio.stopPreview()
         }
     }
 
@@ -95,6 +99,8 @@ struct VoiceCWView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+
+            VoiceKeyerPanelView(audioController: keyerAudio)
         }
     }
 }
@@ -199,13 +205,15 @@ private struct CWPanel: View {
                         Button("停止") { radio.stopCWMessage() }
                             .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                     }
-                    Text(radio.cwStatus?.prettyPrinted ?? "等待服务端状态")
+                    Text(radio.cwKeyerStatus?.prettyPrinted ?? "等待服务端状态")
                         .font(.caption.monospaced())
                         .foregroundStyle(RadioPalette.muted)
                         .textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            CWKeyerManagementView()
         }
     }
 }

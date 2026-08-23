@@ -51,6 +51,8 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var lastNotice: String?
     @Published private(set) var voiceLock: JSONValue?
     @Published private(set) var cwStatus: JSONValue?
+    @Published private(set) var cwKeyerStatus: JSONValue?
+    @Published private(set) var cwDecoderStatus: JSONValue?
     @Published private(set) var operatorStatuses: [String: JSONValue] = [:]
     @Published private(set) var systemStatus: JSONValue?
     @Published private(set) var radioStatus: JSONValue?
@@ -58,6 +60,7 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var tunerStatus: JSONValue?
     @Published private(set) var radioPowerState: RadioPowerStateEvent?
     @Published private(set) var voiceKeyerStatus: JSONValue?
+    @Published private(set) var voiceRadioMode: JSONValue?
     @Published private(set) var pluginList: JSONValue?
     @Published private(set) var latestEvents: [String: JSONValue] = [:]
 
@@ -444,9 +447,15 @@ final class RadioWebSocket: ObservableObject {
             tunerStatus = envelope.data
         case "voicePttLockChanged":
             voiceLock = envelope.data
-        case "voiceKeyerStatusChanged", "voiceRadioModeChanged":
+        case "voiceKeyerStatusChanged":
             voiceKeyerStatus = envelope.data
-        case "cwKeyerStatus", "cwDecoderStatus", "cwDecoderEvent":
+        case "voiceRadioModeChanged":
+            voiceRadioMode = envelope.data
+        case "cwKeyerStatus":
+            cwKeyerStatus = envelope.data
+            cwStatus = envelope.data
+        case "cwDecoderStatus", "cwDecoderEvent":
+            cwDecoderStatus = envelope.data
             cwStatus = envelope.data
         case "pluginList", "pluginStatusChanged", "pluginPanelMeta", "pluginPanelContributionsChanged":
             pluginList = envelope.data

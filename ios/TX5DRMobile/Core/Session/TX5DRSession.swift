@@ -49,6 +49,9 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var accounts: [AuthTokenInfo] = []
     @Published private(set) var selectedOperatorId: String?
     @Published private(set) var selectedLogbookId: String?
+    @Published private(set) var voiceKeyerPanel: VoiceKeyerPanel?
+    @Published private(set) var cwMessagePanel: CWMessagePanel?
+    @Published private(set) var cwKeyerConfig: CWKeyerConfig?
     @Published private(set) var isVoicePTTHeld = false
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
@@ -81,6 +84,13 @@ final class TX5DRSession: ObservableObject {
     var selectedOperator: RadioOperatorConfig? {
         guard let selectedOperatorId else { return nil }
         return operators.first { $0.id == selectedOperatorId }
+    }
+
+    var keyerCallsign: String? {
+        guard let rawCallsign = selectedOperator?.myCallsign else { return nil }
+        let callsign = rawCallsign.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !callsign.isEmpty else { return nil }
+        return callsign
     }
 
     func probeLoginCapabilities() async {
@@ -181,6 +191,9 @@ final class TX5DRSession: ObservableObject {
         logbookBackups = [:]
         qsos = []
         accounts = []
+        voiceKeyerPanel = nil
+        cwMessagePanel = nil
+        cwKeyerConfig = nil
         selectedOperatorId = nil
         selectedLogbookId = nil
         phase = .signedOut
@@ -332,9 +345,12 @@ final class TX5DRSession: ObservableObject {
 
     func selectOperator(_ id: String?) {
         selectedOperatorId = id
+        voiceKeyerPanel = nil
+        cwMessagePanel = nil
         if let id { UserDefaults.standard.set(id, forKey: Self.operatorDefaultsKey) }
         else { UserDefaults.standard.removeObject(forKey: Self.operatorDefaultsKey) }
         radio.setSelectedOperator(id)
+        Task { await loadKeyerPanels() }
     }
 
     func createOperator(_ request: SaveRadioOperatorRequest) async -> Bool {
@@ -512,6 +528,149 @@ final class TX5DRSession: ObservableObject {
     func setCWKey(down: Bool) {
         guard let selectedOperatorId else { return fail(TX5DRSessionError.operatorRequired) }
         radio.setCWKey(down: down, operatorId: selectedOperatorId)
+    }
+
+    func loadKeyerPanels() async {
+        guard let apiClient, let callsign = keyerCallsign else {
+            voiceKeyerPanel = nil
+            cwMessagePanel = nil
+            cwKeyerConfig = nil
+            return
+        }
+
+        do { voiceKeyerPanel = try await apiClient.voiceKeyerPanel(callsign: callsign) }
+        catch { recordNonfatal("读取语音键控器失败", error: error) }
+
+        do { cwMessagePanel = try await apiClient.cwMessagePanel(callsign: callsign) }
+        catch { recordNonfatal("读取 CW 报文槽失败", error: error) }
+
+        do { cwKeyerConfig = try await apiClient.cwKeyerConfig() }
+        catch { recordNonfatal("读取 CW 键控配置失败", error: error) }
+    }
+
+    func updateVoiceKeyerSlotCount(_ slotCount: Int) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation(success: "语音槽位数量已更新") {
+            self.voiceKeyerPanel = try await apiClient.updateVoiceKeyerPanel(
+                callsign: callsign,
+                slotCount: slotCount
+            )
+        }
+    }
+
+    func updateVoiceKeyerSlot(_ slotId: String, update: VoiceKeyerSlotUpdate) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation {
+            self.voiceKeyerPanel = try await apiClient.updateVoiceKeyerSlot(
+                callsign: callsign,
+                slotId: slotId,
+                update: update
+            )
+        }
+    }
+
+    func uploadVoiceKeyerAudio(slotId: String, wavData: Data) async -> Bool {
+        guard let apiClient, let callsign = keyerCallsign else {
+            fail(TX5DRSessionError.operatorRequired)
+            return false
+        }
+        do {
+            isWorking = true
+            defer { isWorking = false }
+            voiceKeyerPanel = try await apiClient.uploadVoiceKeyerAudio(
+                callsign: callsign,
+                slotId: slotId,
+                wavData: wavData
+            )
+            noticeMessage = "语音录音已保存"
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    func downloadVoiceKeyerAudio(slotId: String) async throws -> Data {
+        guard let apiClient, let callsign = keyerCallsign else { throw TX5DRSessionError.operatorRequired }
+        return try await apiClient.voiceKeyerAudio(callsign: callsign, slotId: slotId)
+    }
+
+    func deleteVoiceKeyerAudio(slotId: String) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation(success: "语音录音已删除") {
+            self.voiceKeyerPanel = try await apiClient.deleteVoiceKeyerAudio(
+                callsign: callsign,
+                slotId: slotId
+            )
+        }
+    }
+
+    func playVoiceKeyerSlot(_ slot: VoiceKeyerSlot) {
+        guard let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        radio.playVoiceKeyer(
+            callsign: callsign,
+            slotId: slot.id,
+            repeatPlayback: slot.repeatEnabled,
+            operatorId: selectedOperatorId
+        )
+    }
+
+    func updateCWKeyerConfig(backend: CWKeyerBackend? = nil, wpm: Int? = nil) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "CW 键控配置已更新") {
+            self.cwKeyerConfig = try await apiClient.updateCWKeyerConfig(backend: backend, wpm: wpm)
+        }
+    }
+
+    func updateCWMessageSlotCount(_ slotCount: Int) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation(success: "CW 槽位数量已更新") {
+            self.cwMessagePanel = try await apiClient.updateCWMessagePanel(
+                callsign: callsign,
+                slotCount: slotCount
+            )
+        }
+    }
+
+    func updateCWMessageSlot(_ slotId: String, update: CWMessageSlotUpdate) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation {
+            self.cwMessagePanel = try await apiClient.updateCWMessageSlot(
+                callsign: callsign,
+                slotId: slotId,
+                update: update
+            )
+        }
+    }
+
+    func clearCWMessageSlot(_ slotId: String) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation(success: "CW 报文槽已清空") {
+            self.cwMessagePanel = try await apiClient.deleteCWMessageSlot(callsign: callsign, slotId: slotId)
+        }
+    }
+
+    func swapCWMessageSlots(_ firstSlotId: String, _ secondSlotId: String) async {
+        guard let apiClient, let callsign = keyerCallsign else { return fail(TX5DRSessionError.operatorRequired) }
+        await performOperation {
+            self.cwMessagePanel = try await apiClient.swapCWMessageSlots(
+                callsign: callsign,
+                firstSlotId: firstSlotId,
+                secondSlotId: secondSlotId
+            )
+        }
+    }
+
+    func playCWMessageSlot(_ slot: CWMessageSlot) {
+        guard let callsign = keyerCallsign, let selectedOperatorId else {
+            return fail(TX5DRSessionError.operatorRequired)
+        }
+        radio.playCWMessage(
+            callsign: callsign,
+            slotId: slot.id,
+            repeatPlayback: slot.repeatEnabled,
+            operatorId: selectedOperatorId
+        )
     }
 
     func loadQSOs(callsign: String? = nil) async {

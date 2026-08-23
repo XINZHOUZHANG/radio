@@ -307,6 +307,134 @@ actor TX5DRAPIClient {
         let _: GenericSuccessResponse = try await request(.post, "/operators/\(id)/stop")
     }
 
+    func voiceKeyerPanel(callsign: String) async throws -> VoiceKeyerPanel {
+        let response: VoiceKeyerPanelResponse = try await request(
+            .get,
+            "/voice/keyer/\(pathSegment(callsign))"
+        )
+        return response.panel
+    }
+
+    func updateVoiceKeyerPanel(callsign: String, slotCount: Int) async throws -> VoiceKeyerPanel {
+        struct Body: Encodable { let slotCount: Int }
+        let response: VoiceKeyerPanelResponse = try await request(
+            .patch,
+            "/voice/keyer/\(pathSegment(callsign))",
+            body: Body(slotCount: slotCount)
+        )
+        return response.panel
+    }
+
+    func updateVoiceKeyerSlot(
+        callsign: String,
+        slotId: String,
+        update: VoiceKeyerSlotUpdate
+    ) async throws -> VoiceKeyerPanel {
+        let response: VoiceKeyerPanelResponse = try await request(
+            .patch,
+            "/voice/keyer/\(pathSegment(callsign))/slots/\(pathSegment(slotId))",
+            body: update
+        )
+        return response.panel
+    }
+
+    func uploadVoiceKeyerAudio(callsign: String, slotId: String, wavData: Data) async throws -> VoiceKeyerPanel {
+        let boundary = "tx5dr-ios-\(UUID().uuidString)"
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"voice-keyer.wav\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(wavData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        let responseData = try await data(
+            .post,
+            "/voice/keyer/\(pathSegment(callsign))/slots/\(pathSegment(slotId))/audio",
+            body: body,
+            authenticated: true,
+            headers: ["Content-Type": "multipart/form-data; boundary=\(boundary)"]
+        )
+        return try decoder.decode(VoiceKeyerPanelResponse.self, from: responseData).panel
+    }
+
+    func voiceKeyerAudio(callsign: String, slotId: String) async throws -> Data {
+        try await download(
+            "/voice/keyer/\(pathSegment(callsign))/slots/\(pathSegment(slotId))/audio"
+        )
+    }
+
+    func deleteVoiceKeyerAudio(callsign: String, slotId: String) async throws -> VoiceKeyerPanel {
+        let response: VoiceKeyerPanelResponse = try await request(
+            .delete,
+            "/voice/keyer/\(pathSegment(callsign))/slots/\(pathSegment(slotId))/audio"
+        )
+        return response.panel
+    }
+
+    func cwKeyerConfig() async throws -> CWKeyerConfig {
+        let response: CWKeyerConfigResponse = try await request(.get, "/cw/config")
+        return response.config
+    }
+
+    func updateCWKeyerConfig(backend: CWKeyerBackend? = nil, wpm: Int? = nil) async throws -> CWKeyerConfig {
+        struct Body: Encodable { let backend: CWKeyerBackend?; let wpm: Int? }
+        let response: CWKeyerConfigResponse = try await request(
+            .put,
+            "/cw/config",
+            body: Body(backend: backend, wpm: wpm)
+        )
+        return response.config
+    }
+
+    func cwMessagePanel(callsign: String) async throws -> CWMessagePanel {
+        let response: CWMessagePanelResponse = try await request(
+            .get,
+            "/cw/panel/\(pathSegment(callsign))"
+        )
+        return response.panel
+    }
+
+    func updateCWMessagePanel(callsign: String, slotCount: Int) async throws -> CWMessagePanel {
+        struct Body: Encodable { let slotCount: Int }
+        let response: CWMessagePanelResponse = try await request(
+            .patch,
+            "/cw/panel/\(pathSegment(callsign))",
+            body: Body(slotCount: slotCount)
+        )
+        return response.panel
+    }
+
+    func updateCWMessageSlot(
+        callsign: String,
+        slotId: String,
+        update: CWMessageSlotUpdate
+    ) async throws -> CWMessagePanel {
+        let response: CWMessagePanelResponse = try await request(
+            .patch,
+            "/cw/panel/\(pathSegment(callsign))/slots/\(pathSegment(slotId))",
+            body: update
+        )
+        return response.panel
+    }
+
+    func deleteCWMessageSlot(callsign: String, slotId: String) async throws -> CWMessagePanel {
+        let response: CWMessagePanelResponse = try await request(
+            .delete,
+            "/cw/panel/\(pathSegment(callsign))/slots/\(pathSegment(slotId))"
+        )
+        return response.panel
+    }
+
+    func swapCWMessageSlots(callsign: String, firstSlotId: String, secondSlotId: String) async throws -> CWMessagePanel {
+        struct Body: Encodable { let slotIdA: String; let slotIdB: String }
+        let response: CWMessagePanelResponse = try await request(
+            .post,
+            "/cw/panel/\(pathSegment(callsign))/slots/swap",
+            body: Body(slotIdA: firstSlotId, slotIdB: secondSlotId)
+        )
+        return response.panel
+    }
+
     func logbooks() async throws -> [LogbookInfo] {
         let response: LogbookListResponse = try await request(.get, "/logbooks")
         return response.data
@@ -456,6 +584,11 @@ actor TX5DRAPIClient {
 
     func download(_ path: String, queryItems: [URLQueryItem] = []) async throws -> Data {
         try await data(.get, path, queryItems: queryItems, body: nil, authenticated: true)
+    }
+
+    private func pathSegment(_ value: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }
 
     private func request<Response: Decodable>(

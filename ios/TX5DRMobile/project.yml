@@ -29,7 +29,7 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSMicrophoneUsageDescription: TX-5DR Remote uses the microphone only while voice PTT is held.
+        NSMicrophoneUsageDescription: TX-5DR Remote uses the microphone for held voice PTT and voice-keyer recordings.
         NSLocalNetworkUsageDescription: TX-5DR Remote connects to your radio server on the local network.
         UIBackgroundModes:
           - audio

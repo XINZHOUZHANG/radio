@@ -277,6 +277,139 @@ struct TuneToneStatus: Codable, Equatable, Sendable {
     let error: String?
 }
 
+struct VoiceKeyerSlot: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let index: Int
+    let label: String
+    let hasAudio: Bool
+    let durationMs: Int
+    let updatedAt: Double?
+    let repeatEnabled: Bool
+    let repeatIntervalSec: Int
+}
+
+struct VoiceKeyerPanel: Codable, Equatable, Sendable {
+    let callsign: String
+    let slotCount: Int
+    let maxSlotCount: Int
+    let slots: [VoiceKeyerSlot]
+}
+
+enum VoiceKeyerMode: String, Codable, Equatable, Sendable {
+    case idle
+    case playing
+    case repeatWaiting = "repeat-waiting"
+    case stopping
+    case error
+}
+
+struct VoiceKeyerStatus: Codable, Equatable, Sendable {
+    let active: Bool
+    let callsign: String?
+    let slotId: String?
+    let mode: VoiceKeyerMode
+    let repeating: Bool
+    let startedBy: String?
+    let startedByLabel: String?
+    let nextRunAt: Double?
+    let error: String?
+}
+
+struct VoiceKeyerPanelResponse: Codable, Sendable {
+    let success: Bool
+    let panel: VoiceKeyerPanel
+}
+
+struct VoiceKeyerSlotUpdate: Codable, Sendable {
+    let label: String?
+    let repeatEnabled: Bool?
+    let repeatIntervalSec: Int?
+
+    init(label: String? = nil, repeatEnabled: Bool? = nil, repeatIntervalSec: Int? = nil) {
+        self.label = label
+        self.repeatEnabled = repeatEnabled
+        self.repeatIntervalSec = repeatIntervalSec
+    }
+}
+
+enum CWKeyerBackend: String, Codable, CaseIterable, Identifiable, Sendable {
+    case cat
+    case serial
+
+    var id: String { rawValue }
+}
+
+struct CWKeyerConfig: Codable, Equatable, Sendable {
+    let backend: CWKeyerBackend
+    let keyPort: String
+    let keyMethod: String
+    let keyActiveLevel: String
+    let wpm: Int
+}
+
+enum CWKeyerMode: String, Codable, Equatable, Sendable {
+    case idle
+    case keying
+    case playing
+    case repeatWaiting = "repeat-waiting"
+    case error
+}
+
+struct CWKeyerStatus: Codable, Equatable, Sendable {
+    let active: Bool
+    let mode: CWKeyerMode
+    let startedBy: String?
+    let startedByLabel: String?
+    let messageId: String?
+    let nextRunAt: Double?
+    let error: String?
+    let backend: CWKeyerBackend?
+    let backendAvailable: Bool?
+    let backendError: String?
+    let currentText: String?
+    let lastText: String?
+}
+
+struct CWMessageSlot: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let index: Int
+    let label: String
+    let text: String
+    let repeatEnabled: Bool
+    let repeatIntervalSec: Int
+}
+
+struct CWMessagePanel: Codable, Equatable, Sendable {
+    let callsign: String
+    let slotCount: Int
+    let maxSlotCount: Int
+    let slots: [CWMessageSlot]
+}
+
+struct CWMessagePanelResponse: Codable, Sendable {
+    let success: Bool
+    let panel: CWMessagePanel
+}
+
+struct CWKeyerConfigResponse: Codable, Sendable {
+    let success: Bool
+    let config: CWKeyerConfig
+}
+
+struct CWMessageSlotUpdate: Codable, Sendable {
+    let label: String?
+    let text: String?
+    let repeatEnabled: Bool?
+    let repeatIntervalSec: Int?
+
+    init(label: String? = nil, text: String? = nil, repeatEnabled: Bool? = nil, repeatIntervalSec: Int? = nil) {
+        self.label = label
+        self.text = text
+        self.repeatEnabled = repeatEnabled
+        self.repeatIntervalSec = repeatIntervalSec
+    }
+}
+
 struct MeterData: Codable, Equatable, Sendable {
     struct SWR: Codable, Equatable, Sendable { let raw: Double; let swr: Double; let alert: Bool }
     struct ALC: Codable, Equatable, Sendable { let raw: Double; let percent: Double; let alert: Bool }

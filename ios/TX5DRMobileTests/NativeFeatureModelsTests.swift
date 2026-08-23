@@ -66,4 +66,74 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(support.supportedStates, [.operate, .standby, .off])
         XCTAssertEqual(support.rigInfo?.modelName, "IC-705")
     }
+
+    func testVoiceKeyerPanelDecodesStandardTX5DRShape() throws {
+        let data = Data(#"""
+        {
+          "success": true,
+          "panel": {
+            "callsign": "BG2TEST",
+            "slotCount": 3,
+            "maxSlotCount": 12,
+            "slots": [{
+              "id": "voice-1",
+              "index": 1,
+              "label": "CQ",
+              "hasAudio": true,
+              "durationMs": 2450,
+              "updatedAt": 1720000000000,
+              "repeatEnabled": true,
+              "repeatIntervalSec": 8
+            }]
+          }
+        }
+        """#.utf8)
+
+        let response = try JSONDecoder().decode(VoiceKeyerPanelResponse.self, from: data)
+
+        XCTAssertEqual(response.panel.callsign, "BG2TEST")
+        XCTAssertEqual(response.panel.slots.first?.durationMs, 2450)
+        XCTAssertEqual(response.panel.slots.first?.repeatIntervalSec, 8)
+        XCTAssertTrue(response.panel.slots.first?.hasAudio == true)
+    }
+
+    func testCWKeyerConfigAndMessagePanelDecodeStandardTX5DRShapes() throws {
+        let configData = Data(#"""
+        {
+          "success": true,
+          "config": {
+            "backend": "cat",
+            "keyPort": "",
+            "keyMethod": "dtr",
+            "keyActiveLevel": "high",
+            "wpm": 24
+          }
+        }
+        """#.utf8)
+        let panelData = Data(#"""
+        {
+          "success": true,
+          "panel": {
+            "callsign": "BG2TEST",
+            "slotCount": 3,
+            "maxSlotCount": 12,
+            "slots": [{
+              "id": "cw-1",
+              "index": 1,
+              "label": "CQ",
+              "text": "CQ CQ DE {MYCALL}",
+              "repeatEnabled": false,
+              "repeatIntervalSec": 10
+            }]
+          }
+        }
+        """#.utf8)
+
+        let config = try JSONDecoder().decode(CWKeyerConfigResponse.self, from: configData)
+        let panel = try JSONDecoder().decode(CWMessagePanelResponse.self, from: panelData)
+
+        XCTAssertEqual(config.config.backend, .cat)
+        XCTAssertEqual(config.config.wpm, 24)
+        XCTAssertEqual(panel.panel.slots.first?.text, "CQ CQ DE {MYCALL}")
+    }
 }
