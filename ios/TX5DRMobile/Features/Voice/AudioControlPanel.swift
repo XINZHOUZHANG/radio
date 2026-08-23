@@ -99,11 +99,9 @@ struct AudioControlPanel: View {
     }
 
     private var squelchLabel: String {
-        switch radio.squelch.open {
-        case true: "静噪门打开"
-        case false: "静噪门关闭"
-        case nil: "静噪状态未知"
-        }
+        if radio.squelch.open == true { return "静噪门打开" }
+        if radio.squelch.open == false { return "静噪门关闭" }
+        return "静噪状态未知"
     }
 
     private var squelchSystemImage: String {
