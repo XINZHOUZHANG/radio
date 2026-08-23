@@ -13,6 +13,7 @@ DIAGNOSTIC = re.compile(
     r"^(?P<file>.+?\.swift):(?P<line>\d+):(?P<column>\d+): "
     r"(?P<level>error|warning): (?P<message>.+)$"
 )
+GENERAL_ERROR = re.compile(r"^(?:xcodebuild: error:|Testing failed:|error:)\s*(?P<message>.+)$")
 
 
 def escape(value: str) -> str:
@@ -30,10 +31,14 @@ def main() -> int:
 
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
     seen: set[tuple[str, str, str, str]] = set()
+    general_errors: set[str] = set()
     emitted = 0
     for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines():
         match = DIAGNOSTIC.match(raw_line.strip())
         if not match:
+            general = GENERAL_ERROR.match(raw_line.strip())
+            if general:
+                general_errors.add(general.group("message"))
             continue
         values = match.groupdict()
         path = Path(values["file"])
@@ -55,6 +60,9 @@ def main() -> int:
         if emitted >= 100:
             break
 
+    for message in sorted(general_errors):
+        print(f"::error::{escape(message)}")
+        emitted += 1
     if emitted == 0:
         print("::error::xcodebuild failed without a parsed Swift compiler diagnostic")
     return 0

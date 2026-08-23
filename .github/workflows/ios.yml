@@ -45,6 +45,23 @@ jobs:
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate --spec ios/TX5DRMobile/project.yml
+      - name: Select an available iPhone simulator
+        shell: bash
+        run: |
+          xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          payload = json.load(sys.stdin)
+          devices = [
+              device
+              for runtime, values in payload["devices"].items()
+              if "iOS" in runtime
+              for device in values
+              if device.get("isAvailable") and "iPhone" in device.get("name", "")
+          ]
+          if not devices:
+              raise SystemExit("No available iPhone simulator is installed")
+          print("SIMULATOR_UDID=" + devices[0]["udid"])
+          ' >> "$GITHUB_ENV"
       - name: Build and run XCTest
         shell: bash
         run: |
@@ -53,7 +70,7 @@ jobs:
             -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
             -scheme TX5DRMobile \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest' \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             2>&1 | tee xcodebuild.log
