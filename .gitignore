@@ -1,2 +1,9 @@
 .worktrees/
 __pycache__/
+deploy/tx5dr/upstream/
+deploy/tx5dr/data/
+deploy/tx5dr/.env
+ios/TX5DRMobile/*.xcodeproj/
+ios/TX5DRMobile/DerivedData/
+*.xcuserstate
+xcuserdata/
