@@ -52,6 +52,8 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var voiceKeyerPanel: VoiceKeyerPanel?
     @Published private(set) var cwMessagePanel: CWMessagePanel?
     @Published private(set) var cwKeyerConfig: CWKeyerConfig?
+    @Published private(set) var cwDecoderConfig: CWDecoderConfig?
+    @Published private(set) var cwDecoderBackends: [CWDecoderBackendDescriptor] = []
     @Published private(set) var isVoicePTTHeld = false
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
@@ -92,6 +94,8 @@ final class TX5DRSession: ObservableObject {
         guard !callsign.isEmpty else { return nil }
         return callsign
     }
+
+    var effectiveCWDecoderConfig: CWDecoderConfig? { radio.cwDecoder?.config ?? cwDecoderConfig }
 
     func probeLoginCapabilities() async {
         do {
@@ -194,6 +198,8 @@ final class TX5DRSession: ObservableObject {
         voiceKeyerPanel = nil
         cwMessagePanel = nil
         cwKeyerConfig = nil
+        cwDecoderConfig = nil
+        cwDecoderBackends = []
         selectedOperatorId = nil
         selectedLogbookId = nil
         phase = .signedOut
@@ -671,6 +677,69 @@ final class TX5DRSession: ObservableObject {
             repeatPlayback: slot.repeatEnabled,
             operatorId: selectedOperatorId
         )
+    }
+
+    func loadCWDecoder() async {
+        guard let apiClient else { return }
+        do { cwDecoderBackends = try await apiClient.cwDecoderBackends() }
+        catch { recordNonfatal("读取 CW 解码后端失败", error: error) }
+
+        do {
+            let response = try await apiClient.cwDecoderConfiguration()
+            cwDecoderConfig = response.config
+            radio.applyCWDecoderSnapshot(response.status)
+        } catch {
+            recordNonfatal("读取 CW 解码器配置失败", error: error)
+        }
+    }
+
+    func updateCWDecoder(_ update: CWDecoderConfigUpdate) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "CW 解码器配置已更新") {
+            let response = try await apiClient.updateCWDecoderConfiguration(update)
+            self.cwDecoderConfig = response.config
+            self.radio.applyCWDecoderSnapshot(response.status)
+        }
+    }
+
+    func tuneCWDecoder(targetFreqHz: Int? = nil, filterWidthHz: Int? = nil) async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation {
+            let response = try await apiClient.tuneCWDecoder(
+                targetFreqHz: targetFreqHz,
+                filterWidthHz: filterWidthHz
+            )
+            self.cwDecoderConfig = response.config
+            self.radio.applyCWDecoderSnapshot(response.status)
+        }
+    }
+
+    func startCWDecoder() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "CW 解码器已启动") {
+            let response = try await apiClient.startCWDecoder()
+            self.cwDecoderConfig = response.config
+            self.radio.applyCWDecoderSnapshot(response.status)
+        }
+    }
+
+    func stopCWDecoder() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "CW 解码器已停止") {
+            let response = try await apiClient.stopCWDecoder()
+            self.cwDecoderConfig = response.config
+            self.radio.applyCWDecoderSnapshot(response.status)
+        }
+    }
+
+    func clearCWDecoderTranscript() async {
+        guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
+        await performOperation(success: "CW 转写已清空") {
+            let response = try await apiClient.clearCWDecoder()
+            self.cwDecoderConfig = response.config
+            self.radio.applyCWDecoderSnapshot(response.status)
+            self.radio.clearCWDecoderTranscript()
+        }
     }
 
     func loadQSOs(callsign: String? = nil) async {

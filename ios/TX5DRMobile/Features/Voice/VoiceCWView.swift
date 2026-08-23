@@ -213,6 +213,7 @@ private struct CWPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            CWDecoderPanelView()
             CWKeyerManagementView()
         }
     }

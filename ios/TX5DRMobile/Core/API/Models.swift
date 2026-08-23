@@ -410,6 +410,201 @@ struct CWMessageSlotUpdate: Codable, Sendable {
     }
 }
 
+enum CWDecoderBackend: String, Codable, CaseIterable, Identifiable, Sendable {
+    case deepCWONNX = "deepcw-onnx"
+    var id: String { rawValue }
+}
+
+enum CWDecoderRuntimeBackend: String, Codable, CaseIterable, Identifiable, Sendable {
+    case cpu
+    case cuda
+    case coreml
+    case directml
+    case wasm
+    case webgpu
+    var id: String { rawValue }
+}
+
+enum CWDecoderModelSize: String, Codable, CaseIterable, Identifiable, Sendable {
+    case tiny
+    case small
+    var id: String { rawValue }
+}
+
+struct CWDecoderConfig: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let backend: CWDecoderBackend
+    let runtimeBackend: CWDecoderRuntimeBackend
+    let modelSize: CWDecoderModelSize
+    let language: String
+    let mode: String
+    let targetFreqHz: Int
+    let filterWidthHz: Int
+    let windowSeconds: Double
+    let decodeIntervalMs: Int
+    let muteWhileTransmitting: Bool
+    let workerCount: Int
+    let minCommitChars: Int
+    let commitStability: Int
+    let maxPendingAgeMs: Int
+}
+
+struct CWDecoderConfigUpdate: Codable, Sendable {
+    let enabled: Bool?
+    let backend: CWDecoderBackend?
+    let runtimeBackend: CWDecoderRuntimeBackend?
+    let modelSize: CWDecoderModelSize?
+    let language: String?
+    let mode: String?
+    let targetFreqHz: Int?
+    let filterWidthHz: Int?
+    let windowSeconds: Double?
+    let decodeIntervalMs: Int?
+    let muteWhileTransmitting: Bool?
+    let workerCount: Int?
+    let minCommitChars: Int?
+    let commitStability: Int?
+    let maxPendingAgeMs: Int?
+
+    init(
+        enabled: Bool? = nil,
+        backend: CWDecoderBackend? = nil,
+        runtimeBackend: CWDecoderRuntimeBackend? = nil,
+        modelSize: CWDecoderModelSize? = nil,
+        language: String? = nil,
+        mode: String? = nil,
+        targetFreqHz: Int? = nil,
+        filterWidthHz: Int? = nil,
+        windowSeconds: Double? = nil,
+        decodeIntervalMs: Int? = nil,
+        muteWhileTransmitting: Bool? = nil,
+        workerCount: Int? = nil,
+        minCommitChars: Int? = nil,
+        commitStability: Int? = nil,
+        maxPendingAgeMs: Int? = nil
+    ) {
+        self.enabled = enabled
+        self.backend = backend
+        self.runtimeBackend = runtimeBackend
+        self.modelSize = modelSize
+        self.language = language
+        self.mode = mode
+        self.targetFreqHz = targetFreqHz
+        self.filterWidthHz = filterWidthHz
+        self.windowSeconds = windowSeconds
+        self.decodeIntervalMs = decodeIntervalMs
+        self.muteWhileTransmitting = muteWhileTransmitting
+        self.workerCount = workerCount
+        self.minCommitChars = minCommitChars
+        self.commitStability = commitStability
+        self.maxPendingAgeMs = maxPendingAgeMs
+    }
+}
+
+struct CWDecoderBackendDescriptor: Codable, Identifiable, Equatable, Sendable {
+    let id: CWDecoderBackend
+    let name: String
+    let available: Bool
+    let runtimeBackends: [CWDecoderRuntimeBackend]
+    let modelSizes: [CWDecoderModelSize]
+    let languages: [String]
+    let modes: [String]
+    let version: String?
+    let label: String?
+    let model: String?
+    let runtime: String?
+    let attributionName: String?
+    let sourceUrl: String?
+    let license: String?
+    let error: String?
+    let reason: String?
+}
+
+enum CWDecoderStatusState: String, Codable, Equatable, Sendable {
+    case disabled
+    case starting
+    case listening
+    case decoding
+    case muted
+    case error
+}
+
+struct CWDecoderStatus: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let state: CWDecoderStatusState
+    let config: CWDecoderConfig
+    let backend: CWDecoderBackendDescriptor?
+    let muted: Bool
+    let active: Bool
+    let lastDecodeAt: Double?
+    let lastError: String?
+    let running: Bool?
+    let backendId: CWDecoderBackend?
+    let pendingText: String?
+    let committedText: String?
+    let queuedSamples: Int?
+    let updatedAt: Double
+
+    var isRunning: Bool {
+        running ?? (active || state == .listening || state == .decoding || state == .muted)
+    }
+}
+
+struct CWDecoderCharacterSpan: Codable, Equatable, Sendable {
+    let char: String
+    let startFrame: Int
+    let endFrame: Int
+}
+
+struct CWDecoderWordSpaceSpan: Codable, Equatable, Sendable {
+    let startFrame: Int
+    let endFrame: Int
+}
+
+struct CWDecoderTranscriptSegment: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let sessionId: String
+    let sequence: Int
+    let text: String
+    let plainText: String?
+    let finalized: Bool
+    let prependSpace: Bool
+    let confidence: Double?
+    let targetFreqHz: Double?
+    let filterWidthHz: Double?
+    let characterSpans: [CWDecoderCharacterSpan]?
+    let wordSpaceSpans: [CWDecoderWordSpaceSpan]?
+    let startedAt: Double?
+    let endedAt: Double?
+    let updatedAt: Double
+    let wpm: Double?
+}
+
+struct CWDecoderPendingSegment: Codable, Equatable, Sendable {
+    let sessionId: String
+    let version: Int
+    let text: String
+    let plainText: String?
+    let finalized: Bool
+    let confidence: Double?
+    let targetFreqHz: Double?
+    let filterWidthHz: Double?
+    let characterSpans: [CWDecoderCharacterSpan]?
+    let wordSpaceSpans: [CWDecoderWordSpaceSpan]?
+    let updatedAt: Double
+}
+
+struct CWDecoderConfigResponse: Codable, Sendable {
+    let success: Bool
+    let config: CWDecoderConfig
+    let status: CWDecoderStatus
+}
+
+struct CWDecoderBackendsResponse: Codable, Sendable {
+    let success: Bool
+    let backends: [CWDecoderBackendDescriptor]
+}
+
 struct MeterData: Codable, Equatable, Sendable {
     struct SWR: Codable, Equatable, Sendable { let raw: Double; let swr: Double; let alert: Bool }
     struct ALC: Codable, Equatable, Sendable { let raw: Double; let percent: Double; let alert: Bool }

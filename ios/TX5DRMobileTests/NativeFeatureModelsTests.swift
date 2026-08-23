@@ -136,4 +136,61 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(config.config.wpm, 24)
         XCTAssertEqual(panel.panel.slots.first?.text, "CQ CQ DE {MYCALL}")
     }
+
+    func testCWDecoderStatusDecodesStructuredTranscriptConfiguration() throws {
+        let data = Data(#"""
+        {
+          "success": true,
+          "config": {
+            "enabled": true,
+            "backend": "deepcw-onnx",
+            "runtimeBackend": "cpu",
+            "modelSize": "tiny",
+            "language": "en",
+            "mode": "streaming",
+            "targetFreqHz": 800,
+            "filterWidthHz": 500,
+            "windowSeconds": 12,
+            "decodeIntervalMs": 1000,
+            "muteWhileTransmitting": true,
+            "workerCount": 1,
+            "minCommitChars": 1,
+            "commitStability": 2,
+            "maxPendingAgeMs": 4000
+          },
+          "status": {
+            "enabled": true,
+            "state": "listening",
+            "config": {
+              "enabled": true,
+              "backend": "deepcw-onnx",
+              "runtimeBackend": "cpu",
+              "modelSize": "tiny",
+              "language": "en",
+              "mode": "streaming",
+              "targetFreqHz": 800,
+              "filterWidthHz": 500,
+              "windowSeconds": 12,
+              "decodeIntervalMs": 1000,
+              "muteWhileTransmitting": true,
+              "workerCount": 1,
+              "minCommitChars": 1,
+              "commitStability": 2,
+              "maxPendingAgeMs": 4000
+            },
+            "muted": false,
+            "active": true,
+            "running": true,
+            "updatedAt": 1720000000000
+          }
+        }
+        """#.utf8)
+
+        let response = try JSONDecoder().decode(CWDecoderConfigResponse.self, from: data)
+
+        XCTAssertEqual(response.config.backend, .deepCWONNX)
+        XCTAssertEqual(response.config.filterWidthHz, 500)
+        XCTAssertEqual(response.status.state, .listening)
+        XCTAssertTrue(response.status.isRunning)
+    }
 }

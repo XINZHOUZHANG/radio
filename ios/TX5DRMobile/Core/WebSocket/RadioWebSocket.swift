@@ -53,6 +53,10 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var cwStatus: JSONValue?
     @Published private(set) var cwKeyerStatus: JSONValue?
     @Published private(set) var cwDecoderStatus: JSONValue?
+    @Published private(set) var cwDecoder: CWDecoderStatus?
+    @Published private(set) var cwDecoderSegments: [CWDecoderTranscriptSegment] = []
+    @Published private(set) var cwDecoderPending: CWDecoderPendingSegment?
+    @Published private(set) var cwDecoderError: String?
     @Published private(set) var operatorStatuses: [String: JSONValue] = [:]
     @Published private(set) var systemStatus: JSONValue?
     @Published private(set) var radioStatus: JSONValue?
@@ -148,6 +152,16 @@ final class RadioWebSocket: ObservableObject {
     func retryAudio() { send("audioRetryNow") }
     func refreshCapabilities() { send("refreshRadioCapabilities") }
     func clearDecodedFrames() { decodedFrames = [] }
+
+    func applyCWDecoderSnapshot(_ status: CWDecoderStatus) {
+        cwDecoder = status
+        cwDecoderError = status.lastError
+    }
+
+    func clearCWDecoderTranscript() {
+        cwDecoderSegments = []
+        cwDecoderPending = nil
+    }
 
     func setMode(_ mode: ModeDescriptor) {
         guard let encoded = jsonValue(mode) else { return }
@@ -454,8 +468,13 @@ final class RadioWebSocket: ObservableObject {
         case "cwKeyerStatus":
             cwKeyerStatus = envelope.data
             cwStatus = envelope.data
-        case "cwDecoderStatus", "cwDecoderEvent":
+        case "cwDecoderStatus":
             cwDecoderStatus = envelope.data
+            if let status: CWDecoderStatus = decode(envelope.data) { applyCWDecoderSnapshot(status) }
+            cwStatus = envelope.data
+        case "cwDecoderEvent":
+            cwDecoderStatus = envelope.data
+            handleCWDecoderEvent(envelope.data)
             cwStatus = envelope.data
         case "pluginList", "pluginStatusChanged", "pluginPanelMeta", "pluginPanelContributionsChanged":
             pluginList = envelope.data
@@ -474,6 +493,96 @@ final class RadioWebSocket: ObservableObject {
         var seen = Set<String>()
         merged = merged.filter { seen.insert($0.id).inserted }
         decodedFrames = Array(merged.prefix(200))
+    }
+
+    private func handleCWDecoderEvent(_ data: JSONValue?) {
+        guard let data else { return }
+        let kind = data["kind"]?.stringValue ?? data["type"]?.stringValue ?? ""
+        switch kind {
+        case "status":
+            if let status: CWDecoderStatus = decode(data["status"]) { applyCWDecoderSnapshot(status) }
+        case "transcript_reset":
+            clearCWDecoderTranscript()
+        case "transcript_pending":
+            cwDecoderPending = decode(data["pending"])
+        case "transcript", "transcript_commit":
+            if let segment: CWDecoderTranscriptSegment = decode(data["segment"]) {
+                mergeCWDecoderSegment(segment)
+                cwDecoderPending = nil
+            }
+        case "commit":
+            if let segment: CWDecoderTranscriptSegment = decode(data["segment"]) {
+                mergeCWDecoderSegment(segment)
+            } else if let text = data["text"]?.stringValue, !text.isEmpty {
+                mergeCWDecoderSegment(legacyCWDecoderSegment(text: text, data: data))
+            }
+            cwDecoderPending = nil
+        case "pending", "partial":
+            let text = data["text"]?.stringValue
+                ?? data["pendingText"]?.stringValue
+                ?? data["partial"]?.stringValue
+                ?? ""
+            cwDecoderPending = legacyCWDecoderPending(text: text, data: data)
+        case "error":
+            cwDecoderError = data["message"]?.stringValue ?? "CW 解码器错误"
+        default:
+            break
+        }
+    }
+
+    private func mergeCWDecoderSegment(_ segment: CWDecoderTranscriptSegment) {
+        if let index = cwDecoderSegments.firstIndex(where: { $0.id == segment.id }) {
+            cwDecoderSegments[index] = segment
+        } else {
+            cwDecoderSegments.append(segment)
+        }
+        cwDecoderSegments.sort {
+            if $0.sessionId == $1.sessionId { return $0.sequence < $1.sequence }
+            return $0.updatedAt < $1.updatedAt
+        }
+        if cwDecoderSegments.count > 500 {
+            cwDecoderSegments.removeFirst(cwDecoderSegments.count - 500)
+        }
+    }
+
+    private func legacyCWDecoderSegment(text: String, data: JSONValue) -> CWDecoderTranscriptSegment {
+        let timestamp = data["timestamp"]?.doubleValue ?? Date().timeIntervalSince1970 * 1_000
+        return CWDecoderTranscriptSegment(
+            id: data["id"]?.stringValue ?? "legacy-\(Int(timestamp))-\(cwDecoderSegments.count)",
+            sessionId: "legacy",
+            sequence: cwDecoderSegments.count,
+            text: text,
+            plainText: nil,
+            finalized: true,
+            prependSpace: true,
+            confidence: data["confidence"]?.doubleValue,
+            targetFreqHz: nil,
+            filterWidthHz: nil,
+            characterSpans: nil,
+            wordSpaceSpans: nil,
+            startedAt: nil,
+            endedAt: nil,
+            updatedAt: timestamp,
+            wpm: nil
+        )
+    }
+
+    private func legacyCWDecoderPending(text: String, data: JSONValue) -> CWDecoderPendingSegment? {
+        guard !text.isEmpty else { return nil }
+        let timestamp = data["timestamp"]?.doubleValue ?? Date().timeIntervalSince1970 * 1_000
+        return CWDecoderPendingSegment(
+            sessionId: "legacy",
+            version: Int(timestamp),
+            text: text,
+            plainText: nil,
+            finalized: false,
+            confidence: data["confidence"]?.doubleValue,
+            targetFreqHz: nil,
+            filterWidthHz: nil,
+            characterSpans: nil,
+            wordSpaceSpans: nil,
+            updatedAt: timestamp
+        )
     }
 
     private func sendHandshake() {

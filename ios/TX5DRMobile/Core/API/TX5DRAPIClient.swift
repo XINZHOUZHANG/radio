@@ -435,6 +435,40 @@ actor TX5DRAPIClient {
         return response.panel
     }
 
+    func cwDecoderBackends() async throws -> [CWDecoderBackendDescriptor] {
+        let response: CWDecoderBackendsResponse = try await request(.get, "/cw/decoder/backends")
+        return response.backends
+    }
+
+    func cwDecoderConfiguration() async throws -> CWDecoderConfigResponse {
+        try await request(.get, "/cw/decoder/config")
+    }
+
+    func updateCWDecoderConfiguration(_ update: CWDecoderConfigUpdate) async throws -> CWDecoderConfigResponse {
+        try await request(.put, "/cw/decoder/config", body: update)
+    }
+
+    func tuneCWDecoder(targetFreqHz: Int? = nil, filterWidthHz: Int? = nil) async throws -> CWDecoderConfigResponse {
+        struct Body: Encodable { let targetFreqHz: Int?; let filterWidthHz: Int? }
+        return try await request(
+            .patch,
+            "/cw/decoder/tuning",
+            body: Body(targetFreqHz: targetFreqHz, filterWidthHz: filterWidthHz)
+        )
+    }
+
+    func startCWDecoder(_ update: CWDecoderConfigUpdate = .init()) async throws -> CWDecoderConfigResponse {
+        try await request(.post, "/cw/decoder/start", body: update)
+    }
+
+    func stopCWDecoder() async throws -> CWDecoderConfigResponse {
+        try await request(.post, "/cw/decoder/stop")
+    }
+
+    func clearCWDecoder() async throws -> CWDecoderConfigResponse {
+        try await request(.post, "/cw/decoder/clear")
+    }
+
     func logbooks() async throws -> [LogbookInfo] {
         let response: LogbookListResponse = try await request(.get, "/logbooks")
         return response.data
