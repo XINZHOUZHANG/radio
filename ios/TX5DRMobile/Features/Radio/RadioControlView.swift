@@ -6,7 +6,6 @@ struct RadioControlView: View {
     @EnvironmentObject private var audio: TX5DRAudioClient
     @State private var frequencyMHz = "14.074000"
     @State private var voiceRadioMode = "USB"
-    @State private var tunerEnabled = false
 
     var body: some View {
         ScrollView {
@@ -181,17 +180,9 @@ struct RadioControlView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.cyan))
-
-                    Toggle("天调", isOn: $tunerEnabled)
-                        .toggleStyle(.button)
-                        .tint(RadioPalette.warning)
-                        .onChange(of: tunerEnabled) { _, enabled in
-                            Task { await session.setTuner(enabled: enabled) }
-                        }
-
-                    Button("调谐") { Task { await session.startTuning() } }
-                        .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                 }
+
+                TunerControlPanel()
 
                 HoldPTTButton()
 
@@ -214,7 +205,10 @@ struct RadioControlView: View {
 
     private var surfaceCapabilities: [CapabilityDescriptor] {
         radio.capabilityDescriptors.filter {
-            $0.hasSurfaceControl && $0.writable && radio.capabilities[$0.id]?.supported == true
+            $0.hasSurfaceControl
+                && $0.writable
+                && !["tuner_switch", "tuner_tune"].contains($0.id)
+                && radio.capabilities[$0.id]?.supported == true
         }
     }
 
@@ -245,7 +239,7 @@ struct HoldPTTButton: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(active ? "正在发射" : "按住 PTT")
                             .font(.headline)
-                        Text(audio.transmitState.label)
+                        Text(pttDetail)
                             .font(.caption)
                             .opacity(0.72)
                     }
@@ -263,17 +257,19 @@ struct HoldPTTButton: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
-                        guard !touching else { return }
+                        guard !touching, !blockedByAnotherTransmission else { return }
                         touching = true
                         session.beginVoicePTT()
                     }
                     .onEnded { _ in
+                        guard touching else { return }
                         touching = false
                         session.endVoicePTT()
                     }
             )
             .accessibilityLabel("按住语音 PTT")
             .accessibilityAddTraits(.isButton)
+            .opacity(blockedByAnotherTransmission ? 0.58 : 1)
             .onDisappear {
                 touching = false
                 session.endVoicePTT()
@@ -282,6 +278,16 @@ struct HoldPTTButton: View {
     }
 
     private var active: Bool { session.isVoicePTTHeld || radio.ptt.isTransmitting }
+
+    private var blockedByAnotherTransmission: Bool {
+        radio.ptt.isTransmitting && !session.isVoicePTTHeld
+    }
+
+    private var pttDetail: String {
+        if radio.tuneTone.active { return "外置天调音正在占用发射" }
+        if blockedByAnotherTransmission { return "PTT 已被其他任务占用" }
+        return audio.transmitState.label
+    }
 }
 
 private struct LevelBars: View {

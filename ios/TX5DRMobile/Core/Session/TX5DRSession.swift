@@ -517,7 +517,9 @@ final class TX5DRSession: ObservableObject {
     }
 
     func endVoicePTT() {
-        guard isVoicePTTHeld || radio.ptt.isTransmitting else { return }
+        // Only release a voice PTT that this client actually acquired. FT8, CW,
+        // voice keyer, and tuner-tone transmissions have their own stop paths.
+        guard isVoicePTTHeld else { return }
         isVoicePTTHeld = false
         pttGeneration += 1
         pttTask?.cancel()

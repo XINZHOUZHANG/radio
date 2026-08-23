@@ -578,4 +578,147 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(object?["port"] as? Int, 4532)
         XCTAssertEqual(object?["readOnly"] as? Bool, false)
     }
+
+    func testTunerControlStateUsesCapabilityValueStatusAndSWR() {
+        let tunerSwitch = capability(
+            id: "tuner_switch",
+            value: .bool(true),
+            meta: ["status": .string("tuning"), "swr": .number(1.42)]
+        )
+        let tunerTune = capability(id: "tuner_tune", value: .null)
+        let state = TunerControlState(
+            switchState: tunerSwitch,
+            tuneState: tunerTune,
+            ptt: idlePTT,
+            tuneTone: idleTuneTone,
+            socketReady: true,
+            nowMilliseconds: 10_000
+        )
+
+        XCTAssertTrue(state.builtInSupported)
+        XCTAssertTrue(state.tunerEnabled)
+        XCTAssertTrue(state.isTuning)
+        XCTAssertEqual(state.swr, 1.42)
+        XCTAssertEqual(state.swrQuality, .good)
+        XCTAssertTrue(state.canToggleSwitch)
+        XCTAssertFalse(state.canStartManualTune)
+        XCTAssertEqual(state.builtInStatusText, "正在调谐")
+    }
+
+    func testTunerControlStateRequiresEnabledAvailableCapabilitiesForManualTune() {
+        let tunerSwitch = capability(
+            id: "tuner_switch",
+            availability: "unavailable",
+            lastError: "ATU not connected",
+            value: .bool(false)
+        )
+        let tunerTune = capability(id: "tuner_tune", value: .null)
+        let state = TunerControlState(
+            switchState: tunerSwitch,
+            tuneState: tunerTune,
+            ptt: idlePTT,
+            tuneTone: idleTuneTone,
+            socketReady: true,
+            nowMilliseconds: 10_000
+        )
+
+        XCTAssertFalse(state.canToggleSwitch)
+        XCTAssertFalse(state.canStartManualTune)
+        XCTAssertEqual(state.unavailableMessage, "天调未连接或当前不可用")
+        XCTAssertEqual(state.lastError, "ATU not connected")
+    }
+
+    func testTunerControlStateInterlocksExternalToneWithOtherPTT() {
+        let busyPTT = PTTStatus(
+            isTransmitting: true,
+            operatorIds: ["operator-1"],
+            phase: "transmitting",
+            frameId: nil,
+            source: "ft8"
+        )
+        let state = TunerControlState(
+            switchState: nil,
+            tuneState: nil,
+            ptt: busyPTT,
+            tuneTone: idleTuneTone,
+            socketReady: true,
+            nowMilliseconds: 10_000
+        )
+
+        XCTAssertTrue(state.tuneToneBusy)
+        XCTAssertFalse(state.canToggleTuneTone)
+        XCTAssertFalse(state.builtInSupported)
+        XCTAssertFalse(state.hasCapabilitySnapshot)
+    }
+
+    func testTunerControlStateAllowsStoppingActiveToneAndTracksTimeout() {
+        let activeTone = TuneToneStatus(
+            active: true,
+            toneHz: 1_000,
+            startedAt: 5_000,
+            maxDurationMs: 30_000,
+            error: nil
+        )
+        let transmitting = PTTStatus(
+            isTransmitting: true,
+            operatorIds: [],
+            phase: "transmitting",
+            frameId: nil,
+            source: "tune-tone"
+        )
+        let state = TunerControlState(
+            switchState: nil,
+            tuneState: nil,
+            ptt: transmitting,
+            tuneTone: activeTone,
+            socketReady: true,
+            nowMilliseconds: 17_400
+        )
+
+        XCTAssertTrue(state.tuneToneActive)
+        XCTAssertFalse(state.tuneToneBusy)
+        XCTAssertTrue(state.canToggleTuneTone)
+        XCTAssertEqual(state.tuneToneElapsedSeconds, 12)
+        XCTAssertEqual(state.tuneToneRemainingSeconds, 18)
+    }
+
+    private var idlePTT: PTTStatus {
+        PTTStatus(
+            isTransmitting: false,
+            operatorIds: [],
+            phase: "idle",
+            frameId: nil,
+            source: nil
+        )
+    }
+
+    private var idleTuneTone: TuneToneStatus {
+        TuneToneStatus(
+            active: false,
+            toneHz: nil,
+            startedAt: nil,
+            maxDurationMs: 30_000,
+            error: nil
+        )
+    }
+
+    private func capability(
+        id: String,
+        supported: Bool = true,
+        availability: String = "available",
+        lastError: String? = nil,
+        value: JSONValue,
+        meta: [String: JSONValue]? = nil
+    ) -> CapabilityState {
+        CapabilityState(
+            id: id,
+            supported: supported,
+            availability: availability,
+            availabilityReason: nil,
+            lastError: lastError,
+            value: value,
+            meta: meta,
+            updatedAt: 1
+        )
+    }
 }
