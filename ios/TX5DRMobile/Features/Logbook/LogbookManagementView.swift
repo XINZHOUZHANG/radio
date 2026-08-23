@@ -278,7 +278,7 @@ private struct LogbookMaintenanceView: View {
 
     @ViewBuilder
     private var backupSection: some View {
-        Section("服务端备份") {
+        Section {
             if let backup {
                 LabeledContent("修订", value: backup.revision)
                 LabeledContent("待写入", value: String(backup.pendingMutations))
@@ -300,6 +300,8 @@ private struct LogbookMaintenanceView: View {
             } else {
                 ProgressView("读取备份状态")
             }
+        } header: {
+            Text("服务端备份")
         } footer: {
             Text("恢复备份会覆盖日志本，原生恢复流程将在展示预检差异并二次确认后才允许执行。")
         }
