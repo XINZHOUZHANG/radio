@@ -42,6 +42,9 @@ final class RadioWebSocket: ObservableObject {
     @Published private(set) var frequency: FrequencyState?
     @Published private(set) var ptt = PTTStatus(isTransmitting: false, operatorIds: [], phase: "idle", frameId: nil, source: nil)
     @Published private(set) var tuneTone = TuneToneStatus(active: false, toneHz: nil, startedAt: nil, maxDurationMs: 30_000, error: nil)
+    @Published private(set) var squelch = SquelchStatus(supported: false, open: nil, muted: false, source: "unsupported", updatedAt: 0)
+    @Published private(set) var transmitGainDecibels = -10.0
+    @Published private(set) var transmissionInterruption: RadioTransmissionInterruption?
     @Published private(set) var meters: MeterData?
     @Published private(set) var decodedFrames: [FrameMessage] = []
     @Published private(set) var spectrumBins: [Double] = []
@@ -114,6 +117,9 @@ final class RadioWebSocket: ObservableObject {
     func configure(server: TX5DRServer, jwt: String, operatorIds: [String]?, selectedOperatorId: String?) {
         if self.server != server {
             resetSpectrumState()
+            resetLiveControlState()
+            transmissionInterruption = nil
+            transmitGainDecibels = -10
         }
         self.server = server
         self.jwt = jwt
@@ -151,6 +157,7 @@ final class RadioWebSocket: ObservableObject {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         resetSpectrumState()
+        resetLiveControlState()
         state = .disconnected
     }
 
@@ -234,6 +241,10 @@ final class RadioWebSocket: ObservableObject {
 
     func dismissLastNotice() {
         lastNotice = nil
+    }
+
+    func clearTransmissionInterruption() {
+        transmissionInterruption = nil
     }
 
     func invokeSpectrumControl(id: SpectrumSessionControlID, action: SpectrumSessionControlAction) {
@@ -347,7 +358,9 @@ final class RadioWebSocket: ObservableObject {
     }
 
     func setVolumeGain(decibels: Double) {
-        send("setVolumeGainDb", data: .object(["gainDb": .number(decibels)]))
+        let value = AudioGain.clampedDecibels(decibels)
+        transmitGainDecibels = value
+        send("setVolumeGainDb", data: .object(["gainDb": .number(value)]))
     }
 
     func setSplitFrequency(_ transmitFrequency: Double) {
@@ -427,6 +440,7 @@ final class RadioWebSocket: ObservableObject {
             heartbeatTask?.cancel()
             heartbeatTask = nil
             resetSpectrumState()
+            resetLiveControlState()
             if shouldReconnect {
                 state = .failed(error.localizedDescription)
                 scheduleReconnect()
@@ -485,6 +499,10 @@ final class RadioWebSocket: ObservableObject {
             if let value: PTTStatus = decode(envelope.data) { ptt = value }
         case "tuneToneStatusChanged":
             if let value: TuneToneStatus = decode(envelope.data) { tuneTone = value }
+        case "squelchStatusChanged":
+            if let value: SquelchStatus = decode(envelope.data) { squelch = value }
+        case "volumeGainChanged":
+            applyVolumeGain(envelope.data)
         case "meterData":
             if let value: MeterData = decode(envelope.data) { meters = value }
         case "slotPackUpdated":
@@ -537,7 +555,10 @@ final class RadioWebSocket: ObservableObject {
                     return id.map { ($0, value) }
                 })
             }
-        case "systemStatus", "bootstrapStatusChanged", "clockStatusChanged":
+        case "systemStatus":
+            systemStatus = envelope.data
+            applyVolumeGain(envelope.data)
+        case "bootstrapStatusChanged", "clockStatusChanged":
             systemStatus = envelope.data
         case "rigctldStatus":
             rigctldStatus = decode(envelope.data)
@@ -557,6 +578,17 @@ final class RadioWebSocket: ObservableObject {
             voiceKeyerStatus = envelope.data
         case "voiceRadioModeChanged":
             voiceRadioMode = envelope.data
+        case "radioDisconnectedDuringTransmission":
+            if let interruption: RadioTransmissionInterruption = decode(envelope.data) {
+                transmissionInterruption = interruption
+                lastNotice = "发射期间电台断开：\(interruption.message) \(interruption.recommendation)"
+            }
+        case "decodeError":
+            let message = envelope.data?["error"]?["message"]?.stringValue ?? "未知解码错误"
+            lastNotice = "数字模式解码失败：\(message)"
+        case "accessDenied":
+            let reason = envelope.data?["reason"]?.stringValue ?? "unknown"
+            lastNotice = accessDeniedMessage(reason: reason, data: envelope.data)
         case "cwKeyerStatus":
             cwKeyerStatus = envelope.data
             cwStatus = envelope.data
@@ -675,6 +707,53 @@ final class RadioWebSocket: ObservableObject {
         openWebRXProfileVerifyResult = nil
         openWebRXClientCount = 0
         openWebRXCooldownUntil = nil
+    }
+
+    private func resetLiveControlState() {
+        ptt = PTTStatus(
+            isTransmitting: false,
+            operatorIds: [],
+            phase: "idle",
+            frameId: nil,
+            source: nil
+        )
+        tuneTone = TuneToneStatus(
+            active: false,
+            toneHz: nil,
+            startedAt: nil,
+            maxDurationMs: 30_000,
+            error: nil
+        )
+        squelch = SquelchStatus(
+            supported: false,
+            open: nil,
+            muted: false,
+            source: "unsupported",
+            updatedAt: 0
+        )
+        meters = nil
+        voiceLock = nil
+    }
+
+    private func applyVolumeGain(_ payload: JSONValue?) {
+        if let decibels = AudioGain.decibels(from: payload) {
+            transmitGainDecibels = decibels
+        }
+    }
+
+    private func accessDeniedMessage(reason: String, data: JSONValue?) -> String {
+        switch reason {
+        case "capacity_reached":
+            let current = data?["current"]?.intValue
+            let limit = data?["limit"]?.intValue
+            if let current, let limit { return "服务器连接数已满（\(current)/\(limit)）" }
+            return "服务器连接数已满"
+        case "origin_not_allowed": "服务器拒绝了此客户端来源"
+        case "authentication_timeout": "WebSocket 认证超时"
+        case "handshake_timeout": "客户端握手超时"
+        case "ip_limit_reached": "当前地址的连接数已达到上限"
+        default: "服务器拒绝访问：\(reason)"
+        }
     }
 
     private func spectrumPreferenceKey(profileId: String?) -> String {

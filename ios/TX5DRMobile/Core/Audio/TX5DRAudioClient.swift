@@ -55,6 +55,8 @@ final class TX5DRAudioClient: ObservableObject {
     @Published private(set) var sentFrames: UInt64 = 0
     @Published private(set) var droppedUplinkFrames: UInt64 = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var monitorVolumeDecibels: Double
+    @Published private(set) var monitorMuted = false
 
     private var server: TX5DRServer?
     private var apiClient: TX5DRAPIClient?
@@ -83,10 +85,14 @@ final class TX5DRAudioClient: ObservableObject {
     private var captureAccumulator: [Float] = []
     private var captureSampleRate: Double = 48_000
     private var uplinkSequence: UInt32 = 0
+    private static let monitorVolumeDefaultsKey = "tx5dr.monitorVolumeDecibels"
 
     init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
+        let savedVolume = UserDefaults.standard.object(forKey: Self.monitorVolumeDefaultsKey) as? NSNumber
+        monitorVolumeDecibels = AudioGain.clampedDecibels(savedVolume?.doubleValue ?? 0)
         audioEngine.attach(playerNode)
+        applyMonitorVolume()
     }
 
     func configure(server: TX5DRServer, apiClient: TX5DRAPIClient) {
@@ -263,7 +269,20 @@ final class TX5DRAudioClient: ObservableObject {
     }
 
     func setMonitorVolume(decibels: Double) {
-        let linear = pow(10, decibels / 20)
+        monitorVolumeDecibels = AudioGain.clampedDecibels(decibels)
+        UserDefaults.standard.set(monitorVolumeDecibels, forKey: Self.monitorVolumeDefaultsKey)
+        applyMonitorVolume()
+    }
+
+    func setMonitorMuted(_ muted: Bool) {
+        guard monitorMuted != muted else { return }
+        monitorMuted = muted
+        applyMonitorVolume()
+    }
+
+    private func applyMonitorVolume() {
+        let effectiveDecibels = monitorMuted ? AudioGain.minimumDecibels : monitorVolumeDecibels
+        let linear = pow(10, effectiveDecibels / 20)
         playerNode.volume = Float(max(0, min(2, linear)))
     }
 

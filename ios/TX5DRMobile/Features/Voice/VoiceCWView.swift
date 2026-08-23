@@ -67,6 +67,9 @@ struct VoiceCWView: View {
                     }
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(RadioPalette.muted)
+
+                    Divider().opacity(0.25)
+                    AudioControlPanel()
                 }
             }
 

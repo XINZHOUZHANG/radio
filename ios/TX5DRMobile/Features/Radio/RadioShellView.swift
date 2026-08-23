@@ -3,6 +3,7 @@ import SwiftUI
 struct RadioShellView: View {
     @EnvironmentObject private var session: TX5DRSession
     @EnvironmentObject private var radio: RadioWebSocket
+    @EnvironmentObject private var audio: TX5DRAudioClient
 
     var body: some View {
         TabView {
@@ -23,10 +24,35 @@ struct RadioShellView: View {
         }
         .tint(RadioPalette.accent)
         .background(RadioPalette.background)
+        .onAppear { applyAudioMonitorGate(audioMonitorGate) }
+        .onChange(of: audioMonitorGate) { _, gate in
+            applyAudioMonitorGate(gate)
+        }
+        .onChange(of: radio.transmissionInterruption) { _, interruption in
+            guard let interruption else { return }
+            session.endVoicePTT()
+            session.noticeMessage = "发射期间电台断开：\(interruption.message) \(interruption.recommendation)"
+            radio.clearTransmissionInterruption()
+        }
         .onChange(of: radio.state) { _, state in
             if case .failed(let message) = state {
+                session.endVoicePTT()
                 session.noticeMessage = "控制通道：\(message)"
             }
         }
+    }
+
+    private var audioMonitorGate: AudioMonitorGateState {
+        AudioMonitorGateState(
+            engineMode: radio.currentMode.name,
+            ptt: radio.ptt,
+            localVoicePTTHeld: session.isVoicePTTHeld,
+            squelch: radio.squelch,
+            voiceLock: radio.voiceLock
+        )
+    }
+
+    private func applyAudioMonitorGate(_ gate: AudioMonitorGateState) {
+        audio.setMonitorMuted(gate.shouldMute)
     }
 }

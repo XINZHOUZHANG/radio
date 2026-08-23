@@ -277,6 +277,20 @@ struct TuneToneStatus: Codable, Equatable, Sendable {
     let error: String?
 }
 
+struct SquelchStatus: Codable, Equatable, Sendable {
+    let supported: Bool
+    let open: Bool?
+    let muted: Bool
+    let source: String
+    let updatedAt: Double
+}
+
+struct RadioTransmissionInterruption: Codable, Equatable, Sendable {
+    let reason: String
+    let message: String
+    let recommendation: String
+}
+
 struct VoiceKeyerSlot: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let index: Int

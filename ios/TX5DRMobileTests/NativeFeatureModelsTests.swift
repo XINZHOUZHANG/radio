@@ -682,6 +682,104 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(state.tuneToneRemainingSeconds, 18)
     }
 
+    func testAudioGainParsesTX5DREventAndSystemStatusShapes() throws {
+        let event = JSONValue.object([
+            "gain": .number(0.316_227_766),
+            "gainDb": .number(-10),
+        ])
+        let systemStatus = JSONValue.object([
+            "volumeGain": .number(0.1),
+        ])
+
+        XCTAssertEqual(try XCTUnwrap(AudioGain.decibels(from: event)), -10, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(AudioGain.decibels(from: systemStatus)), -20, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(AudioGain.decibels(from: .number(1))), 0, accuracy: 0.001)
+        XCTAssertNil(AudioGain.decibels(from: .number(-1)))
+    }
+
+    func testAudioMonitorGateFollowsVoicePTTAndSquelch() {
+        let closedSquelch = SquelchStatus(
+            supported: true,
+            open: false,
+            muted: true,
+            source: "hamlib-dcd",
+            updatedAt: 1
+        )
+        let squelchGate = AudioMonitorGateState(
+            engineMode: "VOICE",
+            ptt: idlePTT,
+            localVoicePTTHeld: false,
+            squelch: closedSquelch,
+            voiceLock: nil
+        )
+        let transmitGate = AudioMonitorGateState(
+            engineMode: "VOICE",
+            ptt: idlePTT,
+            localVoicePTTHeld: true,
+            squelch: closedSquelch,
+            voiceLock: nil
+        )
+
+        XCTAssertEqual(squelchGate.muteReason, .squelchClosed)
+        XCTAssertTrue(squelchGate.shouldMute)
+        XCTAssertEqual(transmitGate.muteReason, .transmitting)
+    }
+
+    func testAudioMonitorGateKeepsVoiceKeyerMonitorAndIgnoresDigitalSquelch() {
+        let transmitting = PTTStatus(
+            isTransmitting: true,
+            operatorIds: [],
+            phase: "transmitting",
+            frameId: nil,
+            source: "voice-keyer"
+        )
+        let closedSquelch = SquelchStatus(
+            supported: true,
+            open: false,
+            muted: true,
+            source: "hamlib-dcd",
+            updatedAt: 1
+        )
+        let keyerLock = JSONValue.object([
+            "locked": .bool(true),
+            "lockedBy": .string("voice-keyer:BG2TEST"),
+        ])
+        let keyerGate = AudioMonitorGateState(
+            engineMode: "VOICE",
+            ptt: transmitting,
+            localVoicePTTHeld: false,
+            squelch: closedSquelch,
+            voiceLock: keyerLock
+        )
+        let digitalGate = AudioMonitorGateState(
+            engineMode: "FT8",
+            ptt: idlePTT,
+            localVoicePTTHeld: false,
+            squelch: closedSquelch,
+            voiceLock: nil
+        )
+
+        XCTAssertFalse(keyerGate.shouldMute)
+        XCTAssertFalse(digitalGate.shouldMute)
+    }
+
+    func testSquelchAndTransmissionInterruptionDecodeTX5DRContract() throws {
+        let squelchData = Data(#"""
+        {"supported":true,"open":false,"muted":true,"source":"hamlib-dcd","updatedAt":1720000000000}
+        """#.utf8)
+        let interruptionData = Data(#"""
+        {"reason":"serial_lost","message":"Radio disconnected","recommendation":"Check the CAT cable"}
+        """#.utf8)
+
+        let squelch = try JSONDecoder().decode(SquelchStatus.self, from: squelchData)
+        let interruption = try JSONDecoder().decode(RadioTransmissionInterruption.self, from: interruptionData)
+
+        XCTAssertFalse(squelch.open == true)
+        XCTAssertTrue(squelch.muted)
+        XCTAssertEqual(interruption.reason, "serial_lost")
+        XCTAssertEqual(interruption.recommendation, "Check the CAT cable")
+    }
+
     private var idlePTT: PTTStatus {
         PTTStatus(
             isTransmitting: false,
