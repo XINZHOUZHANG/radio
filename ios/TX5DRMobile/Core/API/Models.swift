@@ -84,6 +84,51 @@ struct CreateAccountResponse: Codable, Identifiable, Sendable {
     let loginCredential: LoginCredentialSummary?
 }
 
+struct UpdateAccountRequest: Encodable, Sendable {
+    struct Credential: Encodable, Sendable {
+        let username: String
+        let password: String?
+    }
+
+    let label: String
+    let role: UserRole
+    let operatorIds: [String]
+    let maxOperators: Int
+    let allowSelfLoginCredential: Bool
+    let permissionGrants: [JSONValue]?
+    let loginCredential: Credential?
+    let clearLoginCredential: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case role
+        case operatorIds
+        case maxOperators
+        case allowSelfLoginCredential
+        case permissionGrants
+        case loginCredential
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(label, forKey: .label)
+        try container.encode(role, forKey: .role)
+        try container.encode(operatorIds, forKey: .operatorIds)
+        try container.encode(maxOperators, forKey: .maxOperators)
+        try container.encode(allowSelfLoginCredential, forKey: .allowSelfLoginCredential)
+        if let permissionGrants {
+            try container.encode(permissionGrants, forKey: .permissionGrants)
+        } else {
+            try container.encodeNil(forKey: .permissionGrants)
+        }
+        if clearLoginCredential {
+            try container.encodeNil(forKey: .loginCredential)
+        } else {
+            try container.encodeIfPresent(loginCredential, forKey: .loginCredential)
+        }
+    }
+}
+
 struct BrowserLoginCodeResponse: Codable, Sendable {
     let code: String
     let expiresAt: Double

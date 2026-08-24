@@ -14,94 +14,10 @@ struct ServerCPUProfileView: View {
 
     var body: some View {
         Form {
-            Section("采样状态") {
-                if let status {
-                    LabeledContent("状态") {
-                        Label(stateLabel(status.state), systemImage: stateIcon(status.state))
-                            .foregroundStyle(stateColor(status.state))
-                    }
-                    LabeledContent("运行环境", value: runtimeLabel(status.distribution))
-                    LabeledContent("配置来源", value: status.source)
-                    if let captureID = status.captureId {
-                        LabeledContent("采样 ID", value: captureID)
-                    }
-                    if let requestedAt = status.requestedAt {
-                        LabeledContent("请求时间", value: formattedTimestamp(requestedAt))
-                    }
-                    if let startedAt = status.startedAt {
-                        LabeledContent("开始时间", value: formattedTimestamp(startedAt))
-                    }
-                    if let completedAt = status.completedAt {
-                        LabeledContent("完成时间", value: formattedTimestamp(completedAt))
-                    }
-                } else {
-                    ProgressView("正在读取诊断状态…")
-                }
-            }
-
+            samplingStatusSection
             if let status {
-                Section("诊断流程") {
-                    Text(flowDescription(status))
-                        .font(.subheadline)
-                    if status.state == .armed || status.state == .running {
-                        LabeledContent(
-                            status.state == .armed ? "建议启动操作" : "建议结束操作",
-                            value: status.state == .armed
-                                ? status.recommendedStartAction
-                                : status.recommendedFinishAction
-                        )
-                    }
-
-                    switch status.state {
-                    case .idle, .interrupted, .missing:
-                        Button {
-                            Task { await arm() }
-                        } label: {
-                            Label("准备 CPU 采样", systemImage: "record.circle")
-                        }
-                        .disabled(busy)
-                    case .armed, .running:
-                        Button(role: .destructive) {
-                            Task { await cancel() }
-                        } label: {
-                            Label("取消本次采样", systemImage: "xmark.circle")
-                        }
-                        .disabled(busy)
-                    case .completed:
-                        Button {
-                            Task { await download() }
-                        } label: {
-                            Label("导出诊断文件", systemImage: "square.and.arrow.down")
-                        }
-                        .disabled(busy || status.profilePath == nil)
-
-                        Button {
-                            Task { await dismiss() }
-                        } label: {
-                            Label("完成并清除结果", systemImage: "checkmark.circle")
-                        }
-                        .disabled(busy)
-                    case .environmentOverride:
-                        Label("服务端由环境变量开启性能采样，此处只读。", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(RadioPalette.warning)
-                    }
-                } footer: {
-                    Text("引导采样通常需要按上方建议重启 TX-5DR。iOS App 不会擅自重启远端服务。")
-                }
-
-                Section("文件位置") {
-                    LabeledContent("服务端目录", value: status.outputDir)
-                    if let host = status.hostOutputDirHint {
-                        LabeledContent("宿主机目录", value: host)
-                    }
-                    if let path = status.profilePath {
-                        LabeledContent("诊断文件", value: path)
-                    }
-                    if let hostPath = status.hostProfilePathHint {
-                        LabeledContent("宿主机文件", value: hostPath)
-                    }
-                }
+                diagnosticFlowSection(status)
+                profileFilesSection(status)
             }
         }
         .scrollContentBackground(.hidden)
@@ -141,6 +57,109 @@ struct ServerCPUProfileView: View {
             Button("好") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "未知错误")
+        }
+    }
+
+    @ViewBuilder
+    private var samplingStatusSection: some View {
+        Section("采样状态") {
+            if let status {
+                LabeledContent("状态") {
+                    Label(stateLabel(status.state), systemImage: stateIcon(status.state))
+                        .foregroundStyle(stateColor(status.state))
+                }
+                LabeledContent("运行环境", value: runtimeLabel(status.distribution))
+                LabeledContent("配置来源", value: status.source)
+                if let captureID = status.captureId {
+                    LabeledContent("采样 ID", value: captureID)
+                }
+                if let requestedAt = status.requestedAt {
+                    LabeledContent("请求时间", value: formattedTimestamp(requestedAt))
+                }
+                if let startedAt = status.startedAt {
+                    LabeledContent("开始时间", value: formattedTimestamp(startedAt))
+                }
+                if let completedAt = status.completedAt {
+                    LabeledContent("完成时间", value: formattedTimestamp(completedAt))
+                }
+            } else {
+                ProgressView("正在读取诊断状态…")
+            }
+        }
+    }
+
+    private func diagnosticFlowSection(_ status: ServerCPUProfileStatus) -> some View {
+        Section {
+            Text(flowDescription(status))
+                .font(.subheadline)
+            recommendedAction(status)
+            diagnosticAction(status)
+        } header: {
+            Text("诊断流程")
+        } footer: {
+            Text("引导采样通常需要按上方建议重启 TX-5DR。iOS App 不会擅自重启远端服务。")
+        }
+    }
+
+    @ViewBuilder
+    private func recommendedAction(_ status: ServerCPUProfileStatus) -> some View {
+        if status.state == .armed {
+            LabeledContent("建议启动操作", value: status.recommendedStartAction)
+        } else if status.state == .running {
+            LabeledContent("建议结束操作", value: status.recommendedFinishAction)
+        }
+    }
+
+    @ViewBuilder
+    private func diagnosticAction(_ status: ServerCPUProfileStatus) -> some View {
+        switch status.state {
+        case .idle, .interrupted, .missing:
+            Button {
+                Task { await arm() }
+            } label: {
+                Label("准备 CPU 采样", systemImage: "record.circle")
+            }
+            .disabled(busy)
+        case .armed, .running:
+            Button(role: .destructive) {
+                Task { await cancel() }
+            } label: {
+                Label("取消本次采样", systemImage: "xmark.circle")
+            }
+            .disabled(busy)
+        case .completed:
+            Button {
+                Task { await download() }
+            } label: {
+                Label("导出诊断文件", systemImage: "square.and.arrow.down")
+            }
+            .disabled(busy || status.profilePath == nil)
+
+            Button {
+                Task { await dismiss() }
+            } label: {
+                Label("完成并清除结果", systemImage: "checkmark.circle")
+            }
+            .disabled(busy)
+        case .environmentOverride:
+            Label("服务端由环境变量开启性能采样，此处只读。", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(RadioPalette.warning)
+        }
+    }
+
+    private func profileFilesSection(_ status: ServerCPUProfileStatus) -> some View {
+        Section("文件位置") {
+            LabeledContent("服务端目录", value: status.outputDir)
+            if let host = status.hostOutputDirHint {
+                LabeledContent("宿主机目录", value: host)
+            }
+            if let path = status.profilePath {
+                LabeledContent("诊断文件", value: path)
+            }
+            if let hostPath = status.hostProfilePathHint {
+                LabeledContent("宿主机文件", value: hostPath)
+            }
         }
     }
 

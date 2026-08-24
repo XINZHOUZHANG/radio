@@ -86,6 +86,14 @@ actor TX5DRAPIClient {
         try await request(.post, "/auth/tokens", body: account)
     }
 
+    func updateAccount(id: String, request account: UpdateAccountRequest) async throws -> AuthTokenInfo {
+        try await request(.patch, "/auth/tokens/\(pathSegment(id))", body: account)
+    }
+
+    func regenerateAccount(id: String) async throws -> CreateAccountResponse {
+        try await request(.post, "/auth/tokens/\(pathSegment(id))/regenerate")
+    }
+
     func deleteAccount(id: String) async throws {
         let _: GenericSuccessResponse = try await request(.delete, "/auth/tokens/\(id)")
     }

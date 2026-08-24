@@ -919,6 +919,69 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(worked.data.meta.band, "20m")
     }
 
+    func testUpdateAccountEncodesNewLoginCredential() throws {
+        let request = UpdateAccountRequest(
+            label: "Field operator",
+            role: .operator,
+            operatorIds: ["op-1"],
+            maxOperators: 1,
+            allowSelfLoginCredential: true,
+            permissionGrants: [.object(["permission": .string("radio.control")])],
+            loginCredential: .init(username: "bh6ajs", password: "radio-pass-2026"),
+            clearLoginCredential: false
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        )
+        let credential = try XCTUnwrap(object["loginCredential"] as? [String: Any])
+
+        XCTAssertEqual(credential["username"] as? String, "bh6ajs")
+        XCTAssertEqual(credential["password"] as? String, "radio-pass-2026")
+        XCTAssertEqual((object["permissionGrants"] as? [[String: Any]])?.count, 1)
+        XCTAssertNil(object["clearLoginCredential"])
+    }
+
+    func testUpdateAccountOmitsUnchangedLoginCredential() throws {
+        let request = UpdateAccountRequest(
+            label: "Existing operator",
+            role: .operator,
+            operatorIds: ["op-1"],
+            maxOperators: 1,
+            allowSelfLoginCredential: false,
+            permissionGrants: [],
+            loginCredential: nil,
+            clearLoginCredential: false
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        )
+
+        XCTAssertFalse(object.keys.contains("loginCredential"))
+        XCTAssertNotNil(object["permissionGrants"] as? [Any])
+    }
+
+    func testUpdateAccountEncodesExplicitCredentialAndGrantRemoval() throws {
+        let request = UpdateAccountRequest(
+            label: "Administrator",
+            role: .admin,
+            operatorIds: [],
+            maxOperators: 0,
+            allowSelfLoginCredential: false,
+            permissionGrants: nil,
+            loginCredential: nil,
+            clearLoginCredential: true
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        )
+
+        XCTAssertTrue(object["loginCredential"] is NSNull)
+        XCTAssertTrue(object["permissionGrants"] is NSNull)
+    }
+
     private var idlePTT: PTTStatus {
         PTTStatus(
             isTransmitting: false,

@@ -1677,6 +1677,41 @@ final class TX5DRSession: ObservableObject {
         }
     }
 
+    func updateAccount(_ account: AuthTokenInfo, request: UpdateAccountRequest) async -> Bool {
+        guard isAdmin, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return false
+        }
+        do {
+            _ = try await apiClient.updateAccount(id: account.id, request: request)
+            accounts = try await apiClient.accounts()
+            if account.id == currentUser?.tokenId {
+                currentUser = try await apiClient.me()
+            }
+            noticeMessage = "账户已更新"
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    func regenerateSystemAccount(_ account: AuthTokenInfo) async -> CreateAccountResponse? {
+        guard isAdmin, account.system == true, let apiClient else {
+            fail(TX5DRSessionError.adminRequired)
+            return nil
+        }
+        do {
+            let regenerated = try await apiClient.regenerateAccount(id: account.id)
+            accounts = try await apiClient.accounts()
+            noticeMessage = "系统令牌已重新生成"
+            return regenerated
+        } catch {
+            fail(error)
+            return nil
+        }
+    }
+
     func updateOwnLogin(username: String, password: String?) async {
         guard let apiClient else { return fail(TX5DRSessionError.notConnected) }
         await performOperation(success: "登录账户已更新") {
