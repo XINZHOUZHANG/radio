@@ -210,9 +210,14 @@ struct TX5DRPluginSource: Codable, Sendable {
     let installedAt: Double
 }
 
+struct TX5DRPluginStrategyFeatures: Codable, Sendable {
+    let targetQueue: Int?
+}
+
 struct TX5DRPluginStatus: Codable, Identifiable, Sendable {
     let name: String
     let type: TX5DRPluginType
+    let strategyFeatures: TX5DRPluginStrategyFeatures?
     let instanceScope: String?
     let version: String
     let description: String?

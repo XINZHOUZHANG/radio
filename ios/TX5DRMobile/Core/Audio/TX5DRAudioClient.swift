@@ -45,18 +45,27 @@ private struct RealtimeReadyMessage: Decodable {
     let participantIdentity: String?
 }
 
+private struct RealtimeAudioTelemetry: Equatable {
+    var microphoneLevel: Double = 0
+    var receivedFrames: UInt64 = 0
+    var sentFrames: UInt64 = 0
+    var droppedUplinkFrames: UInt64 = 0
+}
+
 @MainActor
 final class TX5DRAudioClient: ObservableObject {
     @Published private(set) var listeningState: RealtimeAudioLinkState = .stopped
     @Published private(set) var transmitState: RealtimeAudioLinkState = .stopped
     @Published private(set) var participantIdentity: String?
-    @Published private(set) var microphoneLevel: Double = 0
-    @Published private(set) var receivedFrames: UInt64 = 0
-    @Published private(set) var sentFrames: UInt64 = 0
-    @Published private(set) var droppedUplinkFrames: UInt64 = 0
+    @Published private var telemetry = RealtimeAudioTelemetry()
     @Published private(set) var lastError: String?
     @Published private(set) var monitorVolumeDecibels: Double
     @Published private(set) var monitorMuted = false
+
+    var microphoneLevel: Double { telemetry.microphoneLevel }
+    var receivedFrames: UInt64 { telemetry.receivedFrames }
+    var sentFrames: UInt64 { telemetry.sentFrames }
+    var droppedUplinkFrames: UInt64 { telemetry.droppedUplinkFrames }
 
     private var server: TX5DRServer?
     private var apiClient: TX5DRAPIClient?
@@ -85,6 +94,11 @@ final class TX5DRAudioClient: ObservableObject {
     private var captureAccumulator: [Float] = []
     private var captureSampleRate: Double = 48_000
     private var uplinkSequence: UInt32 = 0
+    private var receivedFramesTotal: UInt64 = 0
+    private var sentFramesTotal: UInt64 = 0
+    private var droppedUplinkFramesTotal: UInt64 = 0
+    private var latestMicrophoneLevel: Double = 0
+    private var telemetryLimiter = AudioTelemetryLimiter(minimumInterval: 0.1)
     private static let monitorVolumeDefaultsKey = "tx5dr.monitorVolumeDecibels"
 
     init(urlSession: URLSession = TX5DRNetworkPolicy.session) {
@@ -114,7 +128,10 @@ final class TX5DRAudioClient: ObservableObject {
         lastError = nil
 
         do {
-            try configureAudioSession()
+            try configureAudioSession(for: AudioRuntimePolicy.intent(
+                isCapturingMicrophone: inputTapInstalled,
+                isListening: true
+            ))
             let offer: RealtimeTransportOffer
             if scope == "radio", previewSessionId == nil {
                 offer = try await apiClient.realtimeSession(direction: "recv")
@@ -141,6 +158,7 @@ final class TX5DRAudioClient: ObservableObject {
                 listeningState = .failed(error.localizedDescription)
                 lastError = error.localizedDescription
                 closeDownlinkSocket()
+                reconcileAudioRuntime()
             }
             throw error
         }
@@ -151,8 +169,10 @@ final class TX5DRAudioClient: ObservableObject {
         closeDownlinkSocket()
         playerNode.stop()
         scheduledPlaybackFrames = 0
-        receivedFrames = 0
+        receivedFramesTotal = 0
         listeningState = .stopped
+        publishTelemetry(force: true)
+        reconcileAudioRuntime()
     }
 
     func prepareUplink() async throws -> String {
@@ -167,11 +187,11 @@ final class TX5DRAudioClient: ObservableObject {
         transmitState = .connecting
         lastError = nil
         uplinkSequence = 0
-        sentFrames = 0
-        droppedUplinkFrames = 0
+        sentFramesTotal = 0
+        droppedUplinkFramesTotal = 0
+        publishTelemetry(force: true)
 
         do {
-            try configureAudioSession()
             let offer = try await apiClient.realtimeSession(direction: "send")
             participantIdentity = offer.participantIdentity
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
@@ -208,7 +228,7 @@ final class TX5DRAudioClient: ObservableObject {
             throw TX5DRAudioError.microphonePermissionDenied
         }
 
-        try configureAudioSession()
+        try configureAudioSession(for: .playAndRecord)
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
@@ -243,12 +263,14 @@ final class TX5DRAudioClient: ObservableObject {
             inputTapInstalled = false
         }
         captureAccumulator.removeAll(keepingCapacity: true)
-        microphoneLevel = 0
+        latestMicrophoneLevel = 0
         if uplinkSocket != nil {
             transmitState = .ready
         } else {
             transmitState = .stopped
         }
+        publishTelemetry(force: true)
+        reconcileAudioRuntime()
     }
 
     func shutdownUplink() {
@@ -265,6 +287,11 @@ final class TX5DRAudioClient: ObservableObject {
         audioEngine.stop()
         playbackSampleRate = nil
         playbackChannels = nil
+        receivedFramesTotal = 0
+        sentFramesTotal = 0
+        droppedUplinkFramesTotal = 0
+        latestMicrophoneLevel = 0
+        publishTelemetry(force: true)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -305,6 +332,7 @@ final class TX5DRAudioClient: ObservableObject {
             downlinkSocket = nil
             listeningState = .failed(error.localizedDescription)
             lastError = error.localizedDescription
+            reconcileAudioRuntime()
         }
     }
 
@@ -350,7 +378,8 @@ final class TX5DRAudioClient: ObservableObject {
         try ensurePlaybackFormat(buffer.format)
 
         scheduledPlaybackFrames += 1
-        receivedFrames &+= 1
+        receivedFramesTotal &+= 1
+        publishTelemetry()
         playerNode.scheduleBuffer(buffer) { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -404,16 +433,52 @@ final class TX5DRAudioClient: ObservableObject {
         try audioEngine.start()
     }
 
-    private func configureAudioSession() throws {
+    private func configureAudioSession(for intent: AudioRuntimeIntent) throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth]
+        switch intent {
+        case .inactive:
+            if audioEngine.isRunning { audioEngine.stop() }
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+        case .playback:
+            try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
+            try session.setPreferredSampleRate(48_000)
+            try session.setPreferredIOBufferDuration(0.02)
+            try session.setActive(true)
+        case .playAndRecord:
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetooth]
+            )
+            try session.setPreferredSampleRate(48_000)
+            try session.setPreferredIOBufferDuration(0.02)
+            try session.setActive(true)
+        }
+    }
+
+    private func reconcileAudioRuntime() {
+        let intent = AudioRuntimePolicy.intent(
+            isCapturingMicrophone: inputTapInstalled,
+            isListening: downlinkSocket != nil
         )
-        try session.setPreferredSampleRate(48_000)
-        try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
+        do {
+            try configureAudioSession(for: intent)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func publishTelemetry(force: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if force { telemetryLimiter.reset() }
+        guard telemetryLimiter.shouldPublish(at: now) else { return }
+        let next = RealtimeAudioTelemetry(
+            microphoneLevel: latestMicrophoneLevel,
+            receivedFrames: receivedFramesTotal,
+            sentFrames: sentFramesTotal,
+            droppedUplinkFrames: droppedUplinkFramesTotal
+        )
+        if telemetry != next { telemetry = next }
     }
 
     private func requestMicrophonePermission() async -> Bool {
@@ -457,7 +522,7 @@ final class TX5DRAudioClient: ObservableObject {
 
     private func enqueueUplinkFrame(_ samples: [Float], sampleRate: Double) {
         let rms = sqrt(samples.reduce(0) { $0 + Double($1 * $1) } / Double(max(1, samples.count)))
-        microphoneLevel = min(1, rms * 4)
+        latestMicrophoneLevel = min(1, rms * 4)
         let pcm = samples.map { sample -> Int16 in
             let clipped = max(-1, min(1, sample))
             return clipped < 0
@@ -466,7 +531,8 @@ final class TX5DRAudioClient: ObservableObject {
         }
         guard let sampleRateValue = UInt32(exactly: Int(sampleRate.rounded())),
               let samplesPerChannel = UInt16(exactly: pcm.count) else {
-            droppedUplinkFrames &+= 1
+            droppedUplinkFramesTotal &+= 1
+            publishTelemetry()
             return
         }
 
@@ -482,19 +548,21 @@ final class TX5DRAudioClient: ObservableObject {
         )
         uplinkSequence &+= 1
         guard let data = try? RealtimeAudioFrameCodec.encode(frame) else {
-            droppedUplinkFrames &+= 1
+            droppedUplinkFramesTotal &+= 1
+            publishTelemetry()
             return
         }
         switch uplinkContinuation?.yield(data) {
         case .dropped:
-            droppedUplinkFrames &+= 1
+            droppedUplinkFramesTotal &+= 1
         case .enqueued:
-            sentFrames &+= 1
+            sentFramesTotal &+= 1
         case .terminated, .none:
-            droppedUplinkFrames &+= 1
+            droppedUplinkFramesTotal &+= 1
         @unknown default:
-            droppedUplinkFrames &+= 1
+            droppedUplinkFramesTotal &+= 1
         }
+        publishTelemetry()
     }
 
     private func startUplinkSendLoop(_ socket: URLSessionWebSocketTask, generation: Int) {

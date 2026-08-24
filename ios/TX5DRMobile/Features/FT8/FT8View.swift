@@ -23,6 +23,17 @@ struct FT8DecodedFeedState: Equatable {
     }
 }
 
+private enum FT8FocusedField: Hashable {
+    case callsign
+    case filter
+    case contextCallsign
+    case contextGrid
+    case reportSent
+    case reportReceived
+    case audioFrequency
+    case slot(String)
+}
+
 struct FT8View: View {
     @EnvironmentObject private var session: TX5DRSession
     @EnvironmentObject private var radio: RadioWebSocket
@@ -33,6 +44,7 @@ struct FT8View: View {
     @State private var contextDraft = FT8OperatorContextDraft()
     @State private var contextDirty = false
     @State private var decodedFeed = FT8DecodedFeedState()
+    @FocusState private var focusedField: FT8FocusedField?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,9 +67,14 @@ struct FT8View: View {
                 }
                 .disabled(displayedFrames.isEmpty)
             }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { focusedField = nil }
+            }
         }
         .onAppear { syncContextDraft(force: true) }
         .onChange(of: session.selectedOperatorId) { _, _ in
+            focusedField = nil
             slotDrafts = [:]
             contextDirty = false
             decodedFeed.resume()
@@ -95,6 +112,9 @@ struct FT8View: View {
                 TextField("目标呼号", text: $callsign)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .callsign)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
                     .padding(12)
                     .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 Button("呼叫") {
@@ -102,15 +122,17 @@ struct FT8View: View {
                 }
                 .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
                 .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controlsReady)
-                Menu {
-                    Button("加入队列并在空闲时启动") { enqueue(startIfIdle: true) }
-                    Button("仅加入等待队列") { enqueue(startIfIdle: false) }
-                } label: {
-                    Image(systemName: "text.badge.plus")
-                        .frame(width: 42, height: 42)
-                        .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                if targetQueueSupported {
+                    Menu {
+                        Button("加入队列并在空闲时启动") { enqueue(startIfIdle: true) }
+                        Button("仅加入等待队列") { enqueue(startIfIdle: false) }
+                    } label: {
+                        Image(systemName: "text.badge.plus")
+                            .frame(width: 42, height: 42)
+                            .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controlsReady)
                 }
-                .disabled(callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controlsReady)
             }
 
             HStack {
@@ -119,6 +141,9 @@ struct FT8View: View {
                 TextField("筛选解码消息", text: $filter)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .filter)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
                     .font(.subheadline)
             }
             .padding(.horizontal, 12)
@@ -164,7 +189,12 @@ struct FT8View: View {
                         .font(.caption.monospaced())
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
-                        .onSubmit { saveSlot(slot) }
+                        .focused($focusedField, equals: .slot(slot))
+                        .submitLabel(.done)
+                        .onSubmit {
+                            saveSlot(slot)
+                            focusedField = nil
+                        }
                         Button { saveSlot(slot) } label: { Image(systemName: "checkmark.circle") }
                             .buttonStyle(.plain)
                     }
@@ -178,7 +208,7 @@ struct FT8View: View {
                 Label("自动应答、时隙与队列", systemImage: "list.bullet.rectangle")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                if let queue {
+                if targetQueueSupported, let queue {
                     Text("\(queue.rows.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(RadioPalette.muted)
@@ -208,22 +238,27 @@ struct FT8View: View {
                 TextField("目标呼号", text: contextBinding(\.targetCallsign))
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .contextCallsign)
                     .textFieldStyle(.roundedBorder)
                 TextField("目标网格", text: contextBinding(\.targetGrid))
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .contextGrid)
                     .textFieldStyle(.roundedBorder)
             }
 
             HStack(spacing: 8) {
                 TextField("TX 报告", text: contextBinding(\.reportSent))
                     .keyboardType(.numbersAndPunctuation)
+                    .focused($focusedField, equals: .reportSent)
                     .textFieldStyle(.roundedBorder)
                 TextField("RX 报告", text: contextBinding(\.reportReceived))
                     .keyboardType(.numbersAndPunctuation)
+                    .focused($focusedField, equals: .reportReceived)
                     .textFieldStyle(.roundedBorder)
                 TextField("音频 Hz", text: contextBinding(\.audioFrequencyHz))
                     .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .audioFrequency)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -259,7 +294,11 @@ struct FT8View: View {
 
     @ViewBuilder
     private var queueView: some View {
-        if let queue {
+        if !targetQueueSupported {
+            Text("当前自动化策略不支持呼叫队列，请使用“呼叫”。")
+                .font(.caption)
+                .foregroundStyle(RadioPalette.muted)
+        } else if let queue {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Text("自动呼叫队列")
@@ -389,6 +428,7 @@ struct FT8View: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
+                    .scrollDismissesKeyboard(.interactively)
                 }
             }
         }
@@ -403,6 +443,18 @@ struct FT8View: View {
 
     private var controlsReady: Bool {
         session.selectedOperatorId != nil && radio.state == .ready
+    }
+
+    private var selectedStrategyName: String? {
+        if let name = selectedStatus?["strategy"]?["name"]?.stringValue { return name }
+        if let name = selectedStatus?["strategyName"]?.stringValue { return name }
+        guard let id = session.selectedOperatorId else { return nil }
+        return session.pluginOperatorStates[id]?.currentStrategy
+    }
+
+    private var targetQueueSupported: Bool {
+        let plugins = (radio.pluginSnapshot ?? session.pluginSnapshot)?.plugins ?? []
+        return FT8QueueCapability.supports(strategyName: selectedStrategyName, plugins: plugins)
     }
 
     private var runtime: JSONValue? { selectedStatus?["runtime"] }
@@ -434,6 +486,7 @@ struct FT8View: View {
     }
 
     private func saveSlot(_ slot: String) {
+        focusedField = nil
         guard let id = session.selectedOperatorId else { return }
         let content = slotDrafts[slot] ?? runtime?["slots"]?[slot]?.stringValue ?? ""
         radio.setOperatorRuntimeSlotContent(content, slot: slot, operatorId: id)
@@ -456,10 +509,12 @@ struct FT8View: View {
     }
 
     private func applyContext() {
+        focusedField = nil
         _ = sendContext(contextDraft, notice: "FT8 通联上下文已应用")
     }
 
     private func resetToCQ() {
+        focusedField = nil
         guard let id = session.selectedOperatorId else { return }
         var draft = contextDraft
         draft.targetCallsign = ""
@@ -473,6 +528,7 @@ struct FT8View: View {
     }
 
     private func selectDecodedFrame(_ frame: FrameMessage) {
+        focusedField = nil
         guard let candidate = candidateCallsign(in: frame.message) else { return }
         callsign = candidate
         contextDraft.targetCallsign = candidate
@@ -481,6 +537,7 @@ struct FT8View: View {
     }
 
     private func callTarget(_ rawTarget: String, frequency: Double? = nil) {
+        focusedField = nil
         let target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !target.isEmpty else { return }
 
@@ -513,6 +570,11 @@ struct FT8View: View {
     }
 
     private func enqueue(startIfIdle: Bool) {
+        focusedField = nil
+        guard targetQueueSupported else {
+            session.noticeMessage = RadioServerNotice.localized("strategy_not_queue_capable")
+            return
+        }
         guard let id = session.selectedOperatorId else { return }
         let target = callsign.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !target.isEmpty else { return }

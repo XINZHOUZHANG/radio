@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RadioShellView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: TX5DRSession
     @EnvironmentObject private var radio: RadioWebSocket
     @EnvironmentObject private var audio: TX5DRAudioClient
@@ -39,6 +40,11 @@ struct RadioShellView: View {
                 session.endVoicePTT()
                 session.noticeMessage = "控制通道：\(message)"
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            session.endVoicePTT()
+            audio.stopMicrophoneCapture()
         }
     }
 

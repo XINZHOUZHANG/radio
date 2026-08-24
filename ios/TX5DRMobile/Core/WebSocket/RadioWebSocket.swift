@@ -677,10 +677,11 @@ final class RadioWebSocket: ObservableObject {
         case "pluginPagePush":
             break
         case "textMessage", "error", "radioError":
-            lastNotice = envelope.data?["text"]?.stringValue
+            let message = envelope.data?["text"]?.stringValue
                 ?? envelope.data?["message"]?.stringValue
                 ?? envelope.data?["userMessage"]?.stringValue
                 ?? envelope.type
+            lastNotice = RadioServerNotice.localized(message)
         default:
             break
         }
@@ -997,7 +998,7 @@ final class RadioWebSocket: ObservableObject {
             "enabledOperatorIds": enabledOperatorIds.map { .array($0.map(JSONValue.string)) } ?? .null,
             "selectedOperatorId": selectedOperatorId.map(JSONValue.string) ?? .null,
             "clientInstanceId": .string(instanceId),
-            "clientVersion": .string("0.1.3-ios"),
+            "clientVersion": .string("0.1.4-ios"),
             "clientCapabilities": .array([
                 .string("operatorFiltering"),
                 .string("handshakeProtocol"),
