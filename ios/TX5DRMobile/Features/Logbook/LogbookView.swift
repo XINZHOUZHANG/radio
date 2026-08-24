@@ -21,6 +21,13 @@ struct LogbookView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if let logbookId = session.selectedLogbookId {
+                    NavigationLink {
+                        LogbookMapView(logbookId: logbookId)
+                    } label: {
+                        Image(systemName: "map")
+                    }
+                }
                 NavigationLink {
                     LogbookManagementView()
                 } label: {

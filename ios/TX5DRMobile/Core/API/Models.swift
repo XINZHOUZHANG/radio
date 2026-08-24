@@ -1419,6 +1419,62 @@ struct QSOListResponse: Codable, Sendable {
     let meta: Metadata
 }
 
+struct LogbookRecentGlobeResponse: Codable, Sendable {
+    struct Payload: Codable, Sendable {
+        struct Home: Codable, Sendable {
+            let source: String
+            let grid: String?
+            let latitude: Double
+            let longitude: Double
+        }
+
+        struct Item: Codable, Identifiable, Sendable {
+            let id: String
+            let callsign: String
+            let startTime: Double
+            let mode: String
+            let frequency: Double
+            let grid: String
+        }
+
+        struct Metadata: Codable, Sendable {
+            let hours: Int
+            let totalReturned: Int
+            let droppedInvalidGrid: Int
+            let limited: Bool
+        }
+
+        let home: Home?
+        let items: [Item]
+        let meta: Metadata
+    }
+
+    let success: Bool
+    let data: Payload
+}
+
+struct LogbookWorkedGridResponse: Codable, Sendable {
+    struct Payload: Codable, Sendable {
+        struct Item: Codable, Identifiable, Sendable {
+            let grid: String
+            let count: Int
+
+            var id: String { grid }
+        }
+
+        struct Metadata: Codable, Sendable {
+            let band: String?
+            let total: Int
+        }
+
+        let items: [Item]
+        let meta: Metadata
+    }
+
+    let success: Bool
+    let data: Payload
+}
+
 struct LogbookQSOQuery: Equatable, Sendable {
     var callsign: String?
     var grid: String?

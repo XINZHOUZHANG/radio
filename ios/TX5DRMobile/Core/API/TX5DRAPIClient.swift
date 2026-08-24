@@ -971,6 +971,38 @@ actor TX5DRAPIClient {
         )
     }
 
+    func recentLogbookGlobe(
+        logbookId: String,
+        hours: Int,
+        limit: Int,
+        operatorId: String?
+    ) async throws -> LogbookRecentGlobeResponse {
+        var queryItems = [
+            URLQueryItem(name: "hours", value: String(hours)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        if let operatorId, !operatorId.isEmpty {
+            queryItems.append(URLQueryItem(name: "operatorId", value: operatorId))
+        }
+        return try await request(
+            .get,
+            "/logbooks/\(pathSegment(logbookId))/recent-globe",
+            queryItems: queryItems
+        )
+    }
+
+    func workedLogbookGrids(
+        logbookId: String,
+        band: String?
+    ) async throws -> LogbookWorkedGridResponse {
+        let queryItems = band.map { [URLQueryItem(name: "band", value: $0)] } ?? []
+        return try await request(
+            .get,
+            "/logbooks/\(pathSegment(logbookId))/worked-grids",
+            queryItems: queryItems
+        )
+    }
+
     func createQSO(logbookId: String, request body: CreateQSORequest) async throws -> QSOActionResponse {
         try await request(.post, "/logbooks/\(pathSegment(logbookId))/qsos", body: body)
     }

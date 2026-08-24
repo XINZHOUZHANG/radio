@@ -1205,6 +1205,29 @@ final class TX5DRSession: ObservableObject {
         }
     }
 
+    func recentLogbookGlobe(
+        logbookId: String,
+        hours: Int,
+        limit: Int,
+        operatorId: String?
+    ) async throws -> LogbookRecentGlobeResponse {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.recentLogbookGlobe(
+            logbookId: logbookId,
+            hours: hours,
+            limit: limit,
+            operatorId: operatorId
+        )
+    }
+
+    func workedLogbookGrids(
+        logbookId: String,
+        band: String?
+    ) async throws -> LogbookWorkedGridResponse {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.workedLogbookGrids(logbookId: logbookId, band: band)
+    }
+
     func createQSO(_ request: CreateQSORequest) async -> Bool {
         guard let apiClient, let selectedLogbookId else {
             fail(TX5DRSessionError.notConnected)

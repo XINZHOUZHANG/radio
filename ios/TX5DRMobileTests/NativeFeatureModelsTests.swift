@@ -856,6 +856,69 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertEqual(query.activeFilterCount, 10)
     }
 
+    func testMaidenheadGridProducesFieldSquareAndSubsquareCenters() throws {
+        let field = try XCTUnwrap(MaidenheadGrid.bounds(for: "AA"))
+        let square = try XCTUnwrap(MaidenheadGrid.bounds(for: "FN31"))
+        let subsquare = try XCTUnwrap(MaidenheadGrid.bounds(for: "pm95vr"))
+
+        XCTAssertEqual(field.centerLongitude, -170, accuracy: 0.0001)
+        XCTAssertEqual(field.centerLatitude, -85, accuracy: 0.0001)
+        XCTAssertEqual(square.centerLongitude, -73, accuracy: 0.0001)
+        XCTAssertEqual(square.centerLatitude, 41.5, accuracy: 0.0001)
+        XCTAssertEqual(subsquare.centerLongitude, 139.791_666, accuracy: 0.0001)
+        XCTAssertEqual(subsquare.centerLatitude, 35.729_166, accuracy: 0.0001)
+        XCTAssertNil(MaidenheadGrid.bounds(for: "ZZ99"))
+        XCTAssertNil(MaidenheadGrid.bounds(for: "PM9"))
+    }
+
+    func testLogbookMapResponsesDecodeTX5DRShapes() throws {
+        let recentData = Data(#"""
+        {
+          "success": true,
+          "data": {
+            "home": {
+              "source": "operator_grid",
+              "grid": "PN35AA",
+              "latitude": 35.020833,
+              "longitude": 130.041667
+            },
+            "items": [{
+              "id": "qso-1",
+              "callsign": "JA1ABC",
+              "startTime": 1720000000000,
+              "mode": "FT8",
+              "frequency": 14074000,
+              "grid": "PM95"
+            }],
+            "meta": {
+              "hours": 24,
+              "totalReturned": 1,
+              "droppedInvalidGrid": 2,
+              "limited": false
+            }
+          }
+        }
+        """#.utf8)
+        let workedData = Data(#"""
+        {
+          "success": true,
+          "data": {
+            "items": [{"grid":"PM95","count":7}],
+            "meta": {"band":"20m","total":1}
+          }
+        }
+        """#.utf8)
+
+        let recent = try JSONDecoder().decode(LogbookRecentGlobeResponse.self, from: recentData)
+        let worked = try JSONDecoder().decode(LogbookWorkedGridResponse.self, from: workedData)
+
+        XCTAssertEqual(recent.data.home?.source, "operator_grid")
+        XCTAssertEqual(recent.data.items.first?.callsign, "JA1ABC")
+        XCTAssertEqual(recent.data.meta.droppedInvalidGrid, 2)
+        XCTAssertEqual(worked.data.items.first?.count, 7)
+        XCTAssertEqual(worked.data.meta.band, "20m")
+    }
+
     private var idlePTT: PTTStatus {
         PTTStatus(
             isTransmitting: false,
