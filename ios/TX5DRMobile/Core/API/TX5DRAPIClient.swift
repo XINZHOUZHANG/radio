@@ -2,6 +2,7 @@ import Foundation
 
 enum TX5DRNetworkPolicy {
     static let timeout: TimeInterval = 5 * 60
+    static let maximumWebSocketMessageSize = 64 * 1024 * 1024
 
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -15,6 +16,12 @@ enum TX5DRNetworkPolicy {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         return request
+    }
+
+    static func webSocketTask(session: URLSession, url: URL) -> URLSessionWebSocketTask {
+        let task = session.webSocketTask(with: request(url: url))
+        task.maximumMessageSize = maximumWebSocketMessageSize
+        return task
     }
 }
 

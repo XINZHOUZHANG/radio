@@ -120,7 +120,7 @@ final class LogbookWebSocket: ObservableObject {
             queryItems.append(URLQueryItem(name: "token", value: jwt))
 
             let url = try server.webSocketURL("/ws/logbook", queryItems: queryItems)
-            let socket = session.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
+            let socket = TX5DRNetworkPolicy.webSocketTask(session: session, url: url)
             task = socket
             state = .connecting
             socket.resume()

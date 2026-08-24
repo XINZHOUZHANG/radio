@@ -126,7 +126,7 @@ final class TX5DRAudioClient: ObservableObject {
                 )
             }
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
-            let socket = urlSession.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
+            let socket = TX5DRNetworkPolicy.webSocketTask(session: urlSession, url: url)
             downlinkSocket = socket
             socket.resume()
             downlinkReceiveTask = Task { [weak self] in
@@ -175,7 +175,7 @@ final class TX5DRAudioClient: ObservableObject {
             let offer = try await apiClient.realtimeSession(direction: "send")
             participantIdentity = offer.participantIdentity
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
-            let socket = urlSession.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
+            let socket = TX5DRNetworkPolicy.webSocketTask(session: urlSession, url: url)
             uplinkSocket = socket
             startUplinkSendLoop(socket, generation: generation)
             socket.resume()
@@ -210,7 +210,7 @@ final class TX5DRAudioClient: ObservableObject {
 
         try configureAudioSession()
         let inputNode = audioEngine.inputNode
-        let format = inputNode.inputFormat(forBus: 0)
+        let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw TX5DRAudioError.microphoneUnavailable
         }
@@ -218,7 +218,7 @@ final class TX5DRAudioClient: ObservableObject {
         captureAccumulator.removeAll(keepingCapacity: true)
         captureSampleRate = format.sampleRate
         let requestedFrames = AVAudioFrameCount(max(128, Int(format.sampleRate * 0.02)))
-        inputNode.installTap(onBus: 0, bufferSize: requestedFrames, format: nil) { [weak self] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: requestedFrames, format: format) { [weak self] buffer, _ in
             let samples = Self.copyMonoSamples(from: buffer)
             let sampleRate = buffer.format.sampleRate
             Task { @MainActor [weak self] in

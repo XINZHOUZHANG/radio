@@ -1,6 +1,28 @@
 import SwiftUI
 import UIKit
 
+struct FT8DecodedFeedState: Equatable {
+    private(set) var frozenFrames: [FrameMessage]?
+
+    var isFrozen: Bool { frozenFrames != nil }
+
+    func displayedFrames(live: [FrameMessage]) -> [FrameMessage] {
+        frozenFrames ?? live
+    }
+
+    mutating func freeze(live: [FrameMessage]) {
+        frozenFrames = live
+    }
+
+    mutating func resume() {
+        frozenFrames = nil
+    }
+
+    mutating func clear() {
+        if isFrozen { frozenFrames = [] }
+    }
+}
+
 struct FT8View: View {
     @EnvironmentObject private var session: TX5DRSession
     @EnvironmentObject private var radio: RadioWebSocket
@@ -10,6 +32,7 @@ struct FT8View: View {
     @State private var slotDrafts: [String: String] = [:]
     @State private var contextDraft = FT8OperatorContextDraft()
     @State private var contextDirty = false
+    @State private var decodedFeed = FT8DecodedFeedState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,16 +47,20 @@ struct FT8View: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { radio.clearDecodedFrames() } label: {
+                Button {
+                    radio.clearDecodedFrames()
+                    decodedFeed.clear()
+                } label: {
                     Image(systemName: "trash")
                 }
-                .disabled(radio.decodedFrames.isEmpty)
+                .disabled(displayedFrames.isEmpty)
             }
         }
         .onAppear { syncContextDraft(force: true) }
         .onChange(of: session.selectedOperatorId) { _, _ in
             slotDrafts = [:]
             contextDirty = false
+            decodedFeed.resume()
             syncContextDraft(force: true)
         }
         .onChange(of: selectedStatus) { _, _ in
@@ -282,54 +309,87 @@ struct FT8View: View {
     }
 
     private var decodedList: some View {
-        Group {
-            if filteredFrames.isEmpty {
-                ContentUnavailableView(
-                    "等待数字模式解码",
-                    systemImage: "waveform.path.ecg",
-                    description: Text("启动操作员后，TX-5DR 的时隙解码会实时显示在这里。")
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Label(
+                    decodedFeed.isFrozen ? "已暂停更新" : "实时更新",
+                    systemImage: decodedFeed.isFrozen ? "pause.circle.fill" : "dot.radiowaves.left.and.right"
                 )
-            } else {
-                List(filteredFrames) { frame in
-                    Button {
-                        selectDecodedFrame(frame)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Text(String(format: "%+.0f", frame.snr))
-                                .font(.system(.subheadline, design: .monospaced).weight(.bold))
-                                .foregroundStyle(frame.snr >= 0 ? RadioPalette.accent : RadioPalette.cyan)
-                                .frame(width: 38, alignment: .trailing)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(frame.message)
-                                    .font(.system(.body, design: .monospaced).weight(.medium))
-                                    .foregroundStyle(Color.white)
-                                HStack(spacing: 12) {
-                                    Text(String(format: "DT %+.1f", frame.dt))
-                                    Text(String(format: "%.0f Hz", frame.freq))
-                                    if let operatorId = frame.operatorId {
-                                        Text(operatorId)
-                                    }
-                                }
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(RadioPalette.muted)
-                            }
-                            Spacer()
-                            Image(systemName: "scope")
-                                .foregroundStyle(RadioPalette.muted)
-                        }
-                        .padding(.vertical, 3)
-                    }
-                    .buttonStyle(.plain)
-                    .listRowBackground(RadioPalette.panel)
-                    .contextMenu {
-                        if let candidate = candidateCallsign(in: frame.message) {
-                            Button("呼叫 \(candidate)") { callTarget(candidate, frequency: frame.freq) }
-                        }
-                        Button("复制消息") { UIPasteboard.general.string = frame.message }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(decodedFeed.isFrozen ? RadioPalette.warning : RadioPalette.accent)
+
+                Text("\(filteredFrames.count) 条")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(RadioPalette.muted)
+
+                Spacer()
+
+                Button(decodedFeed.isFrozen ? "继续实时" : "暂停更新") {
+                    if decodedFeed.isFrozen {
+                        decodedFeed.resume()
+                    } else {
+                        decodedFeed.freeze(live: radio.decodedFrames)
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .buttonStyle(RadioActionButtonStyle(tint: decodedFeed.isFrozen ? RadioPalette.accent : RadioPalette.warning))
+                .disabled(displayedFrames.isEmpty && !decodedFeed.isFrozen)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(RadioPalette.panel)
+
+            Group {
+                if filteredFrames.isEmpty {
+                    ContentUnavailableView(
+                        decodedFeed.isFrozen ? "已暂停，当前快照为空" : "等待数字模式解码",
+                        systemImage: decodedFeed.isFrozen ? "pause.circle" : "waveform.path.ecg",
+                        description: Text(decodedFeed.isFrozen ? "点“继续实时”恢复接收最新解码。" : "启动操作员后，TX-5DR 的时隙解码会实时显示在这里。")
+                    )
+                } else {
+                    List(filteredFrames) { frame in
+                        Button {
+                            if !decodedFeed.isFrozen {
+                                decodedFeed.freeze(live: radio.decodedFrames)
+                            }
+                            selectDecodedFrame(frame)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Text(String(format: "%+.0f", frame.snr))
+                                    .font(.system(.subheadline, design: .monospaced).weight(.bold))
+                                    .foregroundStyle(frame.snr >= 0 ? RadioPalette.accent : RadioPalette.cyan)
+                                    .frame(width: 38, alignment: .trailing)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(frame.message)
+                                        .font(.system(.body, design: .monospaced).weight(.medium))
+                                        .foregroundStyle(Color.white)
+                                    HStack(spacing: 12) {
+                                        Text(String(format: "DT %+.1f", frame.dt))
+                                        Text(String(format: "%.0f Hz", frame.freq))
+                                        if let operatorId = frame.operatorId {
+                                            Text(operatorId)
+                                        }
+                                    }
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(RadioPalette.muted)
+                                }
+                                Spacer()
+                                Image(systemName: "scope")
+                                    .foregroundStyle(RadioPalette.muted)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(RadioPalette.panel)
+                        .contextMenu {
+                            if let candidate = candidateCallsign(in: frame.message) {
+                                Button("呼叫 \(candidate)") { callTarget(candidate, frequency: frame.freq) }
+                            }
+                            Button("复制消息") { UIPasteboard.general.string = frame.message }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                }
             }
         }
     }
@@ -472,8 +532,12 @@ struct FT8View: View {
 
     private var filteredFrames: [FrameMessage] {
         let query = filter.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !query.isEmpty else { return radio.decodedFrames }
-        return radio.decodedFrames.filter { $0.message.uppercased().contains(query) }
+        guard !query.isEmpty else { return displayedFrames }
+        return displayedFrames.filter { $0.message.uppercased().contains(query) }
+    }
+
+    private var displayedFrames: [FrameMessage] {
+        decodedFeed.displayedFrames(live: radio.decodedFrames)
     }
 
     private func candidateCallsign(in message: String) -> String? {

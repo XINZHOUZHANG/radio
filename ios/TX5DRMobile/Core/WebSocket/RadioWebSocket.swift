@@ -140,7 +140,7 @@ final class RadioWebSocket: ObservableObject {
         reconnectTask?.cancel()
         do {
             let url = try server.webSocketURL("/ws")
-            let socket = session.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
+            let socket = TX5DRNetworkPolicy.webSocketTask(session: session, url: url)
             task = socket
             state = .connecting
             socket.resume()
@@ -997,7 +997,7 @@ final class RadioWebSocket: ObservableObject {
             "enabledOperatorIds": enabledOperatorIds.map { .array($0.map(JSONValue.string)) } ?? .null,
             "selectedOperatorId": selectedOperatorId.map(JSONValue.string) ?? .null,
             "clientInstanceId": .string(instanceId),
-            "clientVersion": .string("0.1.0-ios"),
+            "clientVersion": .string("0.1.3-ios"),
             "clientCapabilities": .array([
                 .string("operatorFiltering"),
                 .string("handshakeProtocol"),
