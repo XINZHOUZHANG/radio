@@ -34,4 +34,12 @@ final class WebSocketEnvelopeTests: XCTestCase {
         XCTAssertEqual(envelope.timestamp, "now")
         XCTAssertEqual(envelope.data?["power"]?["percent"]?.doubleValue, 42.5)
     }
+
+    func testQueueCapabilityErrorIsLocalizedWithoutHidingUnknownServerErrors() {
+        XCTAssertEqual(
+            RadioServerNotice.localized("strategy_not_queue_capable"),
+            "当前自动化策略不支持呼叫队列，请使用“呼叫”"
+        )
+        XCTAssertEqual(RadioServerNotice.localized("custom_server_error"), "custom_server_error")
+    }
 }
