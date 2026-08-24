@@ -21,9 +21,24 @@ Implemented in the first milestone:
 - authenticated `/ws/control` and `/ws/media` on the same listener; and
 - append-only secret-filtered `audit.jsonl`.
 
-Opus media workers, binary spectrum frames, FT8/FT4 DSP/automatic QSO, ADIF and
-the SwiftUI Radio Lite adapter are the next implementation slices; see the
-design document for their exact boundaries.
+The media milestone now also includes:
+
+- a 16-byte binary media envelope and compact UInt8 spectrum payload;
+- adaptive 20/16/12 kbit/s Opus and 512/256/128-bin spectrum policies;
+- Ogg/Opus packet framing with CRC validation and bounded process pipes;
+- ALSA or PulseAudio capture/playback through Debian `opus-tools`;
+- a synthetic waterfall for Hamlib Dummy profiles;
+- microphone uplink binding to a voice transmit token;
+- immediate PTT release on media disconnect, worker failure or token expiry;
+- a three-second uplink-bind deadline so an unbound carrier cannot remain on; and
+- stale-media dropping when a WebSocket client is congested.
+
+FT8/FT4 DSP/automatic QSO, ADIF and the SwiftUI Radio Lite adapter are the next
+implementation slices; see the design document for their exact boundaries.
+
+On Debian 13, real audio currently requires `alsa-utils` or
+`pulseaudio-utils`, plus `opus-tools`. These remain operating-system packages
+and are not copied into the Node application.
 
 ## Local tests
 
@@ -32,6 +47,8 @@ Argon2id implementation.
 
 ```sh
 npm test
+npm run typecheck
 ```
 
-See `../docs/design/2026-08-24-radio-lite-server.md` for the approved design.
+See `PROTOCOL.md` for the wire contract and
+`../docs/design/2026-08-24-radio-lite-server.md` for the approved design.

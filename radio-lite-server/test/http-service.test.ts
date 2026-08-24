@@ -8,6 +8,9 @@ import WebSocket from "ws";
 import { DeviceStore } from "../src/auth/device-store.ts";
 import { SessionStore } from "../src/auth/session-store.ts";
 import { UserStore } from "../src/auth/user-store.ts";
+import { decodeMediaFrame, encodeMediaFrame, MediaKind } from "../src/media/frame.ts";
+import type { MediaPolicy } from "../src/media/adaptive-policy.ts";
+import type { MediaWorkerOutput } from "../src/media/media-hub.ts";
 import { RadioRuntime, type RigControl } from "../src/rig/radio-runtime.ts";
 import { RadioLiteService } from "../src/server/radio-lite-service.ts";
 
@@ -33,6 +36,9 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     csrfKey: Buffer.alloc(32, 5),
   });
   const rig = new ApiFakeRig();
+  const microphonePackets: Buffer[] = [];
+  const mediaPolicies: MediaPolicy[] = [];
+  let mediaOutput: MediaWorkerOutput | undefined;
   const service = new RadioLiteService({
     dataDirectory: directory,
     now,
@@ -47,6 +53,17 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
       const runtime = new RadioRuntime(profile, rig, async () => undefined, now);
       await runtime.initialize();
       return runtime;
+    },
+    mediaWorkerFactory: async (_profile, _radioSlot, output) => {
+      mediaOutput = output;
+      return {
+        updatePolicy: (policy) => { mediaPolicies.push(policy); },
+        writeAudioUplink: (frame) => {
+          microphonePackets.push(Buffer.from(frame.payload));
+          return true;
+        },
+        close: async () => undefined,
+      };
     },
   });
   const address = await service.listen();
@@ -168,11 +185,85 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     radioId: "main",
     controlToken,
     mode: "voice",
+    commandId: "ptt-without-media",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.code, "media_required");
+  assert.equal(rig.ptt, false);
+
+  const mediaSocket = new WebSocket(
+    `ws://127.0.0.1:${address.port}/ws/media`,
+    "radio-lite.v1",
+  );
+  context.after(() => mediaSocket.terminate());
+  await new Promise<void>((resolve, reject) => {
+    mediaSocket.once("open", resolve);
+    mediaSocket.once("error", reject);
+  });
+  mediaSocket.send(JSON.stringify({
+    t: "auth.device",
+    deviceId: credentials.deviceId,
+    accessToken: credentials.accessToken,
+  }));
+  const mediaAuthenticated = await nextJsonMessage(mediaSocket);
+  assert.equal(mediaAuthenticated.t, "auth.ok");
+  assert.equal(mediaAuthenticated.channel, "media");
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.subscribe",
+    radioId: "main",
+    spectrumVisible: true,
+  });
+  assert.equal(reply.t, "media.subscribed");
+  assert.equal(reply.radioSlot, 0);
+  assert.equal(reply.policy.opusBitrate, 20_000);
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.network",
+    rttMs: 2_500,
+    packetLossPercent: 10,
+    bufferedBytes: 600_000,
+    spectrumVisible: false,
+  });
+  assert.equal(reply.t, "media.policy");
+  assert.equal(reply.policy.tier, "severe");
+  assert.equal(reply.policy.spectrumBins, 0);
+  assert.equal(mediaPolicies.at(-1)?.tier, "severe");
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "tx.start",
+    radioId: "main",
+    controlToken,
+    mode: "voice",
     commandId: "ptt-start-1",
   });
   assert.equal(reply.t, "tx.started");
   assert.equal(rig.ptt, true);
   const transmitToken = reply.transmitToken;
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.uplink.bind",
+    radioId: "main",
+    transmitToken,
+  });
+  assert.equal(reply.t, "media.uplink.bound");
+
+  mediaSocket.send(encodeMediaFrame({
+    kind: MediaKind.audioUplink,
+    flags: 0,
+    radioSlot: 0,
+    sequence: 1,
+    timestampUs: 10_000_000n,
+    payload: Buffer.from([0xf8, 0xff, 0xfe]),
+  }));
+  await waitFor(() => microphonePackets.length === 1);
+  assert.deepEqual(microphonePackets[0], Buffer.from([0xf8, 0xff, 0xfe]));
+
+  const downlinkReply = nextBinaryMessage(mediaSocket);
+  mediaOutput?.audioDownlink(Buffer.from([1, 2, 3]), 10_001_000n);
+  const downlink = decodeMediaFrame(await downlinkReply);
+  assert.equal(downlink.kind, MediaKind.audioDownlink);
+  assert.deepEqual(downlink.payload, Buffer.from([1, 2, 3]));
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "tx.heartbeat",
@@ -182,6 +273,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   });
   assert.equal(reply.t, "tx.alive");
 
+  const uplinkEnded = nextJsonMessage(mediaSocket);
   reply = await sendJsonAndReceive(webSocket, {
     t: "tx.stop",
     radioId: "main",
@@ -190,6 +282,29 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   });
   assert.equal(reply.t, "tx.stopped");
   assert.equal(rig.ptt, false);
+  assert.equal((await uplinkEnded).t, "media.uplink.ended");
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "tx.start",
+    radioId: "main",
+    controlToken,
+    mode: "voice",
+    commandId: "ptt-start-2",
+  });
+  assert.equal(reply.t, "tx.started");
+  assert.equal(rig.ptt, true);
+  const secondTransmitToken = reply.transmitToken;
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.uplink.bind",
+    radioId: "main",
+    transmitToken: secondTransmitToken,
+  });
+  assert.equal(reply.t, "media.uplink.bound");
+
+  mediaSocket.close();
+  await new Promise<void>((resolve) => mediaSocket.once("close", () => resolve()));
+  await waitFor(() => rig.ptt === false);
   webSocket.close();
 });
 
@@ -222,6 +337,29 @@ function sendJsonAndReceive(webSocket: WebSocket, value: unknown): Promise<any> 
   const response = nextJsonMessage(webSocket);
   webSocket.send(JSON.stringify(value));
   return response;
+}
+
+function nextBinaryMessage(webSocket: WebSocket): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    webSocket.once("message", (data, isBinary) => {
+      if (!isBinary) {
+        reject(new Error(`expected binary WebSocket message, received: ${data.toString()}`));
+        return;
+      }
+      resolve(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+    });
+    webSocket.once("error", reject);
+  });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("condition was not satisfied before timeout");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 class ApiFakeRig implements RigControl {

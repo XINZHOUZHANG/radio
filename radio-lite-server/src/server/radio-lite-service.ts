@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AuditLog } from "../auth/audit-log.ts";
 import { DeviceStore, InvalidDeviceCredentialError, RefreshTokenReuseError } from "../auth/device-store.ts";
@@ -25,6 +25,13 @@ import {
 } from "../rig/radio-runtime.ts";
 import { RigReportError, RigTransportError } from "../rig/transport.ts";
 import { InvalidLeaseError, InterlockConflictError } from "../safety/transmit-interlock.ts";
+import { decodeMediaFrame, MediaFrameError, MediaKind } from "../media/frame.ts";
+import {
+  MediaHub,
+  type MediaWorkerFactory,
+} from "../media/media-hub.ts";
+import { SyntheticMediaWorker } from "../media/synthetic-media-worker.ts";
+import { SystemMediaWorker } from "../media/system-media-worker.ts";
 
 export type RadioLiteServiceOptions = {
   dataDirectory: string;
@@ -37,6 +44,7 @@ export type RadioLiteServiceOptions = {
   secureCookies?: boolean;
   runtimeFactory?: RadioRuntimeFactory;
   hardwareDiscovery?: HardwareDiscovery;
+  mediaWorkerFactory?: MediaWorkerFactory;
 };
 
 type SessionPrincipal = {
@@ -54,6 +62,7 @@ export class RadioLiteService {
   readonly #pairing: PairingService;
   readonly #audit: AuditLog;
   readonly #runtimes: RadioRuntimeRegistry;
+  readonly #media: MediaHub;
   readonly #hardwareDiscovery: HardwareDiscovery;
   readonly #secureCookies: boolean;
   #server: Server | null = null;
@@ -79,6 +88,41 @@ export class RadioLiteService {
     this.#runtimes = options.runtimeFactory === undefined
       ? new RadioRuntimeRegistry(() => this.#radios.snapshot())
       : new RadioRuntimeRegistry(() => this.#radios.snapshot(), options.runtimeFactory);
+    this.#media = new MediaHub({
+      radios: () => this.#radios.snapshot(),
+      workerFactory: options.mediaWorkerFactory ?? (async (profile, _radioSlot, output) => {
+        if (profile.connection.kind === "hamlib-dummy") {
+          return new SyntheticMediaWorker(output);
+        }
+        return SystemMediaWorker.create(profile, output, {
+          readCenterFrequencyHz: async () => (await this.#runtimes.get(profile.id)).readState()
+            .then((state) => state.frequencyHz),
+        });
+      }),
+      now: this.#now,
+      stopVoiceTransmit: async ({ radioId, ownerId, transmitToken, reason }) => {
+        let stopped = false;
+        try {
+          const runtime = await this.#runtimes.get(radioId);
+          await runtime.stopTransmit(ownerId, transmitToken);
+          stopped = true;
+        } catch (error) {
+          if (!(error instanceof InvalidLeaseError)) {
+            await this.#audit.append({
+              occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "failure",
+              targetId: radioId, metadata: { reason },
+            }).catch(() => undefined);
+            return;
+          }
+        }
+        if (stopped) {
+          await this.#audit.append({
+            occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "success",
+            targetId: radioId, metadata: { reason },
+          }).catch(() => undefined);
+        }
+      },
+    });
     this.#hardwareDiscovery = options.hardwareDiscovery ?? new HardwareDiscovery();
     this.#secureCookies = options.secureCookies === true;
   }
@@ -164,6 +208,7 @@ export class RadioLiteService {
       webSocket.terminate();
     }
     this.#webSockets.clear();
+    await this.#media.close();
     await this.#runtimes.close();
     if (webSocketServer !== null) {
       await new Promise<void>((resolve) => webSocketServer.close(() => resolve()));
@@ -185,8 +230,10 @@ export class RadioLiteService {
     const connectionOwnerId = `connection:${randomUUID()}`;
     let authenticated = false;
     let authenticatedUser: PublicUser | null = null;
+    let authenticatedPrincipalId: string | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let commandTail: Promise<void> = Promise.resolve();
+    let mediaTail: Promise<void> = Promise.resolve();
     const authTimer = setTimeout(() => {
       webSocket.close(4401, "authentication timeout");
     }, 300_000);
@@ -196,9 +243,11 @@ export class RadioLiteService {
       user: PublicUser,
       deviceId: string | null,
       expiresAtMs: number | null,
+      principalId: string,
     ): void => {
       authenticated = true;
       authenticatedUser = user;
+      authenticatedPrincipalId = principalId;
       clearTimeout(authTimer);
       if (expiresAtMs !== null) {
         const remaining = Math.max(1, expiresAtMs - this.#now());
@@ -219,11 +268,27 @@ export class RadioLiteService {
         },
         radios: this.#radios.snapshot().radios,
       });
+      if (channel === "media") {
+        this.#media.connect({
+          id: connectionOwnerId,
+          principalId,
+          userId: user.id,
+          transport: {
+            get bufferedAmount() { return webSocket.bufferedAmount; },
+            sendBinary: (value) => {
+              if (webSocket.readyState === WebSocket.OPEN) {
+                webSocket.send(value, { binary: true });
+              }
+            },
+            sendJson: (value) => sendWebSocketJson(webSocket, value),
+          },
+        });
+      }
     };
 
     const browser = this.#optionalSession(request);
     if (browser !== null) {
-      finishAuthentication(browser.user, null, null);
+      finishAuthentication(browser.user, null, null, `session:${browser.token}`);
     }
 
     webSocket.on("message", (data, isBinary) => {
@@ -234,7 +299,7 @@ export class RadioLiteService {
         }
         let message: unknown;
         try {
-          message = JSON.parse(data.toString());
+          message = JSON.parse(webSocketBytes(data).toString("utf8"));
         } catch {
           webSocket.close(4400, "invalid authentication JSON");
           return;
@@ -253,25 +318,43 @@ export class RadioLiteService {
           webSocket.close(4401, "invalid device access credential");
           return;
         }
-        finishAuthentication(user, device.id, device.accessExpiresAtMs);
+        finishAuthentication(user, device.id, device.accessExpiresAtMs, `device:${device.id}`);
         return;
       }
 
       if (channel === "media") {
-        if (!isBinary) {
-          let message: unknown;
+        if (isBinary) {
           try {
-            message = JSON.parse(data.toString());
-          } catch {
-            webSocket.close(4400, "invalid media control message");
-            return;
+            const frame = decodeMediaFrame(webSocketBytes(data));
+            if (frame.kind !== MediaKind.audioUplink) {
+              throw new MediaFrameError("client may send only audio uplink frames");
+            }
+            this.#media.receiveUplink(connectionOwnerId, frame);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "invalid media frame";
+            sendWebSocketJson(webSocket, {
+              t: "media.error",
+              code: /bind an audio uplink/u.test(message)
+                ? "uplink_not_bound"
+                : /expired/u.test(message)
+                  ? "uplink_expired"
+                  : "invalid_media_frame",
+              message,
+            });
           }
-          if (isMessageType(message, "ping")) {
-            sendWebSocketJson(webSocket, { t: "pong", atMs: this.#now() });
-          } else {
-            sendWebSocketJson(webSocket, { t: "error", code: "unsupported_media_message" });
-          }
+          return;
         }
+        let message: unknown;
+        try {
+          message = JSON.parse(webSocketBytes(data).toString("utf8"));
+        } catch {
+          webSocket.close(4400, "invalid media control message");
+          return;
+        }
+        mediaTail = mediaTail.then(
+          () => this.#handleMediaMessage(webSocket, connectionOwnerId, message),
+          () => this.#handleMediaMessage(webSocket, connectionOwnerId, message),
+        );
         return;
       }
 
@@ -281,19 +364,20 @@ export class RadioLiteService {
       }
       let message: unknown;
       try {
-        message = JSON.parse(data.toString());
+        message = JSON.parse(webSocketBytes(data).toString("utf8"));
       } catch {
         webSocket.close(4400, "invalid control JSON");
         return;
       }
       const user = authenticatedUser;
-      if (user === null) {
+      const principalId = authenticatedPrincipalId;
+      if (user === null || principalId === null) {
         webSocket.close(4401, "authentication state unavailable");
         return;
       }
       commandTail = commandTail.then(
-        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId),
-        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId),
+        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId, principalId),
+        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId, principalId),
       );
     });
 
@@ -303,11 +387,83 @@ export class RadioLiteService {
         clearTimeout(expiryTimer);
       }
       this.#webSockets.delete(webSocket);
-      void this.#runtimes.ownerDisconnected(connectionOwnerId);
+      if (channel === "media") {
+        void this.#media.disconnect(connectionOwnerId).catch(() => undefined);
+      } else {
+        this.#media.revokeOwner(connectionOwnerId);
+        void this.#runtimes.ownerDisconnected(connectionOwnerId).catch(() => undefined);
+      }
     });
     webSocket.once("error", () => {
       // The close handler owns cleanup. Errors are intentionally not echoed.
     });
+  }
+
+  async #handleMediaMessage(
+    webSocket: WebSocket,
+    clientId: string,
+    value: unknown,
+  ): Promise<void> {
+    try {
+      const message = controlMessage(value);
+      if (message.t === "ping") {
+        exactMessageKeys(message, ["t"]);
+        sendWebSocketJson(webSocket, { t: "pong", atMs: this.#now() });
+        return;
+      }
+      if (message.t === "media.subscribe") {
+        exactMessageKeys(message, ["t", "radioId", "spectrumVisible"]);
+        if (typeof message.spectrumVisible !== "boolean") {
+          throw new Error("spectrumVisible must be boolean");
+        }
+        const subscribed = await this.#media.subscribe(
+          clientId,
+          messageText(message.radioId, "radioId", 32),
+          message.spectrumVisible,
+        );
+        sendWebSocketJson(webSocket, { t: "media.subscribed", ...subscribed });
+        return;
+      }
+      if (message.t === "media.network") {
+        exactMessageKeys(message, [
+          "t", "rttMs", "packetLossPercent", "bufferedBytes", "spectrumVisible",
+        ]);
+        if (typeof message.spectrumVisible !== "boolean") {
+          throw new Error("spectrumVisible must be boolean");
+        }
+        const policy = this.#media.updateNetwork(clientId, {
+          rttMs: nonNegativeNumber(message.rttMs, "rttMs"),
+          packetLossPercent: nonNegativeNumber(message.packetLossPercent, "packetLossPercent"),
+          bufferedBytes: nonNegativeNumber(message.bufferedBytes, "bufferedBytes"),
+          spectrumVisible: message.spectrumVisible,
+        });
+        sendWebSocketJson(webSocket, { t: "media.policy", policy });
+        return;
+      }
+      if (message.t === "media.uplink.bind") {
+        exactMessageKeys(message, ["t", "radioId", "transmitToken"]);
+        const bound = await this.#media.bindUplink(
+          clientId,
+          messageText(message.radioId, "radioId", 32),
+          messageText(message.transmitToken, "transmitToken", 128),
+        );
+        sendWebSocketJson(webSocket, { t: "media.uplink.bound", ...bound });
+        return;
+      }
+      if (message.t === "media.unsubscribe") {
+        exactMessageKeys(message, ["t"]);
+        const radioId = await this.#media.unsubscribe(clientId);
+        sendWebSocketJson(webSocket, { t: "media.unsubscribed", radioId });
+        return;
+      }
+      throw new Error("unsupported media message");
+    } catch (error) {
+      sendWebSocketJson(webSocket, {
+        t: "media.error",
+        code: "invalid_media_control",
+        message: error instanceof Error ? error.message : "invalid media control",
+      });
+    }
   }
 
   async #handleControlMessage(
@@ -315,6 +471,7 @@ export class RadioLiteService {
     value: unknown,
     user: PublicUser,
     ownerId: string,
+    principalId: string,
   ): Promise<void> {
     let requestType = "unknown";
     let commandId: string | undefined;
@@ -345,6 +502,9 @@ export class RadioLiteService {
           throw new Error("force must be boolean");
         }
         const result = await runtime.acquireControl(ownerId, user, message.force === true);
+        if (result.displacedOwnerId !== null) {
+          this.#media.revokeOwner(result.displacedOwnerId);
+        }
         sendWebSocketJson(webSocket, {
           t: "control.acquired",
           radioId,
@@ -373,6 +533,7 @@ export class RadioLiteService {
           ownerId,
           messageText(message.controlToken, "controlToken", 128),
         );
+        this.#media.revokeOwner(ownerId);
         sendWebSocketJson(webSocket, { t: "control.released", radioId });
         return;
       }
@@ -413,7 +574,25 @@ export class RadioLiteService {
         if (message.mode !== "voice" && message.mode !== "digital" && message.mode !== "tuning") {
           throw new Error("transmit mode must be voice, digital or tuning");
         }
+        if (
+          message.mode === "voice" &&
+          !this.#media.hasReadySubscription(principalId, user.id, radioId)
+        ) {
+          throw new MediaSubscriptionRequiredError(
+            "voice PTT requires a ready media subscription from the same device",
+          );
+        }
         const lease = await runtime.startTransmit(ownerId, user, controlToken(), message.mode);
+        this.#media.registerTransmit({
+          radioId,
+          ownerId,
+          principalId,
+          userId: user.id,
+          transmitToken: lease.leaseToken,
+          mode: message.mode,
+          heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
+          hardDeadlineMs: lease.hardDeadlineMs,
+        });
         await this.#audit.append({
           occurredAtMs: this.#now(), action: "radio.ptt-start", result: "success",
           actorUserId: user.id, targetId: radioId, metadata: { mode: message.mode },
@@ -430,10 +609,16 @@ export class RadioLiteService {
           message,
           ["t", "radioId", "controlToken", "transmitToken"],
         );
+        const transmitToken = messageText(message.transmitToken, "transmitToken", 128);
         const lease = await runtime.heartbeatTransmit(
           ownerId,
           controlToken(),
-          messageText(message.transmitToken, "transmitToken", 128),
+          transmitToken,
+        );
+        this.#media.refreshTransmit(
+          transmitToken,
+          lease.heartbeatDeadlineMs,
+          lease.hardDeadlineMs,
         );
         sendWebSocketJson(webSocket, {
           t: "tx.alive", radioId, heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
@@ -442,10 +627,9 @@ export class RadioLiteService {
       }
       if (message.t === "tx.stop") {
         exactMessageKeys(message, ["t", "radioId", "transmitToken", "commandId"]);
-        await runtime.stopTransmit(
-          ownerId,
-          messageText(message.transmitToken, "transmitToken", 128),
-        );
+        const transmitToken = messageText(message.transmitToken, "transmitToken", 128);
+        await runtime.stopTransmit(ownerId, transmitToken);
+        this.#media.endTransmit(transmitToken);
         await this.#audit.append({
           occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "success",
           actorUserId: user.id, targetId: radioId,
@@ -663,6 +847,8 @@ class HttpError extends Error {
   }
 }
 
+class MediaSubscriptionRequiredError extends Error {}
+
 async function jsonObject(
   request: IncomingMessage,
   allowed: readonly string[],
@@ -802,6 +988,19 @@ function sendWebSocketJson(webSocket: WebSocket, value: unknown): void {
   }
 }
 
+function webSocketBytes(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return data;
+  }
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data);
+  }
+  throw new TypeError("unsupported WebSocket data representation");
+}
+
 function isExactDeviceAuth(value: unknown): value is {
   t: "auth.device";
   deviceId: string;
@@ -871,7 +1070,17 @@ function safeInteger(value: unknown, field: string): number {
   return value as number;
 }
 
+function nonNegativeNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative finite number`);
+  }
+  return value;
+}
+
 function mapControlError(error: unknown): { code: string; message: string } {
+  if (error instanceof MediaSubscriptionRequiredError) {
+    return { code: "media_required", message: error.message };
+  }
   if (error instanceof ControlBusyError) {
     return { code: "control_busy", message: "radio control is held by another operator" };
   }

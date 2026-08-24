@@ -27,7 +27,7 @@ export class RadioConfigStore {
       const result = await readJsonWithBackup(
         this.#path,
         parseRadioConfig,
-        () => ({ version: RADIO_CONFIG_VERSION, radios: [] }),
+        (): RadioConfigFile => ({ version: RADIO_CONFIG_VERSION, radios: [] }),
       );
       this.#snapshot = result.value;
       this.#loaded = true;

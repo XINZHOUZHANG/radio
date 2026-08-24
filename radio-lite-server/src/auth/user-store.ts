@@ -69,7 +69,7 @@ export class UserStore {
       const result = await readJsonWithBackup(
         this.#path,
         parseUserFile,
-        () => ({ version: 1, users: [] }),
+        (): UserFile => ({ version: 1, users: [] }),
       );
       this.#file = result.value;
       this.#loaded = true;

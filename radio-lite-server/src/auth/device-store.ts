@@ -79,7 +79,7 @@ export class DeviceStore {
       const result = await readJsonWithBackup(
         this.#path,
         parseDeviceFile,
-        () => ({ version: 1, devices: [] }),
+        (): DeviceFile => ({ version: 1, devices: [] }),
       );
       this.#file = result.value;
       this.#loaded = true;

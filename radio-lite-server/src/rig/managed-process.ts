@@ -37,13 +37,13 @@ export class ManagedRigctldProcess {
     child.stderr?.on("data", (data) => {
       this.#stderr = `${this.#stderr}${data.toString("utf8")}`.slice(-4_096);
     });
-    let removeSpawnErrorListener = () => undefined;
+    let removeSpawnErrorListener: () => void = () => undefined;
     const spawnError = new Promise<never>((_resolve, reject) => {
       const onError = (error: Error) => {
         reject(new Error(`unable to start rigctld: ${error.message}`, { cause: error }));
       };
       child.once("error", onError);
-      removeSpawnErrorListener = () => child.off("error", onError);
+      removeSpawnErrorListener = () => { child.off("error", onError); };
     });
     try {
       await Promise.race([

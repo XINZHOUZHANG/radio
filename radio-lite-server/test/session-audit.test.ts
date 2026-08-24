@@ -72,7 +72,8 @@ test("audit JSONL serializes concurrent events and rejects secret-bearing metada
     audit.append({ occurredAtMs: 1, action: "auth.login", result: "success", actorUserId: "u1" }),
     audit.append({ occurredAtMs: 2, action: "radio.ptt", result: "success", actorUserId: "u1" }),
   ]);
-  const lines = (await readFile(path, "utf8")).trim().split(/\r?\n/u).map(JSON.parse);
+  const lines = (await readFile(path, "utf8")).trim().split(/\r?\n/u)
+    .map((line) => JSON.parse(line));
   assert.deepEqual(lines.map((line) => line.action), ["auth.login", "radio.ptt"]);
   assert.deepEqual((await audit.readNewest()).map((event) => event.occurredAtMs), [2, 1]);
   await assert.rejects(

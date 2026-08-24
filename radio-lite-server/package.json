@@ -9,9 +9,16 @@
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:watch": "node --experimental-strip-types --test --watch test/*.test.ts"
+    "test:watch": "node --experimental-strip-types --test --watch test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
   }
 }
