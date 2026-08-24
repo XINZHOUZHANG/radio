@@ -956,22 +956,42 @@ actor TX5DRAPIClient {
     }
 
     func qsos(logbookId: String, limit: Int = 100, offset: Int = 0, callsign: String? = nil) async throws -> QSOListResponse {
-        var query = [
-            URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "offset", value: String(offset)),
-        ]
-        if let callsign, !callsign.isEmpty {
-            query.append(URLQueryItem(name: "callsign", value: callsign))
-        }
-        return try await request(.get, "/logbooks/\(logbookId)/qsos", queryItems: query)
+        var query = LogbookQSOQuery()
+        query.limit = limit
+        query.offset = offset
+        query.callsign = callsign
+        return try await qsos(logbookId: logbookId, query: query)
+    }
+
+    func qsos(logbookId: String, query: LogbookQSOQuery) async throws -> QSOListResponse {
+        try await request(
+            .get,
+            "/logbooks/\(pathSegment(logbookId))/qsos",
+            queryItems: query.queryItems
+        )
     }
 
     func createQSO(logbookId: String, request body: CreateQSORequest) async throws -> QSOActionResponse {
-        try await request(.post, "/logbooks/\(logbookId)/qsos", body: body)
+        try await request(.post, "/logbooks/\(pathSegment(logbookId))/qsos", body: body)
+    }
+
+    func updateQSO(
+        logbookId: String,
+        qsoId: String,
+        request body: UpdateQSORequest
+    ) async throws -> QSOActionResponse {
+        try await request(
+            .put,
+            "/logbooks/\(pathSegment(logbookId))/qsos/\(pathSegment(qsoId))",
+            body: body
+        )
     }
 
     func deleteQSO(logbookId: String, qsoId: String) async throws {
-        let _: GenericSuccessResponse = try await request(.delete, "/logbooks/\(logbookId)/qsos/\(qsoId)")
+        let _: GenericSuccessResponse = try await request(
+            .delete,
+            "/logbooks/\(pathSegment(logbookId))/qsos/\(pathSegment(qsoId))"
+        )
     }
 
     func openWebRXStations() async throws -> [OpenWebRXStation] {

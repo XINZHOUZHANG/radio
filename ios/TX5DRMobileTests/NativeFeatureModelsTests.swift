@@ -818,6 +818,44 @@ final class NativeFeatureModelsTests: XCTestCase {
         XCTAssertTrue(response.data.highRisk)
     }
 
+    func testQSORecordDecodesDXCCAndConfirmationMetadata() throws {
+        let data = Data(#"{"id":"qso-1","callsign":"JA1ABC","grid":"PM95","frequency":14074000,"mode":"FT8","startTime":1700000000000,"messageHistory":[],"dxccId":339,"dxccEntity":"Japan","dxccStatus":"current","dxccSource":"prefix","dxccConfidence":"high","dxccNeedsReview":false,"cqZone":25,"ituZone":45,"countryCode":"JP","lotwQslReceived":"V"}"#.utf8)
+
+        let qso = try JSONDecoder().decode(QSORecord.self, from: data)
+
+        XCTAssertEqual(qso.dxccId, 339)
+        XCTAssertEqual(qso.dxccEntity, "Japan")
+        XCTAssertEqual(qso.cqZone, 25)
+        XCTAssertEqual(qso.countryCode, "JP")
+        XCTAssertEqual(qso.lotwQslReceived, "V")
+    }
+
+    func testLogbookQSOQueryBuildsAllWebFilterParameters() {
+        var query = LogbookQSOQuery()
+        query.callsign = " JA1ABC "
+        query.grid = "PM95"
+        query.band = "20m"
+        query.mode = "FT8"
+        query.startDate = "2026-08-01"
+        query.endDate = "2026-08-24"
+        query.qslStatus = "confirmed"
+        query.dxccStatus = "deleted"
+        query.qslFlow = "two_way_confirmed"
+        query.excludeModes = "FT4,JS8"
+        query.limit = 200
+        query.offset = 400
+
+        let parameters = Dictionary(uniqueKeysWithValues: query.queryItems.map { ($0.name, $0.value ?? "") })
+
+        XCTAssertEqual(parameters["callsign"], "JA1ABC")
+        XCTAssertEqual(parameters["band"], "20m")
+        XCTAssertEqual(parameters["qslFlow"], "two_way_confirmed")
+        XCTAssertEqual(parameters["excludeModes"], "FT4,JS8")
+        XCTAssertEqual(parameters["limit"], "200")
+        XCTAssertEqual(parameters["offset"], "400")
+        XCTAssertEqual(query.activeFilterCount, 10)
+    }
+
     private var idlePTT: PTTStatus {
         PTTStatus(
             isTransmitting: false,

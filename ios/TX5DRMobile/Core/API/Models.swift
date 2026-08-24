@@ -1389,7 +1389,15 @@ struct QSORecord: Codable, Identifiable, Sendable {
     let myCallsign: String?
     let myGrid: String?
     let qth: String?
+    let dxccId: Int?
     let dxccEntity: String?
+    let dxccStatus: String?
+    let dxccSource: String?
+    let dxccConfidence: String?
+    let dxccNeedsReview: Bool?
+    let cqZone: Int?
+    let ituZone: Int?
+    let countryCode: String?
     let lotwQslSent: String?
     let lotwQslReceived: String?
     let qrzQslSent: String?
@@ -1411,6 +1419,54 @@ struct QSOListResponse: Codable, Sendable {
     let meta: Metadata
 }
 
+struct LogbookQSOQuery: Equatable, Sendable {
+    var callsign: String?
+    var grid: String?
+    var band: String?
+    var mode: String?
+    var startDate: String?
+    var endDate: String?
+    var qslStatus: String?
+    var dxccStatus: String?
+    var qslFlow: String?
+    var excludeModes: String?
+    var limit = 50
+    var offset = 0
+
+    var queryItems: [URLQueryItem] {
+        var items = [
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "offset", value: String(offset)),
+        ]
+        let filters: [(String, String?)] = [
+            ("callsign", callsign),
+            ("grid", grid),
+            ("band", band),
+            ("mode", mode),
+            ("startDate", startDate),
+            ("endDate", endDate),
+            ("qslStatus", qslStatus),
+            ("dxccStatus", dxccStatus),
+            ("qslFlow", qslFlow),
+            ("excludeModes", excludeModes),
+        ]
+        items.append(contentsOf: filters.compactMap { name, value in
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+            return URLQueryItem(name: name, value: value)
+        })
+        return items
+    }
+
+    var activeFilterCount: Int {
+        [callsign, grid, band, mode, startDate, endDate, qslStatus, dxccStatus, qslFlow, excludeModes]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .count
+    }
+}
+
 struct CreateQSORequest: Codable, Sendable {
     let callsign: String
     let frequency: Double
@@ -1424,6 +1480,28 @@ struct CreateQSORequest: Codable, Sendable {
     let reportReceived: String?
     let messageHistory: [String]
     let comment: String?
+    let notes: String?
+}
+
+struct UpdateQSORequest: Codable, Sendable {
+    let callsign: String?
+    let frequency: Double?
+    let mode: String?
+    let submode: String?
+    let startTime: Double?
+    let endTime: Double?
+    let grid: String?
+    let qth: String?
+    let reportSent: String?
+    let reportReceived: String?
+    let messageHistory: [String]?
+    let comment: String?
+    let myCallsign: String?
+    let myGrid: String?
+    let lotwQslSent: String?
+    let lotwQslReceived: String?
+    let qrzQslSent: String?
+    let qrzQslReceived: String?
     let notes: String?
 }
 

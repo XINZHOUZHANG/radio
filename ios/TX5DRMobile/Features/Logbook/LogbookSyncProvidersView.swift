@@ -387,7 +387,7 @@ struct LogbookSyncProvidersView: View {
         await session.loadLogbookDetail(id: logbookId)
         await session.loadLogbookBackup(id: logbookId)
         if session.selectedLogbookId == logbookId {
-            await session.loadQSOs()
+            await session.refreshActiveQSOs()
         }
         await session.loadLogbookSyncProviders(callsign: callsign, reportErrors: false)
     }

@@ -48,6 +48,7 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var logbookDetails: [String: LogbookDetail] = [:]
     @Published private(set) var logbookBackups: [String: LogbookBackupStatus] = [:]
     @Published private(set) var qsos: [QSORecord] = []
+    @Published private(set) var qsoListMetadata: QSOListResponse.Metadata?
     @Published private(set) var accounts: [AuthTokenInfo] = []
     @Published private(set) var selectedOperatorId: String?
     @Published private(set) var selectedLogbookId: String?
@@ -84,7 +85,7 @@ final class TX5DRSession: ObservableObject {
     private var pttTask: Task<Void, Never>?
     private var pttGeneration = 0
     private var logbookRefreshTask: Task<Void, Never>?
-    private var qsoCallsignFilter: String?
+    private var activeQSOQuery = LogbookQSOQuery()
 
     private static let serverDefaultsKey = "tx5dr.serverAddress"
     private static let operatorDefaultsKey = "tx5dr.selectedOperator"
@@ -227,6 +228,7 @@ final class TX5DRSession: ObservableObject {
         logbookDetails = [:]
         logbookBackups = [:]
         qsos = []
+        qsoListMetadata = nil
         accounts = []
         voiceKeyerPanel = nil
         cwMessagePanel = nil
@@ -246,7 +248,7 @@ final class TX5DRSession: ObservableObject {
         openWebRXListenStatus = nil
         selectedOperatorId = nil
         selectedLogbookId = nil
-        qsoCallsignFilter = nil
+        activeQSOQuery = LogbookQSOQuery()
         phase = .signedOut
     }
 
@@ -466,8 +468,9 @@ final class TX5DRSession: ObservableObject {
 
     func selectLogbook(_ id: String?) {
         selectedLogbookId = id
+        activeQSOQuery.offset = 0
         syncLogbookSocket()
-        Task { await loadQSOs() }
+        Task { await refreshActiveQSOs() }
     }
 
     func switchMode(_ mode: ModeDescriptor) async {
@@ -1173,32 +1176,72 @@ final class TX5DRSession: ObservableObject {
     }
 
     func loadQSOs(callsign: String? = nil) async {
-        guard let apiClient, let selectedLogbookId else { return }
+        var query = LogbookQSOQuery()
         let normalizedFilter = callsign?.trimmingCharacters(in: .whitespacesAndNewlines)
-        qsoCallsignFilter = normalizedFilter?.isEmpty == false ? normalizedFilter : nil
+        query.callsign = normalizedFilter?.isEmpty == false ? normalizedFilter : nil
+        await loadQSOs(query: query)
+    }
+
+    func loadQSOs(query: LogbookQSOQuery) async {
+        activeQSOQuery = query
+        await refreshActiveQSOs()
+    }
+
+    func refreshActiveQSOs() async {
+        guard let apiClient, let selectedLogbookId else {
+            qsos = []
+            qsoListMetadata = nil
+            return
+        }
         do {
-            qsos = try await apiClient.qsos(
+            let response = try await apiClient.qsos(
                 logbookId: selectedLogbookId,
-                callsign: qsoCallsignFilter
-            ).data
+                query: activeQSOQuery
+            )
+            qsos = response.data
+            qsoListMetadata = response.meta
         } catch {
             recordNonfatal("读取 QSO 失败", error: error)
         }
     }
 
-    func createQSO(_ request: CreateQSORequest) async {
-        guard let apiClient, let selectedLogbookId else { return fail(TX5DRSessionError.notConnected) }
+    func createQSO(_ request: CreateQSORequest) async -> Bool {
+        guard let apiClient, let selectedLogbookId else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        var created = false
         await performOperation(success: "QSO 已写入日志本") {
             _ = try await apiClient.createQSO(logbookId: selectedLogbookId, request: request)
-            await self.loadQSOs()
+            await self.refreshActiveQSOs()
+            created = true
         }
+        return created
+    }
+
+    func updateQSO(_ qso: QSORecord, request: UpdateQSORequest) async -> Bool {
+        guard let apiClient, let selectedLogbookId else {
+            fail(TX5DRSessionError.notConnected)
+            return false
+        }
+        var updated = false
+        await performOperation(success: "QSO 已更新") {
+            _ = try await apiClient.updateQSO(
+                logbookId: selectedLogbookId,
+                qsoId: qso.id,
+                request: request
+            )
+            await self.refreshActiveQSOs()
+            updated = true
+        }
+        return updated
     }
 
     func deleteQSO(_ qso: QSORecord) async {
         guard let apiClient, let selectedLogbookId else { return fail(TX5DRSessionError.notConnected) }
         await performOperation(success: "QSO 已删除") {
             try await apiClient.deleteQSO(logbookId: selectedLogbookId, qsoId: qso.id)
-            self.qsos.removeAll { $0.id == qso.id }
+            await self.refreshActiveQSOs()
         }
     }
 
@@ -1296,7 +1339,7 @@ final class TX5DRSession: ObservableObject {
         do {
             let result = try await apiClient.importLogbook(id: id, fileName: fileName, data: data)
             noticeMessage = "导入完成：新增 \(result.data.imported)，合并 \(result.data.merged)，跳过 \(result.data.skipped)"
-            await loadQSOs()
+            await refreshActiveQSOs()
             await loadLogbookDetail(id: id)
             return true
         } catch {
@@ -1351,11 +1394,7 @@ final class TX5DRSession: ObservableObject {
         logbooks = try await apiClient.logbooks()
         logbookDetails[id] = try await apiClient.logbookDetail(id: id)
         if selectedLogbookId == id {
-            qsos = try await apiClient.qsos(
-                logbookId: id,
-                limit: 100,
-                callsign: qsoCallsignFilter
-            ).data
+            await refreshActiveQSOs()
         }
         noticeMessage = "日志本已从备份恢复；恢复前快照已保留"
     }
@@ -1375,11 +1414,7 @@ final class TX5DRSession: ObservableObject {
         logbookBackups[logbookId] = try await apiClient.logbookBackupStatus(id: logbookId)
         logbookDetails[logbookId] = try await apiClient.logbookDetail(id: logbookId)
         if selectedLogbookId == logbookId {
-            qsos = try await apiClient.qsos(
-                logbookId: logbookId,
-                limit: 100,
-                callsign: qsoCallsignFilter
-            ).data
+            await refreshActiveQSOs()
         }
         noticeMessage = "未保存 QSO 已重新写入"
     }
@@ -1714,9 +1749,10 @@ final class TX5DRSession: ObservableObject {
         if selectedLogbookId == logBookId,
            let response = try? await apiClient.qsos(
                logbookId: logBookId,
-               callsign: qsoCallsignFilter
+               query: activeQSOQuery
            ) {
             qsos = response.data
+            qsoListMetadata = response.meta
         }
 
         if logbookDetails[logBookId] != nil,
