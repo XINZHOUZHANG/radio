@@ -1697,6 +1697,140 @@ final class TX5DRSession: ObservableObject {
         }
     }
 
+    // MARK: - TX-5DR system and hardware administration
+
+    func fetchSystemBootstrapStatus() async throws -> JSONValue {
+        try await connectedAPI().systemBootstrapStatus()
+    }
+
+    func retrySystemBootstrap() async throws -> JSONValue {
+        try await connectedAPI(adminOnly: true).retrySystemBootstrap()
+    }
+
+    func fetchSystemUpdateStatus() async throws -> JSONValue {
+        try await connectedAPI(adminOnly: true).systemUpdateStatus()
+    }
+
+    func fetchSystemNetworkInfo() async throws -> JSONValue {
+        try await connectedAPI().systemNetworkInfo()
+    }
+
+    func fetchClockStatus() async throws -> ClockStatusDetail {
+        try await connectedAPI(adminOnly: true).clockStatus()
+    }
+
+    func setClockOffset(_ offsetMs: Double) async throws -> ClockStatusDetail {
+        try await connectedAPI(adminOnly: true).setClockOffset(offsetMs)
+    }
+
+    func measureClockOffset() async throws -> ClockStatusDetail {
+        try await connectedAPI(adminOnly: true).measureClockOffset()
+    }
+
+    func setClockAutoApply(_ enabled: Bool) async throws -> ClockStatusDetail {
+        try await connectedAPI(adminOnly: true).setClockAutoApply(enabled)
+    }
+
+    func fetchNTPServerSettings() async throws -> NTPServerListSettings {
+        try await connectedAPI(adminOnly: true).ntpServerSettings()
+    }
+
+    func updateNTPServers(_ servers: [String]) async throws -> NTPServerListSettings {
+        try await connectedAPI(adminOnly: true).updateNTPServerSettings(servers)
+    }
+
+    func fetchServerCPUProfileStatus() async throws -> ServerCPUProfileStatus {
+        try await connectedAPI(adminOnly: true).serverCPUProfileStatus()
+    }
+
+    func armServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await connectedAPI(adminOnly: true).armServerCPUProfile()
+    }
+
+    func cancelServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await connectedAPI(adminOnly: true).cancelServerCPUProfile()
+    }
+
+    func dismissServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await connectedAPI(adminOnly: true).dismissServerCPUProfile()
+    }
+
+    func downloadServerCPUProfile() async throws -> Data {
+        try await connectedAPI(adminOnly: true).downloadServerCPUProfile()
+    }
+
+    func fetchDiagnosticLogSources() async throws -> [DiagnosticLogSource] {
+        try await connectedAPI(adminOnly: true).diagnosticLogSources()
+    }
+
+    func uploadDiagnosticLogs(_ request: DiagnosticUploadRequest) async throws -> DiagnosticUploadReceipt {
+        try await connectedAPI(adminOnly: true).uploadDiagnosticLogs(request)
+    }
+
+    func fetchStorageStatus() async throws -> JSONValue {
+        try await connectedAPI().storageStatus()
+    }
+
+    func setStorageEnabled(_ enabled: Bool) async throws -> JSONValue {
+        try await connectedAPI().setStorageEnabled(enabled)
+    }
+
+    func flushStorage() async throws -> JSONValue {
+        try await connectedAPI().flushStorage()
+    }
+
+    func fetchStorageDates() async throws -> JSONValue {
+        try await connectedAPI().storageDates()
+    }
+
+    func fetchStorageRecords(date: String) async throws -> JSONValue {
+        try await connectedAPI().storageRecords(date: date)
+    }
+
+    func fetchStorageSummary() async throws -> JSONValue {
+        try await connectedAPI().storageSummary()
+    }
+
+    func fetchRadioHardwareStatus() async throws -> JSONValue {
+        try await connectedAPI().radioStatus()
+    }
+
+    func connectRadioHardware() async throws -> JSONValue {
+        try await connectedAPI().connectRadio()
+    }
+
+    func disconnectRadioHardware() async throws -> JSONValue {
+        try await connectedAPI().disconnectRadio()
+    }
+
+    func reconnectRadioHardware() async throws -> JSONValue {
+        try await connectedAPI().manuallyReconnectRadio()
+    }
+
+    func testRadioConnection(profile: RadioProfile) async throws -> GenericSuccessResponse {
+        try await connectedAPI(adminOnly: true).testRadio(config: profile.radio)
+    }
+
+    func testRadioPTT(profile: RadioProfile) async throws -> GenericSuccessResponse {
+        try await connectedAPI(adminOnly: true).testRadioPTT(config: profile.radio)
+    }
+
+    func testRadioCWKeyer(profile: RadioProfile) async throws -> GenericSuccessResponse {
+        try await connectedAPI(adminOnly: true).testRadioCWKeyer(config: profile.radio)
+    }
+
+    func resetServerAudioSettings() async throws -> JSONValue {
+        try await connectedAPI(adminOnly: true).resetAudioSettings()
+    }
+
+    func fetchRealtimeStats() async throws -> JSONValue {
+        try await connectedAPI().realtimeStats()
+    }
+
+    func fetchVoicePTTStatus() async throws -> JSONValue {
+        try await connectedAPI().voicePTTStatus()
+    }
+
     func readJSON(_ path: String) async throws -> JSONValue {
         guard let apiClient else { throw TX5DRSessionError.notConnected }
         return try await apiClient.json(.get, path)
@@ -1710,6 +1844,12 @@ final class TX5DRSession: ObservableObject {
     func requestJSON(_ path: String, method: HTTPMethod, value: JSONValue? = nil) async throws -> JSONValue {
         guard let apiClient else { throw TX5DRSessionError.notConnected }
         return try await apiClient.json(method, path, body: value)
+    }
+
+    private func connectedAPI(adminOnly: Bool = false) throws -> TX5DRAPIClient {
+        if adminOnly, !isAdmin { throw TX5DRSessionError.adminRequired }
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return apiClient
     }
 
     private func syncLogbookSocket() {

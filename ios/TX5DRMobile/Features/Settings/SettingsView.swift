@@ -56,9 +56,14 @@ struct SettingsView: View {
                     Label("插件中心与自动化", systemImage: "puzzlepiece.extension")
                 }
                 NavigationLink {
+                    TX5DRSystemAdministrationView()
+                } label: {
+                    Label("系统、硬件与诊断", systemImage: "gauge.with.dots.needle.50percent")
+                }
+                NavigationLink {
                     AdvancedSettingsView()
                 } label: {
-                    Label("TX-5DR 服务端设置", systemImage: "server.rack")
+                    Label("高级 JSON 设置", systemImage: "curlybraces.square")
                 }
                 NavigationLink {
                     ProtocolConsoleView()

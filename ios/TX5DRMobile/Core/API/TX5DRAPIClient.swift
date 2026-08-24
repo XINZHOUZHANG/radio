@@ -1026,6 +1026,142 @@ actor TX5DRAPIClient {
         )
     }
 
+    func systemBootstrapStatus() async throws -> JSONValue {
+        try await json(.get, "/system/bootstrap-status")
+    }
+
+    func retrySystemBootstrap() async throws -> JSONValue {
+        try await json(.post, "/system/bootstrap-status/retry", body: .object([:]))
+    }
+
+    func systemUpdateStatus() async throws -> JSONValue {
+        try await json(.get, "/system/update-status")
+    }
+
+    func systemNetworkInfo() async throws -> JSONValue {
+        try await json(.get, "/system/network-info")
+    }
+
+    func clockStatus() async throws -> ClockStatusDetail {
+        try await request(.get, "/system/clock")
+    }
+
+    func setClockOffset(_ offsetMs: Double) async throws -> ClockStatusDetail {
+        struct Body: Encodable { let offsetMs: Double }
+        return try await request(.post, "/system/clock/offset", body: Body(offsetMs: offsetMs))
+    }
+
+    func measureClockOffset() async throws -> ClockStatusDetail {
+        try await request(.post, "/system/clock/measure")
+    }
+
+    func setClockAutoApply(_ enabled: Bool) async throws -> ClockStatusDetail {
+        struct Body: Encodable { let enabled: Bool }
+        return try await request(.put, "/system/clock/auto-apply", body: Body(enabled: enabled))
+    }
+
+    func ntpServerSettings() async throws -> NTPServerListSettings {
+        try await request(.get, "/system/clock/settings")
+    }
+
+    func updateNTPServerSettings(_ servers: [String]) async throws -> NTPServerListSettings {
+        struct Body: Encodable { let servers: [String] }
+        return try await request(.put, "/system/clock/settings", body: Body(servers: servers))
+    }
+
+    func serverCPUProfileStatus() async throws -> ServerCPUProfileStatus {
+        try await request(.get, "/system/cpu-profile")
+    }
+
+    func armServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await request(.post, "/system/cpu-profile/arm")
+    }
+
+    func cancelServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await request(.post, "/system/cpu-profile/cancel")
+    }
+
+    func dismissServerCPUProfile() async throws -> ServerCPUProfileStatus {
+        try await request(.post, "/system/cpu-profile/dismiss")
+    }
+
+    func downloadServerCPUProfile() async throws -> Data {
+        try await download("/system/cpu-profile/download")
+    }
+
+    func diagnosticLogSources() async throws -> [DiagnosticLogSource] {
+        let response: DiagnosticLogSourcesResponse = try await request(.get, "/diagnostics/log-sources")
+        return response.sources
+    }
+
+    func uploadDiagnosticLogs(_ upload: DiagnosticUploadRequest) async throws -> DiagnosticUploadReceipt {
+        try await request(.post, "/diagnostics/uploads", body: upload)
+    }
+
+    func storageStatus() async throws -> JSONValue {
+        try await json(.get, "/storage/storage/status")
+    }
+
+    func setStorageEnabled(_ enabled: Bool) async throws -> JSONValue {
+        try await json(.post, "/storage/storage/toggle", body: .object(["enabled": .bool(enabled)]))
+    }
+
+    func flushStorage() async throws -> JSONValue {
+        try await json(.post, "/storage/storage/flush", body: .object([:]))
+    }
+
+    func storageDates() async throws -> JSONValue {
+        try await json(.get, "/storage/storage/dates")
+    }
+
+    func storageRecords(date: String) async throws -> JSONValue {
+        try await json(.get, "/storage/storage/records/\(pathSegment(date))")
+    }
+
+    func storageSummary() async throws -> JSONValue {
+        try await json(.get, "/storage/storage/summary")
+    }
+
+    func radioStatus() async throws -> JSONValue {
+        try await json(.get, "/radio/status")
+    }
+
+    func connectRadio() async throws -> JSONValue {
+        try await json(.post, "/radio/connect", body: .object([:]))
+    }
+
+    func disconnectRadio() async throws -> JSONValue {
+        try await json(.post, "/radio/disconnect", body: .object([:]))
+    }
+
+    func manuallyReconnectRadio() async throws -> JSONValue {
+        try await json(.post, "/radio/manual-reconnect", body: .object([:]))
+    }
+
+    func testRadio(config: JSONValue) async throws -> GenericSuccessResponse {
+        try await request(.post, "/radio/test", body: config)
+    }
+
+    func testRadioPTT(config: JSONValue) async throws -> GenericSuccessResponse {
+        try await request(.post, "/radio/test-ptt", body: config)
+    }
+
+    func testRadioCWKeyer(config: JSONValue) async throws -> GenericSuccessResponse {
+        try await request(.post, "/radio/test-cw-keyer", body: config)
+    }
+
+    func resetAudioSettings() async throws -> JSONValue {
+        try await json(.post, "/audio/settings/reset", body: .object([:]))
+    }
+
+    func realtimeStats() async throws -> JSONValue {
+        try await json(.get, "/realtime/stats")
+    }
+
+    func voicePTTStatus() async throws -> JSONValue {
+        try await json(.get, "/voice/ptt-status")
+    }
+
     func openWebRXStations() async throws -> [OpenWebRXStation] {
         let response: OpenWebRXStationListResponse = try await request(.get, "/openwebrx/stations")
         return response.stations

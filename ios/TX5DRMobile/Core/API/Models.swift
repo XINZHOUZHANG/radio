@@ -1566,3 +1566,87 @@ struct QSOActionResponse: Codable, Sendable {
     let message: String
     let data: QSORecord?
 }
+
+struct ClockStatusDetail: Codable, Sendable {
+    enum SyncState: String, Codable, Sendable {
+        case synced
+        case stale
+        case never
+        case failed
+    }
+
+    enum IndicatorState: String, Codable, Sendable {
+        case ok
+        case warn
+        case alert
+        case stale
+        case failed
+        case never
+    }
+
+    let appliedOffsetMs: Double
+    let indicatorState: IndicatorState
+    let measuredOffsetMs: Double
+    let lastSyncTime: Double?
+    let syncState: SyncState
+    let serverUsed: String?
+    let errorMessage: String?
+    let autoApplyOffset: Bool
+}
+
+struct NTPServerListSettings: Codable, Sendable {
+    let servers: [String]
+    let defaultServers: [String]
+}
+
+struct ServerCPUProfileStatus: Codable, Sendable {
+    enum State: String, Codable, Sendable {
+        case idle
+        case armed
+        case running
+        case completed
+        case interrupted
+        case missing
+        case environmentOverride = "env-override"
+    }
+
+    let state: State
+    let source: String
+    let distribution: String
+    let outputDir: String
+    let hostOutputDirHint: String?
+    let captureId: String?
+    let requestedAt: Double?
+    let startedAt: Double?
+    let completedAt: Double?
+    let profilePath: String?
+    let hostProfilePathHint: String?
+    let recommendedStartAction: String
+    let recommendedFinishAction: String
+}
+
+struct DiagnosticLogSource: Codable, Identifiable, Sendable {
+    let id: String
+    let fileName: String
+    let availableFromMs: Double?
+    let availableToMs: Double?
+    let fileCount: Int
+    let totalBytes: Int
+}
+
+struct DiagnosticLogSourcesResponse: Codable, Sendable {
+    let sources: [DiagnosticLogSource]
+}
+
+struct DiagnosticUploadRequest: Codable, Sendable {
+    let sourceId: String
+    let fromMs: Double
+    let toMs: Double
+    let feedback: String?
+}
+
+struct DiagnosticUploadReceipt: Codable, Sendable {
+    let uploadId: String
+    let lineCount: Int
+    let retainedUntil: JSONValue
+}
