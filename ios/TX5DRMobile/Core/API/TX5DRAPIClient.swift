@@ -18,6 +18,7 @@ struct TX5DRErrorPayload: Codable, Sendable {
 struct TX5DRErrorEnvelope: Codable, Sendable {
     let success: Bool?
     let error: TX5DRErrorPayload?
+    let failures: [TX5DRLogbookSyncFailure]?
 }
 
 enum TX5DRAPIError: LocalizedError {
@@ -677,6 +678,102 @@ actor TX5DRAPIClient {
         return envelope["result"]
     }
 
+    func logbookSyncProviders() async throws -> [TX5DRLogbookSyncProvider] {
+        try await request(.get, "/plugins/sync-providers")
+    }
+
+    func logbookSyncConfigured(callsign: String) async throws -> [String: Bool] {
+        let response: TX5DRLogbookSyncConfiguredResponse = try await request(
+            .get,
+            "/plugins/sync-providers/configured",
+            queryItems: [URLQueryItem(name: "callsign", value: callsign)]
+        )
+        return response.providers
+    }
+
+    func testLogbookSyncProvider(
+        providerId: String,
+        callsign: String
+    ) async throws -> TX5DRLogbookSyncTestResult {
+        struct Body: Encodable { let callsign: String }
+        return try await request(
+            .post,
+            "/plugins/sync-providers/\(pathSegment(providerId))/test-connection",
+            body: Body(callsign: callsign)
+        )
+    }
+
+    func prepareLogbookSyncUpload(
+        providerId: String,
+        callsign: String,
+        since: Double? = nil,
+        until: Double? = nil,
+        includeAlreadyUploaded: Bool = false
+    ) async throws -> TX5DRLogbookSyncUploadPreflight {
+        struct Body: Encodable {
+            let callsign: String
+            let since: Double?
+            let until: Double?
+            let includeAlreadyUploaded: Bool
+        }
+        return try await request(
+            .post,
+            "/plugins/sync-providers/\(pathSegment(providerId))/upload-preflight",
+            body: Body(
+                callsign: callsign,
+                since: since,
+                until: until,
+                includeAlreadyUploaded: includeAlreadyUploaded
+            )
+        )
+    }
+
+    func uploadLogbookSyncProvider(
+        providerId: String,
+        callsign: String,
+        skipBlockedQSOs: Bool = false,
+        since: Double? = nil,
+        until: Double? = nil,
+        includeAlreadyUploaded: Bool = false
+    ) async throws -> TX5DRLogbookSyncUploadResult {
+        struct Body: Encodable {
+            let callsign: String
+            let skipBlockedQsos: Bool
+            let since: Double?
+            let until: Double?
+            let includeAlreadyUploaded: Bool
+        }
+        return try await request(
+            .post,
+            "/plugins/sync-providers/\(pathSegment(providerId))/upload",
+            body: Body(
+                callsign: callsign,
+                skipBlockedQsos: skipBlockedQSOs,
+                since: since,
+                until: until,
+                includeAlreadyUploaded: includeAlreadyUploaded
+            )
+        )
+    }
+
+    func downloadLogbookSyncProvider(
+        providerId: String,
+        callsign: String,
+        since: Double? = nil,
+        until: Double? = nil
+    ) async throws -> TX5DRLogbookSyncDownloadResult {
+        struct Body: Encodable {
+            let callsign: String
+            let since: Double?
+            let until: Double?
+        }
+        return try await request(
+            .post,
+            "/plugins/sync-providers/\(pathSegment(providerId))/download",
+            body: Body(callsign: callsign, since: since, until: until)
+        )
+    }
+
     func rigctldStatus() async throws -> RigctldStatus {
         try await request(.get, "/rigctld/status")
     }
@@ -1035,7 +1132,16 @@ actor TX5DRAPIClient {
         guard let http = response as? HTTPURLResponse else { throw TX5DRAPIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             let envelope = try? decoder.decode(TX5DRErrorEnvelope.self, from: data)
-            throw TX5DRAPIError.http(status: http.statusCode, payload: envelope?.error)
+            let syncFailure = envelope?.failures?.first
+            let payload = envelope?.error ?? syncFailure.map {
+                TX5DRErrorPayload(
+                    code: $0.code,
+                    message: $0.message,
+                    userMessage: $0.detail,
+                    suggestions: $0.retryable == true ? ["请稍后重试"] : nil
+                )
+            }
+            throw TX5DRAPIError.http(status: http.statusCode, payload: payload)
         }
         return data
     }

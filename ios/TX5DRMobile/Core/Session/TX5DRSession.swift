@@ -63,6 +63,8 @@ final class TX5DRSession: ObservableObject {
     @Published private(set) var pluginRuntimeInfo: TX5DRPluginRuntimeInfo?
     @Published private(set) var pluginMarketCatalog: TX5DRPluginMarketCatalogResponse?
     @Published private(set) var pluginOperatorStates: [String: TX5DRPluginOperatorState] = [:]
+    @Published private(set) var logbookSyncProviders: [TX5DRLogbookSyncProvider] = []
+    @Published private(set) var logbookSyncConfiguredByCallsign: [String: [String: Bool]] = [:]
     @Published private(set) var openWebRXStations: [OpenWebRXStation] = []
     @Published private(set) var openWebRXListenStatus: OpenWebRXListenStatus?
     @Published private(set) var isVoicePTTHeld = false
@@ -238,6 +240,8 @@ final class TX5DRSession: ObservableObject {
         pluginRuntimeInfo = nil
         pluginMarketCatalog = nil
         pluginOperatorStates = [:]
+        logbookSyncProviders = []
+        logbookSyncConfiguredByCallsign = [:]
         openWebRXStations = []
         openWebRXListenStatus = nil
         selectedOperatorId = nil
@@ -1064,6 +1068,78 @@ final class TX5DRSession: ObservableObject {
     ) async throws -> JSONValue? {
         guard let apiClient else { throw TX5DRSessionError.notConnected }
         return try await apiClient.pluginPageRequest(name: pluginName, endpoint: endpoint, body: body)
+    }
+
+    func loadLogbookSyncProviders(callsign: String, reportErrors: Bool = true) async {
+        guard let apiClient else { return }
+        do {
+            async let providers = apiClient.logbookSyncProviders()
+            async let configured = apiClient.logbookSyncConfigured(callsign: callsign)
+            let (loadedProviders, loadedConfigured) = try await (providers, configured)
+            logbookSyncProviders = loadedProviders
+            logbookSyncConfiguredByCallsign[callsign] = loadedConfigured
+        } catch {
+            if reportErrors { fail(error) }
+        }
+    }
+
+    func testLogbookSyncProvider(
+        providerId: String,
+        callsign: String
+    ) async throws -> TX5DRLogbookSyncTestResult {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.testLogbookSyncProvider(providerId: providerId, callsign: callsign)
+    }
+
+    func prepareLogbookSyncUpload(
+        providerId: String,
+        callsign: String,
+        since: Double? = nil,
+        until: Double? = nil,
+        includeAlreadyUploaded: Bool = false
+    ) async throws -> TX5DRLogbookSyncUploadPreflight {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.prepareLogbookSyncUpload(
+            providerId: providerId,
+            callsign: callsign,
+            since: since,
+            until: until,
+            includeAlreadyUploaded: includeAlreadyUploaded
+        )
+    }
+
+    func uploadLogbookSyncProvider(
+        providerId: String,
+        callsign: String,
+        skipBlockedQSOs: Bool = false,
+        since: Double? = nil,
+        until: Double? = nil,
+        includeAlreadyUploaded: Bool = false
+    ) async throws -> TX5DRLogbookSyncUploadResult {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.uploadLogbookSyncProvider(
+            providerId: providerId,
+            callsign: callsign,
+            skipBlockedQSOs: skipBlockedQSOs,
+            since: since,
+            until: until,
+            includeAlreadyUploaded: includeAlreadyUploaded
+        )
+    }
+
+    func downloadLogbookSyncProvider(
+        providerId: String,
+        callsign: String,
+        since: Double? = nil,
+        until: Double? = nil
+    ) async throws -> TX5DRLogbookSyncDownloadResult {
+        guard let apiClient else { throw TX5DRSessionError.notConnected }
+        return try await apiClient.downloadLogbookSyncProvider(
+            providerId: providerId,
+            callsign: callsign,
+            since: since,
+            until: until
+        )
     }
 
     func loadRigctldStatus(reportErrors: Bool = true) async {

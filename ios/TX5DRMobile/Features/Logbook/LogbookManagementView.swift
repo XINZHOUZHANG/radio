@@ -183,6 +183,7 @@ private struct LogbookMaintenanceView: View {
             unsavedSection
             operatorsSection
             transferSection
+            syncSection
             backupSection
             restoreSection
         }
@@ -336,6 +337,32 @@ private struct LogbookMaintenanceView: View {
             Button { export(format: "csv") } label: {
                 Label("导出 CSV", systemImage: "tablecells")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var syncSection: some View {
+        Section {
+            if let callsign = session.keyerCallsign {
+                NavigationLink {
+                    LogbookSyncProvidersView(logbookId: logbookId, callsign: callsign)
+                } label: {
+                    HStack {
+                        Label("外部日志服务", systemImage: "arrow.triangle.2.circlepath")
+                        Spacer()
+                        Text(callsign)
+                            .font(.caption.monospaced().weight(.semibold))
+                            .foregroundStyle(RadioPalette.accent)
+                    }
+                }
+            } else {
+                Label("先选择操作员以使用外部日志同步", systemImage: "person.crop.circle.badge.exclamationmark")
+                    .foregroundStyle(RadioPalette.muted)
+            }
+        } header: {
+            Text("插件同步")
+        } footer: {
+            Text("支持 TX-5DR 已安装插件提供的连接测试、上传预检、下载、上传、完整同步及自定义操作页面。")
         }
     }
 

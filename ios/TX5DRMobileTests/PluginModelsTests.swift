@@ -3,7 +3,8 @@ import XCTest
 
 final class PluginModelsTests: XCTestCase {
     func testDecodesPluginSnapshotAndSettingScopes() throws {
-        let payload = Data(#"{
+        let payload = Data(#"""
+        {
           "state":"ready",
           "generation":4,
           "plugins":[{
@@ -25,7 +26,8 @@ final class PluginModelsTests: XCTestCase {
           }],
           "panelMeta":[],
           "panelContributions":[]
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let snapshot = try JSONDecoder().decode(TX5DRPluginSystemSnapshot.self, from: payload)
         let plugin = try XCTUnwrap(snapshot.plugins.first)
@@ -39,7 +41,8 @@ final class PluginModelsTests: XCTestCase {
     }
 
     func testDecodesMarketplaceCatalog() throws {
-        let payload = Data(#"{
+        let payload = Data(#"""
+        {
           "catalog":{
             "schemaVersion":1,
             "generatedAt":"2026-08-24T00:00:00Z",
@@ -61,7 +64,8 @@ final class PluginModelsTests: XCTestCase {
             }]
           },
           "sourceUrl":"https://example.test/catalog.json"
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let response = try JSONDecoder().decode(TX5DRPluginMarketCatalogResponse.self, from: payload)
 
@@ -116,5 +120,68 @@ final class PluginModelsTests: XCTestCase {
         XCTAssertFalse(configuration.isAllowedNavigation(try XCTUnwrap(URL(string: "https://evil.example"))))
         XCTAssertFalse(configuration.isAllowedNavigation(try XCTUnwrap(URL(string: "blob:https://evil.example/id"))))
         XCTAssertFalse(configuration.isAllowedNavigation(try XCTUnwrap(URL(string: "javascript:alert(1)"))))
+    }
+
+    func testDecodesLogbookSyncProviderActions() throws {
+        let payload = Data(#"""
+        [{
+          "id":"wavelog",
+          "pluginName":"wavelog-sync",
+          "displayName":"WaveLog",
+          "icon":"cloud",
+          "color":"primary",
+          "accessScope":"operator",
+          "settingsPageId":"settings",
+          "actions":[
+            {"id":"pull","label":"Download","icon":"download","operation":"download"},
+            {"id":"range","label":"Range sync","pageId":"range-sync"}
+          ]
+        }]
+        """#.utf8)
+
+        let providers = try JSONDecoder().decode([TX5DRLogbookSyncProvider].self, from: payload)
+        let provider = try XCTUnwrap(providers.first)
+
+        XCTAssertEqual(provider.pluginName, "wavelog-sync")
+        XCTAssertEqual(provider.accessScope, "operator")
+        XCTAssertEqual(provider.actions?.first?.operation, .download)
+        XCTAssertEqual(provider.actions?.last?.pageId, "range-sync")
+    }
+
+    func testDecodesLogbookSyncPreflightAndStructuredFailures() throws {
+        let payload = Data(#"""
+        {
+          "ready":false,
+          "pendingCount":4,
+          "uploadableCount":3,
+          "blockedCount":1,
+          "canSkipBlocked":true,
+          "guidance":["Add a DX grid"],
+          "issues":[{
+            "code":"missing_grid",
+            "severity":"error",
+            "message":"Grid is required",
+            "qsoId":"qso-1",
+            "qsoCallsign":"JA1ABC"
+          }]
+        }
+        """#.utf8)
+
+        let preflight = try JSONDecoder().decode(TX5DRLogbookSyncUploadPreflight.self, from: payload)
+
+        XCTAssertFalse(preflight.ready)
+        XCTAssertEqual(preflight.uploadableCount, 3)
+        XCTAssertTrue(preflight.canSkipBlocked == true)
+        XCTAssertEqual(preflight.issues?.first?.qsoCallsign, "JA1ABC")
+    }
+
+    func testDecodesSyncFailureOnlyHTTPEnvelope() throws {
+        let payload = Data(#"{"failures":[{"code":"sync_upload_failed","message":"Remote rejected upload","source":"remote","retryable":true}]}"#.utf8)
+
+        let envelope = try JSONDecoder().decode(TX5DRErrorEnvelope.self, from: payload)
+
+        XCTAssertNil(envelope.error)
+        XCTAssertEqual(envelope.failures?.first?.code, "sync_upload_failed")
+        XCTAssertTrue(envelope.failures?.first?.retryable == true)
     }
 }

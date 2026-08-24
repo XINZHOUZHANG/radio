@@ -368,3 +368,96 @@ struct TX5DRPluginMarketInstallResult: Codable, Sendable {
     let pluginName: String
     let record: JSONValue?
 }
+
+enum TX5DRLogbookSyncOperation: String, Codable, Sendable {
+    case upload
+    case download
+    case fullSync = "full_sync"
+}
+
+struct TX5DRLogbookSyncAction: Codable, Identifiable, Sendable {
+    let id: String
+    let label: String
+    let description: String?
+    let icon: String?
+    let pageId: String?
+    let operation: TX5DRLogbookSyncOperation?
+}
+
+struct TX5DRLogbookSyncProvider: Codable, Identifiable, Sendable {
+    let id: String
+    let pluginName: String
+    let displayName: String
+    let icon: String?
+    let color: String?
+    let accessScope: String?
+    let settingsPageId: String
+    let actions: [TX5DRLogbookSyncAction]?
+}
+
+struct TX5DRLogbookSyncConfiguredResponse: Codable, Sendable {
+    let providers: [String: Bool]
+}
+
+struct TX5DRLogbookSyncFailure: Codable, Identifiable, Sendable {
+    let code: String
+    let message: String
+    let source: String?
+    let operation: String?
+    let providerId: String?
+    let qsoId: String?
+    let qsoCallsign: String?
+    let httpStatus: Int?
+    let retryable: Bool?
+    let detail: String?
+
+    var id: String {
+        [providerId, operation, qsoId, code, message].compactMap { $0 }.joined(separator: ":")
+    }
+}
+
+struct TX5DRLogbookSyncTestResult: Codable, Sendable {
+    let success: Bool
+    let message: String?
+    let details: JSONValue?
+    let failures: [TX5DRLogbookSyncFailure]?
+}
+
+struct TX5DRLogbookSyncPreflightIssue: Codable, Identifiable, Sendable {
+    let code: String
+    let severity: String
+    let message: String
+    let detail: String?
+    let qsoId: String?
+    let qsoCallsign: String?
+
+    var id: String { [qsoId, code, message].compactMap { $0 }.joined(separator: ":") }
+}
+
+struct TX5DRLogbookSyncUploadPreflight: Codable, Sendable {
+    let ready: Bool
+    let pendingCount: Int
+    let uploadableCount: Int
+    let blockedCount: Int
+    let issues: [TX5DRLogbookSyncPreflightIssue]?
+    let canSkipBlocked: Bool?
+    let guidance: [String]?
+}
+
+struct TX5DRLogbookSyncUploadResult: Codable, Sendable {
+    let submitted: Int?
+    let verified: Int?
+    let uploaded: Int
+    let skipped: Int
+    let failed: Int
+    let failures: [TX5DRLogbookSyncFailure]?
+}
+
+struct TX5DRLogbookSyncDownloadResult: Codable, Sendable {
+    let downloaded: Int
+    let matched: Int
+    let updated: Int
+    let imported: Int?
+    let windowCount: Int?
+    let failures: [TX5DRLogbookSyncFailure]?
+}
