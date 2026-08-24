@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 private enum LoginMethod: String, CaseIterable, Identifiable {
@@ -50,6 +51,9 @@ struct LoginView: View {
                     Label("仅支持管理员与操作员账户，不提供观察员入口", systemImage: "lock.shield")
                         .font(.footnote)
                         .foregroundStyle(RadioPalette.muted)
+                    Text(buildIdentity)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(RadioPalette.muted.opacity(0.8))
                 }
                 .padding(.horizontal, 22)
                 .padding(.vertical, 44)
@@ -164,6 +168,12 @@ struct LoginView: View {
         case .pairing: return pairingCode.count == 6
         case .token: return !token.isEmpty
         }
+    }
+
+    private var buildIdentity: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "v\(version) (\(build)) · HTTP/Tailscale"
     }
 
     private func submit() {
