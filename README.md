@@ -1,12 +1,20 @@
-# Remote Radio / TX-5DR Mobile
+# Remote Radio / Radio Lite
 
-This repository now uses the official [TX-5DR](https://github.com/boybook/tx-5dr)
-server as its primary radio backend and adds a native SwiftUI iOS client. The
-earlier Python `server/` and browser `web/` implementation remains in the tree
-as a historical prototype; new radio functionality should target TX-5DR.
+This repository is building **Radio Lite Server**, an independent low-bandwidth
+remote-radio backend for Debian 13, together with a native SwiftUI iOS client.
+It composes Hamlib, Opus, system audio and WSJT-X DSP instead of reimplementing
+radio hardware support. The existing TX-5DR deployment remains available as a
+compatibility reference and fallback while the iOS client migrates.
 
 ## What is included
 
+- `radio-lite-server/`: the new TypeScript service. Its first milestone includes
+  JSON account/device storage, Argon2id login, six-digit pairing, multi-radio
+  configuration and hardware discovery, authenticated control/media WebSockets,
+  Hamlib frequency/mode/PTT/internal-tuner control, per-radio controller leases,
+  transmit interlocks and disconnect fail-safe behavior;
+- `docs/design/2026-08-24-radio-lite-server.md`: approved architecture,
+  bandwidth targets, FT8/FT4, ADIF, deployment and iOS migration plan;
 - `deploy/tx5dr/`: reproducible Debian Docker deployment pinned to TX-5DR commit
   `f9e07fec6c5fb67b5c904936b5df03c1e3b0f5dc`;
 - `deploy/tx5dr/patches/`: a reviewed server extension for single-use six-digit
@@ -19,6 +27,27 @@ as a historical prototype; new radio functionality should target TX-5DR.
 - `docs/tx5dr/contract.json`: extracted upstream HTTP/WebSocket/audio contract;
 - `scripts/check-ios-tx5dr-contract.mjs`: drift guard between the pinned TX-5DR
   protocol and the iOS implementation.
+
+## Radio Lite local checks
+
+Radio Lite currently targets Node.js 24.7 or newer so it can use the built-in
+Argon2id implementation without shipping a native password module.
+
+```sh
+cd radio-lite-server
+npm install
+npm test
+```
+
+Local loopback start:
+
+```sh
+RADIO_LITE_DATA_DIR=./data npm start
+```
+
+Binding plaintext HTTP/WS beyond loopback is rejected unless the administrator
+explicitly sets `RADIO_LITE_ALLOW_INSECURE=1`; this switch is intended only for
+a trusted Tailscale or LAN test. Public deployment will use HTTPS/WSS.
 
 ## Debian dummy deployment
 

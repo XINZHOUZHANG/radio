@@ -7,3 +7,5 @@ ios/TX5DRMobile/*.xcodeproj/
 ios/TX5DRMobile/DerivedData/
 *.xcuserstate
 xcuserdata/
+radio-lite-server/node_modules/
+radio-lite-server/.npm-cache/
