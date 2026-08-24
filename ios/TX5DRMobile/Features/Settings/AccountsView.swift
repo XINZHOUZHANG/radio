@@ -185,7 +185,7 @@ private struct EditAccountView: View {
                 }
 
                 if role == .operator {
-                    Section("可用操作员") {
+                    Section {
                         ForEach(session.operators) { item in
                             Button {
                                 if selectedOperators.contains(item.id) {
@@ -210,6 +210,8 @@ private struct EditAccountView: View {
                                 }
                             }
                         }
+                    } header: {
+                        Text("可用操作员")
                     } footer: {
                         Text("至少选择一个操作员；最大并发数不能超过此列表数量。")
                     }
