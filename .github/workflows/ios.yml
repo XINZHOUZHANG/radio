@@ -77,3 +77,57 @@ jobs:
       - name: Publish Swift compiler diagnostics
         if: failure()
         run: python3 scripts/annotate-xcodebuild.py xcodebuild.log
+
+  unsigned-device-ipa:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
+      - name: Build unsigned iPhone application
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
+            -scheme TX5DRMobile \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/TX5DRMobileDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            2>&1 | tee xcodebuild-device.log
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/TX5DRMobileDerivedData/Build/Products/Debug-iphoneos/TX5DRMobile.app"
+          PACKAGE_ROOT="$RUNNER_TEMP/TX5DRMobileUnsigned"
+          test -d "$APP_PATH"
+          mkdir -p "$PACKAGE_ROOT/Payload"
+          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/TX5DRMobile.app"
+          (
+            cd "$PACKAGE_ROOT"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa" Payload
+          )
+          shasum -a 256 "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa" \
+            > "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa.sha256"
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TX5DR-Remote-Debug-unsigned-${{ github.sha }}
+          path: |
+            TX5DR-Remote-Debug-unsigned.ipa
+            TX5DR-Remote-Debug-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish Swift compiler diagnostics
+        if: failure() && hashFiles('xcodebuild-device.log') != ''
+        run: python3 scripts/annotate-xcodebuild.py xcodebuild-device.log
