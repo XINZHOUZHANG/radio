@@ -1,5 +1,23 @@
 import Foundation
 
+enum TX5DRNetworkPolicy {
+    static let timeout: TimeInterval = 5 * 60
+
+    static let session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        return URLSession(configuration: configuration)
+    }()
+
+    static func request(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        return request
+    }
+}
+
 enum HTTPMethod: String, Sendable, Hashable, CaseIterable {
     case get = "GET"
     case post = "POST"
@@ -43,7 +61,7 @@ actor TX5DRAPIClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    init(server: TX5DRServer, jwt: String? = nil, session: URLSession = .shared) {
+    init(server: TX5DRServer, jwt: String? = nil, session: URLSession = TX5DRNetworkPolicy.session) {
         self.server = server
         self.jwt = jwt
         self.session = session
@@ -1310,9 +1328,8 @@ actor TX5DRAPIClient {
         authenticated: Bool,
         headers: [String: String] = [:]
     ) async throws -> Data {
-        var request = URLRequest(url: try server.apiURL(path, queryItems: queryItems))
+        var request = TX5DRNetworkPolicy.request(url: try server.apiURL(path, queryItems: queryItems))
         request.httpMethod = method.rawValue
-        request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body {
             request.httpBody = body

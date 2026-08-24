@@ -18,8 +18,11 @@ app has no third-party runtime dependency. TX-5DR's lower-latency
 3. Open `ios/TX5DRMobile/TX5DRMobile.xcodeproj`.
 4. Select a signing team and run on an iOS 17+ device.
 
-Debug builds permit HTTP for direct LAN acceptance testing. Release builds do
-not permit arbitrary HTTP; use a valid HTTPS endpoint for real operation.
+The client permits HTTP for direct LAN and encrypted Tailscale operation,
+including `100.x` addresses that iOS does not classify as local-network hosts.
+Do not send account credentials over untrusted plain HTTP; use HTTPS outside a
+trusted LAN or Tailscale tunnel. REST, WebSocket, audio, and plugin-page startup
+use a five-minute timeout for high-latency remote stations.
 
 The app intentionally exposes only administrator and operator login flows. It
 does not offer TX-5DR public-viewer mode.

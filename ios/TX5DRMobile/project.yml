@@ -38,16 +38,12 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: xyz.992218.tx5dr.remote
         GENERATE_INFOPLIST_FILE: false
-      configs:
-        Debug:
-          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: true
-        Release:
-          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: false
     scheme:
       testTargets:
         - TX5DRMobileTests

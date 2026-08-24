@@ -83,4 +83,16 @@ final class TX5DRServerTests: XCTestCase {
         XCTAssertThrowsError(try TX5DRServer(address: "ftp://radio.example"))
         XCTAssertThrowsError(try TX5DRServer(address: "http:///missing-host"))
     }
+
+    func testHighLatencyNetworkPolicyUsesFiveMinuteTimeouts() throws {
+        let url = try XCTUnwrap(URL(string: "http://100.64.0.10:8076/api/auth/status"))
+        let request = TX5DRNetworkPolicy.request(url: url)
+        let configuration = TX5DRNetworkPolicy.session.configuration
+
+        XCTAssertEqual(TX5DRNetworkPolicy.timeout, 300)
+        XCTAssertEqual(request.timeoutInterval, 300)
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 300)
+        XCTAssertEqual(configuration.timeoutIntervalForResource, 300)
+        XCTAssertTrue(configuration.waitsForConnectivity)
+    }
 }

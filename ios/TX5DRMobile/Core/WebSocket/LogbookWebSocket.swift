@@ -82,7 +82,7 @@ final class LogbookWebSocket: ObservableObject {
     private var reconnectAttempt = 0
     private var shouldReconnect = false
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = TX5DRNetworkPolicy.session) {
         self.session = session
     }
 
@@ -119,9 +119,8 @@ final class LogbookWebSocket: ObservableObject {
             if let logBookId { queryItems.append(URLQueryItem(name: "logBookId", value: logBookId)) }
             queryItems.append(URLQueryItem(name: "token", value: jwt))
 
-            let socket = session.webSocketTask(
-                with: try server.webSocketURL("/ws/logbook", queryItems: queryItems)
-            )
+            let url = try server.webSocketURL("/ws/logbook", queryItems: queryItems)
+            let socket = session.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
             task = socket
             state = .connecting
             socket.resume()

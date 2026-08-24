@@ -108,7 +108,7 @@ final class RadioWebSocket: ObservableObject {
     private let decoder = JSONDecoder()
     private var spectrumHistoryBuffer = SpectrumHistoryBuffer(maxRows: 120)
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = TX5DRNetworkPolicy.session) {
         self.session = session
         let key = "tx5dr.clientInstanceId"
         if let existing = UserDefaults.standard.string(forKey: key) {
@@ -139,7 +139,8 @@ final class RadioWebSocket: ObservableObject {
         shouldReconnect = true
         reconnectTask?.cancel()
         do {
-            let socket = session.webSocketTask(with: try server.webSocketURL("/ws"))
+            let url = try server.webSocketURL("/ws")
+            let socket = session.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
             task = socket
             state = .connecting
             socket.resume()

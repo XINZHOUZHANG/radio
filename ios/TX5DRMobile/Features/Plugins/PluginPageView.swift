@@ -243,7 +243,7 @@ private struct PluginPageWebView: UIViewRepresentable {
             loadedPageURL = url
             parent.isLoading = true
             parent.loadError = nil
-            var request = URLRequest(url: url)
+            var request = TX5DRNetworkPolicy.request(url: url)
             request.cachePolicy = .reloadIgnoringLocalCacheData
             webView?.load(request)
         }
@@ -314,7 +314,7 @@ private struct PluginPageWebView: UIViewRepresentable {
             guard navigationAction.targetFrame == nil,
                   let url = navigationAction.request.url else { return nil }
             if parent.configuration.isAllowedNavigation(url) {
-                webView.load(URLRequest(url: url))
+                webView.load(TX5DRNetworkPolicy.request(url: url))
             } else {
                 UIApplication.shared.open(url)
             }

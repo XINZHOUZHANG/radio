@@ -87,7 +87,7 @@ final class TX5DRAudioClient: ObservableObject {
     private var uplinkSequence: UInt32 = 0
     private static let monitorVolumeDefaultsKey = "tx5dr.monitorVolumeDecibels"
 
-    init(urlSession: URLSession = .shared) {
+    init(urlSession: URLSession = TX5DRNetworkPolicy.session) {
         self.urlSession = urlSession
         let savedVolume = UserDefaults.standard.object(forKey: Self.monitorVolumeDefaultsKey) as? NSNumber
         monitorVolumeDecibels = AudioGain.clampedDecibels(savedVolume?.doubleValue ?? 0)
@@ -126,7 +126,7 @@ final class TX5DRAudioClient: ObservableObject {
                 )
             }
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
-            let socket = urlSession.webSocketTask(with: url)
+            let socket = urlSession.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
             downlinkSocket = socket
             socket.resume()
             downlinkReceiveTask = Task { [weak self] in
@@ -175,7 +175,7 @@ final class TX5DRAudioClient: ObservableObject {
             let offer = try await apiClient.realtimeSession(direction: "send")
             participantIdentity = offer.participantIdentity
             let url = try server.externalizedOfferURL(offer.url, token: offer.token)
-            let socket = urlSession.webSocketTask(with: url)
+            let socket = urlSession.webSocketTask(with: TX5DRNetworkPolicy.request(url: url))
             uplinkSocket = socket
             startUplinkSendLoop(socket, generation: generation)
             socket.resume()

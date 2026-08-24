@@ -8,6 +8,13 @@
     <string>语音 PTT 发射和录制语音键控素材时，TX-5DR Remote 需要使用麦克风。</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>TX-5DR Remote 需要连接局域网内的电台服务器。</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIBackgroundModes</key>

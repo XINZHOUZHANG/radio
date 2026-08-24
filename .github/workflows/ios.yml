@@ -111,6 +111,7 @@ jobs:
           APP_PATH="$RUNNER_TEMP/TX5DRMobileDerivedData/Build/Products/Debug-iphoneos/TX5DRMobile.app"
           PACKAGE_ROOT="$RUNNER_TEMP/TX5DRMobileUnsigned"
           test -d "$APP_PATH"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP_PATH/Info.plist")" = "true"
           mkdir -p "$PACKAGE_ROOT/Payload"
           ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/TX5DRMobile.app"
           (
