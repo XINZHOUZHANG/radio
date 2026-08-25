@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import TX5DRMobile
 
@@ -51,6 +52,106 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
         XCTAssertTrue(state.complete(backup))
         XCTAssertFalse(state.isCurrent(main))
         XCTAssertTrue(state.isCurrent(backup))
+    }
+
+    func testOldReconnectOwnerCannotClearItsReplacement() {
+        var state = RadioLiteReconnectOwnershipState()
+        let old = state.begin()
+        let replacement = state.begin()
+
+        XCTAssertFalse(state.complete(old), "a cancelled request finishing late must not clear reconnectTask")
+        XCTAssertTrue(state.isCurrent(replacement))
+        XCTAssertTrue(state.complete(replacement))
+        XCTAssertFalse(state.isCurrent(replacement))
+    }
+
+    func testReconnectFailurePolicyTreatsSupersessionAsBenign() {
+        XCTAssertEqual(
+            RadioLiteReconnectFailurePolicy.disposition(
+                for: CancellationError(),
+                stage: .channelReconnect
+            ),
+            .benign
+        )
+        XCTAssertEqual(
+            RadioLiteReconnectFailurePolicy.disposition(
+                for: URLError(.timedOut),
+                stage: .channelReconnect
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            RadioLiteReconnectFailurePolicy.disposition(
+                for: URLError(.timedOut),
+                stage: .credentialRefresh
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            RadioLiteReconnectFailurePolicy.disposition(
+                for: RadioLiteHTTPError.http(
+                    status: 401,
+                    code: "refresh_expired",
+                    message: "expired"
+                ),
+                stage: .credentialRefresh
+            ),
+            .signOut
+        )
+    }
+
+    func testPTTSubscriptionTransfersMonitoringRestorationUntilRelease() {
+        var intent = RadioLiteReceiveMonitoringIntent()
+        intent.setDesired(true)
+        let monitoring = RadioLiteReceiveMonitoringOwnership(
+            radioId: "main",
+            generation: intent.suspend()
+        )
+        var transfers = RadioLiteVoicePTTReceiveRestoreState()
+
+        transfers.assign(monitoring, transmitGeneration: 11)
+        XCTAssertFalse(intent.shouldMonitor, "PTT must not resume the speaker while transmit is held")
+
+        let released = transfers.take(transmitGeneration: 11)
+        XCTAssertEqual(released, monitoring)
+        XCTAssertTrue(intent.resume(
+            generation: released?.generation ?? 0,
+            expectedRadioId: "main",
+            selectedRadioId: "main",
+            subscribedRadioId: "main"
+        ))
+        XCTAssertTrue(intent.shouldMonitor, "releasing PTT must restore the user's receive-audio choice")
+    }
+
+    func testOldPTTCleanupCannotConsumeReplacementMonitoringTransfer() {
+        var transfers = RadioLiteVoicePTTReceiveRestoreState()
+        let old = RadioLiteReceiveMonitoringOwnership(radioId: "main", generation: 3)
+        let replacement = RadioLiteReceiveMonitoringOwnership(radioId: "main", generation: 4)
+        transfers.assign(old, transmitGeneration: 20)
+        transfers.assign(replacement, transmitGeneration: 21)
+
+        XCTAssertNil(transfers.take(transmitGeneration: 20))
+        XCTAssertEqual(transfers.take(transmitGeneration: 21), replacement)
+    }
+
+    func testPTTStopReasonRestoresReceiveExceptDuringConnectionLoss() {
+        XCTAssertTrue(RadioLiteVoicePTTStopReason.userRelease.restoresReceiveMonitoring)
+        XCTAssertTrue(RadioLiteVoicePTTStopReason.transmitFailure.restoresReceiveMonitoring)
+        XCTAssertFalse(
+            RadioLiteVoicePTTStopReason.connectionLoss.restoresReceiveMonitoring,
+            "connection recovery owns a newer monitoring suspension"
+        )
+    }
+
+    func testOldConfigurationReconnectCannotPublishControlForNewRadio() {
+        var state = RadioLiteRadioConfigurationReconnectOwnershipState()
+        let old = state.begin(radioId: "main")
+        let replacement = state.begin(radioId: "backup")
+
+        XCTAssertFalse(state.isCurrent(old, selectedRadioId: "backup"))
+        XCTAssertTrue(state.isCurrent(replacement, selectedRadioId: "backup"))
+        XCTAssertFalse(state.complete(old, selectedRadioId: "backup"))
+        XCTAssertTrue(state.isCurrent(replacement, selectedRadioId: "backup"))
     }
 
     func testPermissionResultCannotActivateCaptureAfterStop() {
