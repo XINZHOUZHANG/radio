@@ -32,6 +32,7 @@ import {
 } from "../media/media-hub.ts";
 import { SyntheticMediaWorker } from "../media/synthetic-media-worker.ts";
 import { SystemMediaWorker } from "../media/system-media-worker.ts";
+import { AdifLogStore } from "../log/adif-log-store.ts";
 
 export type RadioLiteServiceOptions = {
   dataDirectory: string;
@@ -45,10 +46,18 @@ export type RadioLiteServiceOptions = {
   runtimeFactory?: RadioRuntimeFactory;
   hardwareDiscovery?: HardwareDiscovery;
   mediaWorkerFactory?: MediaWorkerFactory;
+  logStore?: AdifLogStore;
+  logPath?: string;
 };
 
 type SessionPrincipal = {
   token: string;
+  user: PublicUser;
+};
+
+type HttpPrincipal = {
+  sessionToken: string | null;
+  deviceId: string | null;
   user: PublicUser;
 };
 
@@ -63,6 +72,7 @@ export class RadioLiteService {
   readonly #audit: AuditLog;
   readonly #runtimes: RadioRuntimeRegistry;
   readonly #media: MediaHub;
+  readonly #log: AdifLogStore;
   readonly #hardwareDiscovery: HardwareDiscovery;
   readonly #secureCookies: boolean;
   #server: Server | null = null;
@@ -123,6 +133,10 @@ export class RadioLiteService {
         }
       },
     });
+    this.#log = options.logStore ?? new AdifLogStore(
+      options.logPath ?? join(options.dataDirectory, "station-log.adif"),
+      { now: this.#now },
+    );
     this.#hardwareDiscovery = options.hardwareDiscovery ?? new HardwareDiscovery();
     this.#secureCookies = options.secureCookies === true;
   }
@@ -135,7 +149,12 @@ export class RadioLiteService {
     if (this.#initialized) {
       return;
     }
-    await Promise.all([this.#users.load(), this.#devices.load(), this.#radios.load()]);
+    await Promise.all([
+      this.#users.load(),
+      this.#devices.load(),
+      this.#radios.load(),
+      this.#log.load(),
+    ]);
     if (this.#users.list().length === 0) {
       this.#setupCode = this.#codes.issue("first-admin", "initial_setup", 10 * 60_000).code;
     }
@@ -777,7 +796,7 @@ export class RadioLiteService {
         return;
       }
       if (method === "GET" && url.pathname === "/api/v1/radios") {
-        this.#requireSession(request, false);
+        this.#requireHttpPrincipal(request, false);
         sendJson(response, 200, this.#radios.snapshot());
         return;
       }
@@ -796,6 +815,94 @@ export class RadioLiteService {
         sendJson(response, 200, { radio: saved });
         return;
       }
+      if (method === "GET" && url.pathname === "/api/v1/logs") {
+        this.#requireHttpPrincipal(request, false);
+        exactQueryKeys(url, ["limit", "offset"]);
+        const limit = queryInteger(url, "limit", 100, 1, 1_000);
+        const offset = queryInteger(url, "offset", 0, 0, Number.MAX_SAFE_INTEGER);
+        sendJson(response, 200, {
+          records: this.#log.list(limit, offset),
+          total: this.#log.count,
+          limit,
+          offset,
+        });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/api/v1/logs") {
+        const principal = this.#requireHttpPrincipal(request, true);
+        const body = await jsonObject(
+          request,
+          [
+            "radioId", "call", "startedAtMs", "endedAtMs", "frequencyHz", "band",
+            "mode", "submode", "rstSent", "rstReceived", "grid", "txPowerWatts", "comment",
+          ],
+          ["endedAtMs", "band", "submode", "rstSent", "rstReceived", "grid", "txPowerWatts", "comment"],
+        );
+        const radioId = messageText(body.radioId, "radioId", 32);
+        const profile = this.#radios.snapshot().radios.find((radio) => radio.id === radioId);
+        if (profile === undefined) {
+          throw new HttpError(404, "radio_not_found", "radio does not exist");
+        }
+        const saved = await this.#log.append({
+          radioId,
+          source: "VOICE_MANUAL",
+          call: messageText(body.call, "call", 32),
+          startedAtMs: safeInteger(body.startedAtMs, "startedAtMs"),
+          endedAtMs: optionalSafeInteger(body.endedAtMs, "endedAtMs"),
+          frequencyHz: safeInteger(body.frequencyHz, "frequencyHz"),
+          band: optionalMessageText(body.band, "band", 16),
+          mode: messageText(body.mode, "mode", 32),
+          submode: optionalMessageText(body.submode, "submode", 32),
+          rstSent: optionalMessageText(body.rstSent, "rstSent", 16),
+          rstReceived: optionalMessageText(body.rstReceived, "rstReceived", 16),
+          grid: optionalMessageText(body.grid, "grid", 8),
+          myCall: profile.station.callsign,
+          myGrid: profile.station.grid,
+          txPowerWatts: optionalNumber(body.txPowerWatts, "txPowerWatts"),
+          comment: optionalMessageText(body.comment, "comment", 256),
+        });
+        await this.#audit.append({
+          occurredAtMs: this.#now(), action: "log.qso-create", result: "success",
+          actorUserId: principal.user.id, actorDeviceId: principal.deviceId ?? undefined,
+          targetId: saved.record.id, metadata: { created: saved.created, source: "VOICE_MANUAL" },
+        });
+        sendJson(response, saved.created ? 201 : 200, saved);
+        return;
+      }
+      if (method === "GET" && url.pathname === "/api/v1/logs/grids") {
+        this.#requireHttpPrincipal(request, false);
+        exactQueryKeys(url, ["resolution"]);
+        const resolution = queryInteger(url, "resolution", 4, 2, 8);
+        if (resolution !== 2 && resolution !== 4 && resolution !== 6 && resolution !== 8) {
+          throw new HttpError(400, "invalid_grid_resolution", "resolution must be 2, 4, 6 or 8");
+        }
+        sendJson(response, 200, { resolution, grids: this.#log.gridSummary(resolution) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/api/v1/logs/export") {
+        this.#requireHttpPrincipal(request, false);
+        sendBuffer(response, 200, await this.#log.export(), {
+          "Content-Type": "application/adif; charset=us-ascii",
+          "Content-Disposition": "attachment; filename=radio-lite-log.adi",
+        });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/api/v1/logs/import") {
+        const principal = this.#requireAdmin(request, true);
+        const content = await requestBytes(
+          request,
+          16 * 1_024 * 1_024,
+          ["application/adif", "application/octet-stream", "text/plain"],
+        );
+        const result = await this.#log.import(content);
+        await this.#audit.append({
+          occurredAtMs: this.#now(), action: "log.adif-import", result: "success",
+          actorUserId: principal.user.id, actorDeviceId: principal.deviceId ?? undefined,
+          metadata: result,
+        });
+        sendJson(response, 200, result);
+        return;
+      }
       throw new HttpError(404, "not_found", "endpoint not found");
     } catch (error) {
       const mapped = mapError(error);
@@ -803,12 +910,37 @@ export class RadioLiteService {
     }
   }
 
-  #requireAdmin(request: IncomingMessage, csrf: boolean): SessionPrincipal {
-    const principal = this.#requireSession(request, csrf);
+  #requireAdmin(request: IncomingMessage, csrf: boolean): HttpPrincipal {
+    const principal = this.#requireHttpPrincipal(request, csrf);
     if (principal.user.role !== "admin") {
       throw new HttpError(403, "admin_required", "administrator permission required");
     }
     return principal;
+  }
+
+  #requireHttpPrincipal(request: IncomingMessage, csrf: boolean): HttpPrincipal {
+    const sessionToken = parseCookieHeader(request.headers.cookie).get("rr_session");
+    if (sessionToken !== undefined) {
+      const session = this.#requireSession(request, csrf);
+      return { sessionToken: session.token, deviceId: null, user: session.user };
+    }
+    const authorization = request.headers.authorization;
+    const deviceIdHeader = request.headers["x-radio-lite-device-id"];
+    if (typeof authorization !== "string" || typeof deviceIdHeader !== "string") {
+      throw new HttpError(401, "authentication_required", "authentication required");
+    }
+    const matched = /^Bearer ([A-Za-z0-9_-]{20,512})$/u.exec(authorization);
+    if (matched === null || deviceIdHeader.length < 1 || deviceIdHeader.length > 128) {
+      throw new HttpError(401, "invalid_device_credential", "device credential is invalid");
+    }
+    const device = this.#devices.verifyAccess(deviceIdHeader, matched[1]);
+    const user = device === null
+      ? undefined
+      : this.#users.list().find((candidate) => candidate.id === device.userId && candidate.enabled);
+    if (device === null || user === undefined) {
+      throw new HttpError(401, "invalid_device_credential", "device credential is invalid");
+    }
+    return { sessionToken: null, deviceId: device.id, user };
   }
 
   #optionalSession(request: IncomingMessage): SessionPrincipal | null {
@@ -890,6 +1022,63 @@ async function jsonObject(
   return body;
 }
 
+async function requestBytes(
+  request: IncomingMessage,
+  maximumBytes: number,
+  contentTypes: readonly string[],
+): Promise<Buffer> {
+  const contentType = String(request.headers["content-type"] ?? "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (!contentTypes.includes(contentType)) {
+    throw new HttpError(415, "unsupported_media_type", "request content type is not supported");
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maximumBytes) {
+      throw new HttpError(413, "body_too_large", "request body is too large");
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+function exactQueryKeys(url: URL, allowed: readonly string[]): void {
+  for (const key of new Set(url.searchParams.keys())) {
+    if (!allowed.includes(key)) {
+      throw new HttpError(400, "unknown_query", `unknown query parameter: ${key}`);
+    }
+    if (url.searchParams.getAll(key).length !== 1) {
+      throw new HttpError(400, "duplicate_query", `query parameter appears more than once: ${key}`);
+    }
+  }
+}
+
+function queryInteger(
+  url: URL,
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const raw = url.searchParams.get(name);
+  if (raw === null) {
+    return fallback;
+  }
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(raw)) {
+    throw new HttpError(400, "invalid_query", `${name} must be an integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new HttpError(400, "invalid_query", `${name} is outside the allowed range`);
+  }
+  return value;
+}
+
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
   if (response.headersSent) {
     return;
@@ -897,6 +1086,25 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   const body = Buffer.from(JSON.stringify(value), "utf8");
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": body.length,
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(body);
+}
+
+function sendBuffer(
+  response: ServerResponse,
+  status: number,
+  body: Buffer,
+  headers: Record<string, string>,
+): void {
+  if (response.headersSent) {
+    return;
+  }
+  response.writeHead(status, {
+    ...headers,
     "Content-Length": body.length,
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
@@ -924,7 +1132,7 @@ function mapError(error: unknown): HttpError {
   if (error instanceof Error && /already|duplicate|cannot enable|final enabled/u.test(error.message)) {
     return new HttpError(409, "conflict", error.message);
   }
-  if (error instanceof Error && /must|invalid|unsupported|required|unknown/u.test(error.message)) {
+  if (error instanceof Error && /must|invalid|unsupported|required|unknown|outside|exceeds|ADIF|Maidenhead|characters|precede/u.test(error.message)) {
     return new HttpError(400, "invalid_request", error.message);
   }
   return new HttpError(500, "internal_error", "internal server error");
@@ -1068,6 +1276,20 @@ function safeInteger(value: unknown, field: string): number {
     throw new Error(`${field} must be a safe integer`);
   }
   return value as number;
+}
+
+function optionalSafeInteger(value: unknown, field: string): number | undefined {
+  return value === undefined ? undefined : safeInteger(value, field);
+}
+
+function optionalNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${field} must be a finite number`);
+  }
+  return value;
 }
 
 function nonNegativeNumber(value: unknown, field: string): number {

@@ -33,8 +33,22 @@ The media milestone now also includes:
 - a three-second uplink-bind deadline so an unbound carrier cannot remain on; and
 - stale-media dropping when a WebSocket client is congested.
 
-FT8/FT4 DSP/automatic QSO, ADIF and the SwiftUI Radio Lite adapter are the next
-implementation slices; see the design document for their exact boundaries.
+The logging milestone adds a database-free station log:
+
+- plain-text ADIF 3.1.7 storage at `<data-directory>/station-log.adif`;
+- atomic initial/recovery rewrites and `fsync` after every append;
+- interrupted-tail recovery with the original retained as a `.corrupt-*` copy;
+- stable QSO identifiers, duplicate suppression and preservation of unknown
+  ADIF fields during import;
+- manual voice entries plus FT8/FT4 automatic-entry source markers;
+- paginated list, ADIF import/export and Maidenhead grid-summary HTTP APIs; and
+- cookie/CSRF authentication for browsers or paired-device Bearer
+  authentication for the native iOS app.
+
+The ADIF import endpoint accepts at most 16 MiB per request, and the service
+refuses to load a station log larger than 256 MiB. FT8/FT4 DSP, the automatic
+QSO state machine and the SwiftUI Radio Lite adapter are the next implementation
+slices; see the design document for their exact boundaries.
 
 On Debian 13, real audio currently requires `alsa-utils` or
 `pulseaudio-utils`, plus `opus-tools`. These remain operating-system packages

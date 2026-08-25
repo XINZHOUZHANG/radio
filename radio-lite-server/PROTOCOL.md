@@ -17,6 +17,58 @@ The server replies with `auth.ok`, the channel name, principal permissions and
 the configured radio list. Binary data is rejected until authentication has
 completed.
 
+Authenticated HTTP APIs accept the same browser session cookie. Mutating
+browser requests additionally require the session's CSRF token in
+`X-CSRF-Token`. A paired native app instead sends both of these headers; Bearer
+requests do not use CSRF because the access token is not ambient browser state:
+
+```http
+Authorization: Bearer <accessToken>
+X-Radio-Lite-Device-Id: <deviceId>
+```
+
+## Station log HTTP API
+
+The service stores one plain-text ADIF 3.1.7 file at
+`<data-directory>/station-log.adif`. Unknown ADIF fields survive import and
+export. The import limit is 16 MiB, and the maximum log accepted at startup is
+256 MiB.
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/logs?limit=100&offset=0` | authenticated | Newest-first paginated QSO records |
+| `POST` | `/api/v1/logs` | operator | Add a manual voice QSO from the iOS app |
+| `GET` | `/api/v1/logs/grids?resolution=4` | authenticated | Aggregate QSOs into 2/4/6/8-character Maidenhead cells |
+| `GET` | `/api/v1/logs/export` | authenticated | Download `radio-lite-log.adi` |
+| `POST` | `/api/v1/logs/import` | administrator | Import and deduplicate ADIF records |
+
+The manual-QSO request body is:
+
+```json
+{
+  "radioId": "main",
+  "call": "JA1ABC",
+  "startedAtMs": 1787661000000,
+  "endedAtMs": 1787661120000,
+  "frequencyHz": 14250000,
+  "band": "20M",
+  "mode": "SSB",
+  "submode": "USB",
+  "rstSent": "59",
+  "rstReceived": "57",
+  "grid": "PM95",
+  "txPowerWatts": 20,
+  "comment": "Manual iOS log"
+}
+```
+
+`endedAtMs`, `band`, `submode`, reports, grid, power and comment are optional.
+The server supplies `MY_CALL` and `MY_GRIDSQUARE` from the selected radio
+profile, derives the band when omitted, labels the record `VOICE_MANUAL`, and
+returns HTTP 200 rather than creating a duplicate when the QSO fingerprint
+already exists. Import accepts `application/adif`, `application/octet-stream`
+or `text/plain`.
+
 ## Control channel
 
 `/ws/control` uses strict JSON objects. Unknown fields are rejected. Mutating

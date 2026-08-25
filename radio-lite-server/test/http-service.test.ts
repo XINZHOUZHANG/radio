@@ -8,6 +8,7 @@ import WebSocket from "ws";
 import { DeviceStore } from "../src/auth/device-store.ts";
 import { SessionStore } from "../src/auth/session-store.ts";
 import { UserStore } from "../src/auth/user-store.ts";
+import { parseAdif } from "../src/log/adif.ts";
 import { decodeMediaFrame, encodeMediaFrame, MediaKind } from "../src/media/frame.ts";
 import type { MediaPolicy } from "../src/media/adaptive-policy.ts";
 import type { MediaWorkerOutput } from "../src/media/media-hub.ts";
@@ -142,6 +143,64 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   response = await fetch(`${base}/api/v1/radios`, { headers: { Cookie: cookie! } });
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).radios.map((radio: { id: string }) => radio.id), ["main"]);
+
+  response = await postJson(
+    `${base}/api/v1/logs`,
+    {
+      radioId: "main",
+      call: "JA1ABC",
+      startedAtMs: Date.UTC(2026, 7, 25, 12, 30, 0),
+      endedAtMs: Date.UTC(2026, 7, 25, 12, 32, 0),
+      frequencyHz: 14_250_000,
+      mode: "SSB",
+      rstSent: "59",
+      rstReceived: "57",
+      grid: "PM95",
+      comment: "Manual iOS log",
+    },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  assert.equal(response.status, 201);
+  const savedQso = await response.json();
+  assert.equal(savedQso.record.source, "VOICE_MANUAL");
+  assert.equal(savedQso.record.myCall, "BI1ABC");
+
+  response = await fetch(`${base}/api/v1/logs?limit=10`, {
+    headers: {
+      Authorization: `Bearer ${credentials.accessToken}`,
+      "X-Radio-Lite-Device-Id": credentials.deviceId,
+    },
+  });
+  assert.equal(response.status, 200);
+  const listedLog = await response.json();
+  assert.equal(listedLog.total, 1);
+  assert.equal(listedLog.records[0].call, "JA1ABC");
+
+  response = await fetch(`${base}/api/v1/logs/grids?resolution=4`, {
+    headers: { Cookie: cookie! },
+  });
+  assert.equal(response.status, 200);
+  const grids = await response.json();
+  assert.equal(grids.grids[0].grid, "PM95");
+  assert.equal(grids.grids[0].qsoCount, 1);
+
+  response = await fetch(`${base}/api/v1/logs/export`, { headers: { Cookie: cookie! } });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^application\/adif/u);
+  const exportedLog = Buffer.from(await response.arrayBuffer());
+  assert.equal(parseAdif(exportedLog).records.length, 1);
+
+  response = await fetch(`${base}/api/v1/logs/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/adif",
+      Cookie: cookie!,
+      "X-CSRF-Token": login.csrfToken,
+    },
+    body: exportedLog,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { imported: 0, duplicates: 1 });
 
   const webSocket = new WebSocket(
     `ws://127.0.0.1:${address.port}/ws/control`,
