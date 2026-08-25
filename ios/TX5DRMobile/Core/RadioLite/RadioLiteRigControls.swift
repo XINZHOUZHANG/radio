@@ -205,6 +205,33 @@ struct RadioLiteRigControlDisplayState: Identifiable, Equatable, Sendable {
     }
 }
 
+struct RadioLiteRigControlCatalogue: Equatable, Sendable {
+    private(set) var controls: [RadioLiteRigControl] = []
+    private(set) var generation: UInt64 = 0
+
+    @discardableResult
+    mutating func beginDiscovery() -> UInt64 {
+        invalidate()
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+        controls.removeAll(keepingCapacity: false)
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        candidate == generation
+    }
+
+    @discardableResult
+    mutating func publish(_ controls: [RadioLiteRigControl], generation candidate: UInt64) -> Bool {
+        guard isCurrent(candidate) else { return false }
+        self.controls = controls
+        return true
+    }
+}
+
 enum RadioLiteRigControlProtocol {
     static func getRequest(radioId: String, commandId: String) -> JSONValue {
         .object([

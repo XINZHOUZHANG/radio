@@ -88,6 +88,8 @@ final class RadioLiteSession: ObservableObject {
     private var activeUplinkOwnership: RadioLiteUplinkOwnership?
     private var transmitEpoch = RadioLiteOperationEpoch()
     private var receiveAudioEpoch = RadioLiteOperationEpoch()
+    private var receiveMonitoringIntent = RadioLiteReceiveMonitoringIntent()
+    private var rigControlCatalogue = RadioLiteRigControlCatalogue()
     private var noticeState = RadioLiteNoticeState()
 
     private static let addressDefaultsKey = "radio-lite.server-address"
@@ -111,6 +113,7 @@ final class RadioLiteSession: ObservableObject {
         media.onReconnectRequired = { [weak self] error in
             guard let self, !self.intentionalDisconnect, self.phase == .ready else { return }
             if self.isVoicePTTHeld { self.endVoicePTT() }
+            self.suspendReceiveAudio()
             self.presentMediaNotice(error)
             self.scheduleMediaRetry()
         }
@@ -239,6 +242,7 @@ final class RadioLiteSession: ObservableObject {
         intentionalDisconnect = true
         endVoicePTT()
         endTuning()
+        stopReceiveAudio()
         cancelRuntimeTasks()
         let logoutClient = http
         if case .browser = credential {
@@ -257,7 +261,7 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
-        rigControls = []
+        invalidateRigControlCatalogue()
         decodeBatches = []
         callQueue = nil
         automaticQSO = nil
@@ -311,7 +315,8 @@ final class RadioLiteSession: ObservableObject {
         defer { isWorking = false }
         endVoicePTT()
         endTuning()
-        stopReceiveAudio()
+        suspendReceiveAudio()
+        invalidateRigControlCatalogue()
         await releaseControl()
         await media.unsubscribe()
         selectedRadioId = radioId
@@ -322,6 +327,7 @@ final class RadioLiteSession: ObservableObject {
             do {
                 try await media.subscribe(radioId: radioId)
                 resolveMediaNotices()
+                await restoreReceiveAudioAfterSubscription()
             } catch {
                 mediaReady = false
                 presentMediaNotice(error)
@@ -332,7 +338,7 @@ final class RadioLiteSession: ObservableObject {
                 presentNotice("电台当前由其他操作员控制，可稍后接管")
             }
             try await refreshRigState()
-            try? await refreshRigControls()
+            await refreshRigControlsAutomatically()
             try await refreshDigitalSnapshot()
         } catch {
             errorMessage = error.localizedDescription
@@ -433,20 +439,47 @@ final class RadioLiteSession: ObservableObject {
 
     func refreshRigControls() async throws {
         guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        let catalogueGeneration = beginRigControlDiscovery()
         let commandId = UUID().uuidString
-        let reply = try await control.request(
-            RadioLiteRigControlProtocol.getRequest(radioId: radioId, commandId: commandId),
-            expecting: ["rig.controls"],
-            commandId: commandId
-        )
-        guard let response: RadioLiteRigControlsResponse = reply.decoded(),
-              response.t == "rig.controls",
-              response.radioId == radioId,
-              response.commandId == commandId else {
-            throw RadioLiteHTTPError.invalidResponse
+        do {
+            let reply = try await control.request(
+                RadioLiteRigControlProtocol.getRequest(radioId: radioId, commandId: commandId),
+                expecting: ["rig.controls"],
+                commandId: commandId
+            )
+            guard selectedRadioId == radioId,
+                  rigControlCatalogue.isCurrent(catalogueGeneration) else {
+                return
+            }
+            guard let response: RadioLiteRigControlsResponse = reply.decoded(),
+                  response.t == "rig.controls",
+                  response.radioId == radioId,
+                  response.commandId == commandId else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            guard rigControlCatalogue.publish(
+                response.controls,
+                generation: catalogueGeneration
+            ) else {
+                return
+            }
+            rigControls = rigControlCatalogue.controls
+        } catch {
+            guard selectedRadioId == radioId,
+                  rigControlCatalogue.isCurrent(catalogueGeneration) else {
+                return
+            }
+            rigControls = rigControlCatalogue.controls
+            throw error
         }
-        guard selectedRadioId == radioId else { return }
-        rigControls = response.controls
+    }
+
+    private func refreshRigControlsAutomatically() async {
+        do {
+            try await refreshRigControls()
+        } catch {
+            errorMessage = "读取 Hamlib 控件失败：\(error.localizedDescription)"
+        }
     }
 
     @discardableResult
@@ -460,6 +493,7 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.rigControlUnavailable.localizedDescription
             return nil
         }
+        let catalogueGeneration = rigControlCatalogue.generation
 
         let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
         let display = current.displayState(isTransmitting: transmitting)
@@ -496,8 +530,21 @@ final class RadioLiteSession: ObservableObject {
                   confirmation.control.id == controlId else {
                 throw RadioLiteHTTPError.invalidResponse
             }
-            guard selectedRadioId == radioId else { return nil }
-            rigControls = RadioLiteRigControlProtocol.applying(confirmation, to: rigControls)
+            guard selectedRadioId == radioId,
+                  rigControlCatalogue.isCurrent(catalogueGeneration) else {
+                return nil
+            }
+            let updatedControls = RadioLiteRigControlProtocol.applying(
+                confirmation,
+                to: rigControlCatalogue.controls
+            )
+            guard rigControlCatalogue.publish(
+                updatedControls,
+                generation: catalogueGeneration
+            ) else {
+                return nil
+            }
+            rigControls = rigControlCatalogue.controls
             if confirmation.control.kind == .filter,
                confirmation.control.value.isFinite,
                confirmation.control.value > Double(Int.min),
@@ -512,6 +559,13 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func startReceiveAudio() async {
+        receiveMonitoringIntent.setDesired(true)
+        receiveMonitoringIntent.resume()
+        await startReceiveAudioIfDesired()
+    }
+
+    private func startReceiveAudioIfDesired() async {
+        guard receiveMonitoringIntent.shouldMonitor else { return }
         guard let radioId = selectedRadioId else {
             errorMessage = RadioLiteSessionError.radioUnavailable.localizedDescription
             return
@@ -533,9 +587,14 @@ final class RadioLiteSession: ObservableObject {
                     self.resolveMediaNotices()
                 }
                 try Task.checkCancellation()
-                guard self.receiveAudioEpoch.owns(generation) else { return }
+                guard self.receiveAudioEpoch.owns(generation),
+                      self.receiveMonitoringIntent.shouldMonitor else {
+                    return
+                }
                 try self.audio.startMonitoring()
-                guard !Task.isCancelled, self.receiveAudioEpoch.owns(generation) else {
+                guard !Task.isCancelled,
+                      self.receiveAudioEpoch.owns(generation),
+                      self.receiveMonitoringIntent.shouldMonitor else {
                     self.audio.stopMonitoring()
                     return
                 }
@@ -555,6 +614,21 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func stopReceiveAudio() {
+        receiveMonitoringIntent.setDesired(false)
+        stopReceiveAudioLocally()
+    }
+
+    private func suspendReceiveAudio() {
+        receiveMonitoringIntent.suspend()
+        stopReceiveAudioLocally()
+    }
+
+    private func restoreReceiveAudioAfterSubscription() async {
+        receiveMonitoringIntent.resume()
+        await startReceiveAudioIfDesired()
+    }
+
+    private func stopReceiveAudioLocally() {
         receiveAudioEpoch.invalidate()
         receiveAudioStartupTask?.cancel()
         receiveAudioStartupTask = nil
@@ -928,6 +1002,8 @@ final class RadioLiteSession: ObservableObject {
             presentNotice("设备配置已保存")
             return true
         }
+        suspendReceiveAudio()
+        invalidateRigControlCatalogue()
         controlHeartbeatTask?.cancel()
         controlHeartbeatTask = nil
         controlToken = nil
@@ -942,8 +1018,9 @@ final class RadioLiteSession: ObservableObject {
             if selectedRadioId == response.radio.id {
                 try await media.subscribe(radioId: response.radio.id)
                 resolveMediaNotices()
+                await restoreReceiveAudioAfterSubscription()
                 try await refreshRigState()
-                try? await refreshRigControls()
+                await refreshRigControlsAutomatically()
             }
             presentNotice(
                 controlReady
@@ -1043,6 +1120,8 @@ final class RadioLiteSession: ObservableObject {
         username: String?
     ) async throws {
         phase = .authenticating
+        suspendReceiveAudio()
+        invalidateRigControlCatalogue()
         intentionalDisconnect = true
         cancelRuntimeTasks()
         control.disconnect()
@@ -1070,6 +1149,7 @@ final class RadioLiteSession: ObservableObject {
         do {
             try await media.subscribe(radioId: radioId)
             resolveMediaNotices()
+            await restoreReceiveAudioAfterSubscription()
         } catch {
             mediaReady = false
             presentMediaNotice(error)
@@ -1081,7 +1161,7 @@ final class RadioLiteSession: ObservableObject {
             presentNotice("已连接，但电台控制权当前由其他操作员持有")
         }
         try await refreshRigState()
-        try? await refreshRigControls()
+        await refreshRigControlsAutomatically()
         do { try await refreshDigitalSnapshot() } catch {
             presentNotice("FT8/FT4 暂不可用：\(error.localizedDescription)")
         }
@@ -1300,7 +1380,8 @@ final class RadioLiteSession: ObservableObject {
 
     private func handleConnectionLoss(_ error: Error) {
         stopLocalTransmit()
-        stopReceiveAudio()
+        suspendReceiveAudio()
+        invalidateRigControlCatalogue()
         controlToken = nil
         controlExpiresAtMs = nil
         guard !intentionalDisconnect, phase == .ready else { return }
@@ -1353,6 +1434,8 @@ final class RadioLiteSession: ObservableObject {
     }
 
     private func reconnectChannels(server: RadioLiteServer, credential: RadioLiteCredential) async throws -> Bool {
+        suspendReceiveAudio()
+        invalidateRigControlCatalogue()
         intentionalDisconnect = true
         control.disconnect()
         media.disconnect()
@@ -1368,13 +1451,14 @@ final class RadioLiteSession: ObservableObject {
         do {
             try await media.subscribe(radioId: radioId)
             resolveMediaNotices()
+            await restoreReceiveAudioAfterSubscription()
         } catch {
             mediaReady = false
             presentMediaNotice(error)
         }
         do { try await acquireControl() } catch { controlToken = nil }
         try await refreshRigState()
-        try? await refreshRigControls()
+        await refreshRigControlsAutomatically()
         try? await refreshDigitalSnapshot()
         startPolling()
         return mediaReady
@@ -1412,6 +1496,7 @@ final class RadioLiteSession: ObservableObject {
                 do {
                     try await self.media.subscribe(radioId: radioId)
                     self.resolveMediaNotices()
+                    await self.restoreReceiveAudioAfterSubscription()
                     self.mediaRetryTask = nil
                     return
                 } catch {
@@ -1480,10 +1565,22 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
-        rigControls = []
+        invalidateRigControlCatalogue()
         decodeBatches = []
         callQueue = nil
         automaticQSO = nil
+    }
+
+    @discardableResult
+    private func beginRigControlDiscovery() -> UInt64 {
+        let generation = rigControlCatalogue.beginDiscovery()
+        rigControls = rigControlCatalogue.controls
+        return generation
+    }
+
+    private func invalidateRigControlCatalogue() {
+        rigControlCatalogue.invalidate()
+        rigControls = rigControlCatalogue.controls
     }
 
     private func presentNotice(_ message: String, deduplicationKey: String? = nil) {

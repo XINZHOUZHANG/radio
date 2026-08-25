@@ -28,3 +28,24 @@ struct RadioLiteReceiveMonitoringPreference: Equatable, Sendable {
         explicitUserChoice = enabled
     }
 }
+
+struct RadioLiteReceiveMonitoringIntent: Equatable, Sendable {
+    private(set) var isDesired = false
+    private(set) var isSuspended = false
+
+    var shouldMonitor: Bool {
+        isDesired && !isSuspended
+    }
+
+    mutating func setDesired(_ enabled: Bool) {
+        isDesired = enabled
+    }
+
+    mutating func suspend() {
+        isSuspended = true
+    }
+
+    mutating func resume() {
+        isSuspended = false
+    }
+}
