@@ -128,13 +128,10 @@ enum RadioLiteMediaFrameCodec {
     }
 
     private static func readUInt64(_ data: Data, at offset: Int) -> UInt64 {
-        (UInt64(data[offset]) << 56)
-            | (UInt64(data[offset + 1]) << 48)
-            | (UInt64(data[offset + 2]) << 40)
-            | (UInt64(data[offset + 3]) << 32)
-            | (UInt64(data[offset + 4]) << 24)
-            | (UInt64(data[offset + 5]) << 16)
-            | (UInt64(data[offset + 6]) << 8)
-            | UInt64(data[offset + 7])
+        var value: UInt64 = 0
+        for index in offset..<(offset + MemoryLayout<UInt64>.size) {
+            value = (value << 8) | UInt64(data[index])
+        }
+        return value
     }
 }
