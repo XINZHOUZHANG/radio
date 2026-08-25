@@ -41,4 +41,40 @@ final class RadioLiteReceiveMonitoringPreferenceTests: XCTestCase {
         XCTAssertEqual(preference.radioPageDidAppear(), .start)
         XCTAssertEqual(preference.explicitUserChoice, true)
     }
+
+    func testExplicitOnRestoresAfterRadioSwitchAndReconnectSuspensions() {
+        var intent = RadioLiteReceiveMonitoringIntent()
+
+        intent.setDesired(true)
+        XCTAssertTrue(intent.isDesired)
+        XCTAssertTrue(intent.shouldMonitor)
+
+        intent.suspend()
+        XCTAssertTrue(intent.isDesired, "switching radios must not erase the user's choice")
+        XCTAssertFalse(intent.shouldMonitor)
+        intent.resume()
+        XCTAssertTrue(intent.shouldMonitor, "a successful radio subscription must restore monitoring")
+
+        intent.suspend()
+        XCTAssertTrue(intent.isDesired, "connection loss must only suspend monitoring")
+        XCTAssertFalse(intent.shouldMonitor)
+        intent.resume()
+        XCTAssertTrue(intent.shouldMonitor, "a successful reconnect must restore monitoring")
+    }
+
+    func testExplicitOffStaysOffAcrossRadioSwitchAndReconnect() {
+        var intent = RadioLiteReceiveMonitoringIntent()
+
+        intent.setDesired(false)
+        XCTAssertFalse(intent.isDesired)
+        XCTAssertFalse(intent.shouldMonitor)
+
+        intent.suspend()
+        intent.resume()
+        XCTAssertFalse(intent.shouldMonitor, "radio switching must not start explicitly disabled audio")
+
+        intent.suspend()
+        intent.resume()
+        XCTAssertFalse(intent.shouldMonitor, "reconnect must not start explicitly disabled audio")
+    }
 }

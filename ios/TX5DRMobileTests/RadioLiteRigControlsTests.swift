@@ -125,6 +125,44 @@ final class RadioLiteRigControlsTests: XCTestCase {
         XCTAssertEqual(Array(updated.dropFirst()), Array(response.controls.dropFirst()))
     }
 
+    func testCatalogueInvalidationClearsControlsAndRejectsPreDisconnectResponse() throws {
+        let response = try JSONDecoder().decode(
+            RadioLiteRigControlsResponse.self,
+            from: controlsPayload
+        )
+        var catalogue = RadioLiteRigControlCatalogue()
+        let requestGeneration = catalogue.beginDiscovery()
+        XCTAssertTrue(catalogue.publish(response.controls, generation: requestGeneration))
+        XCTAssertEqual(catalogue.controls.map(\.id), response.controls.map(\.id))
+
+        catalogue.invalidate()
+
+        XCTAssertTrue(catalogue.controls.isEmpty, "disconnect must immediately remove writable controls")
+        XCTAssertFalse(
+            catalogue.publish(response.controls, generation: requestGeneration),
+            "an in-flight response from before disconnect must not repopulate the catalogue"
+        )
+        XCTAssertTrue(catalogue.controls.isEmpty)
+    }
+
+    func testNewDiscoveryClearsOldControlsAndOnlyPublishesCurrentGeneration() throws {
+        let response = try JSONDecoder().decode(
+            RadioLiteRigControlsResponse.self,
+            from: controlsPayload
+        )
+        var catalogue = RadioLiteRigControlCatalogue()
+        let oldGeneration = catalogue.beginDiscovery()
+        XCTAssertTrue(catalogue.publish(response.controls, generation: oldGeneration))
+
+        let currentGeneration = catalogue.beginDiscovery()
+
+        XCTAssertTrue(catalogue.controls.isEmpty, "a refresh failure must leave no stale controls writable")
+        XCTAssertFalse(catalogue.publish(response.controls, generation: oldGeneration))
+        XCTAssertTrue(catalogue.controls.isEmpty)
+        XCTAssertTrue(catalogue.publish(response.controls, generation: currentGeneration))
+        XCTAssertEqual(catalogue.controls.map(\.id), response.controls.map(\.id))
+    }
+
     private var controlsPayload: Data {
         Data(#"""
         {
