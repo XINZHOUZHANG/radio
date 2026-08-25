@@ -16,6 +16,12 @@ const models = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteModels.
 const radioView = read('ios', 'TX5DRMobile', 'Features', 'RadioLite', 'RadioLiteRadioView.swift');
 const media = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMediaClient.swift');
 const audio = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteAudioEngine.swift');
+const microphonePolicy = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMicrophonePolicy.swift');
+const receiveMonitoringPreference = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteReceiveMonitoringPreference.swift');
+const rigControls = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteRigControls.swift');
+const spectrumAGC = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteSpectrumAGC.swift');
+const digitalSlotClock = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteDigitalSlotClock.swift');
+const rigControlsView = read('ios', 'TX5DRMobile', 'Features', 'RadioLite', 'RadioLiteRigControlsView.swift');
 const frame = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMediaFrame.swift');
 const socket = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
@@ -49,8 +55,10 @@ const controlMessages = [
   'control.heartbeat',
   'control.release',
   'rig.state.get',
+  'rig.controls.get',
   'rig.frequency.set',
   'rig.mode.set',
+  'rig.control.set',
   'tx.start',
   'tx.heartbeat',
   'tx.stop',
@@ -62,7 +70,11 @@ const controlMessages = [
   'digital.auto.stop',
 ];
 for (const type of controlMessages) {
-  const iosSource = type === 'auth.device' ? socket : session;
+  const iosSource = type === 'auth.device'
+    ? socket
+    : type === 'rig.controls.get' || type === 'rig.control.set'
+      ? rigControls
+      : session;
   assert(iosSource.includes(`"${type}"`), `iOS control client is missing ${type}`);
   assert(service.includes(`"${type}"`), `Radio Lite service is missing ${type}`);
 }
@@ -130,6 +142,15 @@ assert(hamlibRig.includes('["DIGL", "PKTLSB"]'));
 assert(protocol.includes('DATA-U/DATA-L labels'));
 assert(protocol.includes('mono at 16 kHz'));
 assert(protocol.includes('five minutes'));
+assert(radioView.includes('RadioLiteRigControlsView('));
+assert(rigControlsView.includes('session.refreshRigControls()'));
+assert(rigControlsView.includes('session.setRigControl(control.id, value: value)'));
+assert(microphonePolicy.includes('audioSessionMode: .measurement'));
+assert(microphonePolicy.includes('audioSessionMode: .voiceChat'));
+assert(receiveMonitoringPreference.includes('radioPageDidAppear()'));
+assert(spectrumAGC.includes('smoothingFactor'));
+assert(digitalSlotClock.includes('case "FT8"'));
+assert(digitalSlotClock.includes('case "FT4"'));
 
 process.stdout.write(
   `Verified ${httpPaths.length} HTTP paths, ${controlMessages.length} control messages, media messages, and the binary frame contract.\n`,

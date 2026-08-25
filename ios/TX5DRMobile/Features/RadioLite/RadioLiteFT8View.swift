@@ -64,6 +64,7 @@ struct RadioLiteFT8View: View {
                     Text("FT4 · 7.5 秒").tag("FT4")
                 }
                 .pickerStyle(.segmented)
+                slotClockPanel
                 HStack {
                     Label("整时隙批次", systemImage: "clock.badge.checkmark")
                         .foregroundStyle(RadioPalette.accent)
@@ -82,6 +83,40 @@ struct RadioLiteFT8View: View {
                     .font(.caption)
                     .foregroundStyle(RadioPalette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var slotClockPanel: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { context in
+            if let clock = RadioLiteDigitalSlotClock(mode: mode) {
+                let snapshot = clock.snapshot(at: context.date)
+                let state = clock.displayState(
+                    at: context.date,
+                    rigState: session.rigState,
+                    automaticQSO: session.automaticQSO
+                )
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Label("UTC 时隙", systemImage: "timer")
+                            .foregroundStyle(RadioPalette.accent)
+                        Spacer()
+                        Text("\(mode) · \(parityLabel(snapshot.parity))数时隙")
+                    }
+                    .font(.caption.weight(.semibold))
+                    ProgressView(value: snapshot.progress)
+                        .tint(displayColor(state))
+                    HStack {
+                        Text("剩余 \(snapshot.remainingSeconds, specifier: \"%.1f\") 秒")
+                            .monospacedDigit()
+                        Spacer()
+                        Label(displayLabel(state), systemImage: displaySymbol(state))
+                            .foregroundStyle(displayColor(state))
+                    }
+                    .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(RadioPalette.muted)
+                .accessibilityElement(children: .combine)
             }
         }
     }
@@ -358,5 +393,33 @@ struct RadioLiteFT8View: View {
 
     private func slotDate(_ milliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+
+    private func parityLabel(_ parity: RadioLiteDigitalSlotClock.Parity) -> String {
+        parity == .even ? "偶" : "奇"
+    }
+
+    private func displayLabel(_ state: RadioLiteDigitalSlotClock.DisplayState) -> String {
+        switch state {
+        case .receiving: "RX 接收"
+        case .waitingToTransmit: "等待 TX"
+        case .transmitting: "TX 发射"
+        }
+    }
+
+    private func displaySymbol(_ state: RadioLiteDigitalSlotClock.DisplayState) -> String {
+        switch state {
+        case .receiving: "arrow.down.circle.fill"
+        case .waitingToTransmit: "clock.fill"
+        case .transmitting: "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    private func displayColor(_ state: RadioLiteDigitalSlotClock.DisplayState) -> Color {
+        switch state {
+        case .receiving: RadioPalette.cyan
+        case .waitingToTransmit: RadioPalette.warning
+        case .transmitting: RadioPalette.transmit
+        }
     }
 }

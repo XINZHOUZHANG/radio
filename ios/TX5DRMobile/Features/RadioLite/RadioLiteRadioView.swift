@@ -4,32 +4,47 @@ struct RadioLiteRadioView: View {
     @EnvironmentObject private var session: RadioLiteSession
     @EnvironmentObject private var media: RadioLiteMediaClient
     @EnvironmentObject private var audio: RadioLiteAudioEngine
+    @AppStorage("radio-lite.receive-audio.has-visited") private var hasVisitedRadioPage = false
+    @AppStorage("radio-lite.receive-audio.explicit-choice") private var receiveMonitoringChoice = -1
     @State private var frequencyMHz = "14.074000"
     @FocusState private var frequencyFocused: Bool
 
     private let modes = RadioLiteRigMode.allCases
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 14) {
+        VStack(spacing: 0) {
+            VStack(spacing: 10) {
                 statusStrip
                 frequencyPanel
-                RadioLiteSpectrumView(
-                    spectrum: media.spectrum,
-                    capability: media.spectrumCapability,
-                    history: media.spectrumHistory,
-                    policy: media.policy
-                )
-                audioPanel
-                transmitPanel
             }
             .padding(.horizontal, 14)
-            .padding(.bottom, 28)
+            .padding(.bottom, 10)
+
+            ScrollView {
+                VStack(spacing: 14) {
+                    RadioLiteSpectrumView(
+                        spectrum: media.spectrum,
+                        capability: media.spectrumCapability,
+                        history: media.spectrumHistory,
+                        policy: media.policy
+                    )
+                    audioPanel
+                    RadioLiteRigControlsView(
+                        isTransmitting: isTransmitting,
+                        hasControl: session.hasControl
+                    )
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 18)
+            }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .scrollDismissesKeyboard(.interactively)
         .background(RadioPalette.background.ignoresSafeArea())
         .navigationTitle(session.selectedRadio?.name ?? "Radio Lite")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            transmitDock
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { Task { try? await session.refreshRigState() } } label: {
@@ -41,7 +56,7 @@ struct RadioLiteRadioView: View {
                 Button("完成") { frequencyFocused = false }
             }
         }
-        .onAppear(perform: syncFrequency)
+        .onAppear(perform: handleRadioPageAppearance)
         .onChange(of: session.rigState?.frequencyHz) { _, _ in
             if !frequencyFocused { syncFrequency() }
         }
@@ -166,59 +181,69 @@ struct RadioLiteRadioView: View {
     }
 
     private func toggleMonitoring() {
-        if audio.isMonitoring {
+        let shouldMonitor = !audio.isMonitoring
+        var preference = receiveMonitoringPreference
+        preference.recordExplicitUserChoice(shouldMonitor)
+        persistReceiveMonitoringPreference(preference)
+
+        if !shouldMonitor {
             session.stopReceiveAudio()
             return
         }
         Task { await session.startReceiveAudio() }
     }
 
-    private var transmitPanel: some View {
-        RadioPanel {
-            VStack(spacing: 14) {
-                if !session.hasControl {
-                    HStack {
-                        Label("需要控制权才能操作电台", systemImage: "person.2.badge.gearshape")
-                            .font(.subheadline)
-                        Spacer()
-                        Button(session.isAdmin ? "接管" : "取得控制") {
-                            Task { try? await session.acquireControl(force: session.isAdmin) }
-                        }
-                        .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
+    private var transmitDock: some View {
+        VStack(spacing: 9) {
+            if !session.hasControl {
+                HStack(spacing: 10) {
+                    Label("需要控制权才能操作电台", systemImage: "person.2.badge.gearshape")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button(session.isAdmin ? "接管" : "取得控制") {
+                        Task { try? await session.acquireControl(force: session.isAdmin) }
                     }
+                    .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                 }
-                HStack(spacing: 12) {
-                    RadioLiteHoldButton(
-                        title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
-                        systemImage: "mic.fill",
-                        active: session.isVoicePTTHeld,
-                        tint: RadioPalette.transmit,
-                        enabled: session.hasControl && session.canTransmit
-                    ) {
-                        session.beginVoicePTT()
-                    } onRelease: {
-                        session.endVoicePTT()
-                    }
-                    RadioLiteHoldButton(
-                        title: session.isTuning ? "天调工作中" : "按住机内天调",
-                        systemImage: "tuningfork",
-                        active: session.isTuning,
-                        tint: RadioPalette.warning,
-                        enabled: session.hasControl && session.canTransmit
-                    ) {
-                        session.beginTuning()
-                    } onRelease: {
-                        session.endTuning()
-                    }
-                }
-                if session.isVoicePTTHeld {
-                    ProgressView(value: audio.microphoneLevel)
-                        .tint(RadioPalette.transmit)
-                }
-                Text("松开按钮立即撤销发射并关闭麦克风；连续语音最多 3 分钟，天调最多 30 秒。")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
             }
+            HStack(spacing: 12) {
+                RadioLiteHoldButton(
+                    title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
+                    systemImage: "mic.fill",
+                    active: session.isVoicePTTHeld,
+                    tint: RadioPalette.transmit,
+                    enabled: session.hasControl && session.canTransmit
+                ) {
+                    session.beginVoicePTT()
+                } onRelease: {
+                    session.endVoicePTT()
+                }
+                RadioLiteHoldButton(
+                    title: session.isTuning ? "天调工作中" : "按住机内天调",
+                    systemImage: "tuningfork",
+                    active: session.isTuning,
+                    tint: RadioPalette.warning,
+                    enabled: session.hasControl && session.canTransmit
+                ) {
+                    session.beginTuning()
+                } onRelease: {
+                    session.endTuning()
+                }
+            }
+            if session.isVoicePTTHeld {
+                ProgressView(value: audio.microphoneLevel)
+                    .tint(RadioPalette.transmit)
+                    .accessibilityLabel("麦克风电平")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 9)
+        .padding(.bottom, 8)
+        .background(RadioPalette.background.opacity(0.97))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 0.5)
         }
     }
 
@@ -230,6 +255,41 @@ struct RadioLiteRadioView: View {
         guard let hz = session.rigState?.frequencyHz else { return }
         frequencyMHz = String(format: "%.6f", Double(hz) / 1_000_000)
     }
+
+    private var receiveMonitoringPreference: RadioLiteReceiveMonitoringPreference {
+        RadioLiteReceiveMonitoringPreference(
+            hasVisitedRadioPage: hasVisitedRadioPage,
+            explicitUserChoice: explicitReceiveMonitoringChoice
+        )
+    }
+
+    private var explicitReceiveMonitoringChoice: Bool? {
+        switch receiveMonitoringChoice {
+        case 0: false
+        case 1: true
+        default: nil
+        }
+    }
+
+    private func handleRadioPageAppearance() {
+        syncFrequency()
+        var preference = receiveMonitoringPreference
+        let decision = preference.radioPageDidAppear()
+        persistReceiveMonitoringPreference(preference)
+        switch decision {
+        case .start:
+            Task { await session.startReceiveAudio() }
+        case .stop:
+            session.stopReceiveAudio()
+        case .preserve:
+            break
+        }
+    }
+
+    private func persistReceiveMonitoringPreference(_ preference: RadioLiteReceiveMonitoringPreference) {
+        hasVisitedRadioPage = preference.hasVisitedRadioPage
+        receiveMonitoringChoice = preference.explicitUserChoice.map { $0 ? 1 : 0 } ?? -1
+    }
 }
 
 private struct RadioLiteSpectrumView: View {
@@ -237,6 +297,7 @@ private struct RadioLiteSpectrumView: View {
     let capability: RadioLiteSpectrumCapability?
     let history: [[UInt8]]
     let policy: RadioLiteMediaPolicy?
+    @State private var isExpanded = false
 
     var body: some View {
         RadioPanel {
@@ -246,6 +307,19 @@ private struct RadioLiteSpectrumView: View {
                         .font(.headline)
                     Spacer()
                     sourceBadge
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.bold))
+                            .frame(width: 30, height: 30)
+                            .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(RadioPalette.cyan)
+                    .accessibilityLabel(isExpanded ? "收起频谱" : "展开频谱")
                 }
                 Text(axisDescription)
                     .font(.caption.monospacedDigit())
@@ -286,7 +360,7 @@ private struct RadioLiteSpectrumView: View {
                     ))
                     context.stroke(line, with: .color(RadioPalette.cyan), lineWidth: 1.4)
                 }
-                .frame(height: 145)
+                .frame(height: isExpanded ? 145 : 80)
                 .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                 if let statusMessage {
@@ -319,7 +393,7 @@ private struct RadioLiteSpectrumView: View {
                                 }
                             }
                         }
-                        .frame(height: 112)
+                        .frame(height: isExpanded ? 112 : 70)
                         .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                         HStack {
                             Text("0 Hz")
@@ -395,11 +469,45 @@ private struct RadioLiteSpectrumView: View {
     }
 
     private func waterfallColor(_ value: UInt8) -> Color {
-        let level = Double(value) / 255
+        let level = pow(Double(value) / 255, 0.72)
+        if level < 0.22 {
+            return interpolateColor(
+                from: (0, 0, 0),
+                to: (0.01, 0.05, 0.38),
+                progress: level / 0.22
+            )
+        }
+        if level < 0.52 {
+            return interpolateColor(
+                from: (0.01, 0.05, 0.38),
+                to: (0, 0.82, 0.92),
+                progress: (level - 0.22) / 0.30
+            )
+        }
+        if level < 0.80 {
+            return interpolateColor(
+                from: (0, 0.82, 0.92),
+                to: (1, 0.88, 0.08),
+                progress: (level - 0.52) / 0.28
+            )
+        }
+        return interpolateColor(
+            from: (1, 0.88, 0.08),
+            to: (1, 1, 1),
+            progress: (level - 0.80) / 0.20
+        )
+    }
+
+    private func interpolateColor(
+        from lower: (Double, Double, Double),
+        to upper: (Double, Double, Double),
+        progress: Double
+    ) -> Color {
+        let amount = min(1, max(0, progress))
         return Color(
-            hue: max(0, 0.68 - 0.68 * level),
-            saturation: 0.92,
-            brightness: max(0.06, level)
+            red: lower.0 + (upper.0 - lower.0) * amount,
+            green: lower.1 + (upper.1 - lower.1) * amount,
+            blue: lower.2 + (upper.2 - lower.2) * amount
         )
     }
 }

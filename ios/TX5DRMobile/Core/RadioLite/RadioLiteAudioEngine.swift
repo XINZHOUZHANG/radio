@@ -82,6 +82,12 @@ final class RadioLiteAudioEngine: ObservableObject {
     @Published private(set) var sentPackets: UInt64 = 0
     @Published private(set) var droppedPackets: UInt64 = 0
     @Published private(set) var lastError: String?
+    @Published var microphoneProcessingMode: RadioLiteMicrophoneProcessingMode {
+        didSet { persistMicrophonePreferences() }
+    }
+    @Published var microphoneGain: RadioLiteMicrophoneGain {
+        didSet { persistMicrophonePreferences() }
+    }
     @Published var monitorVolume: Double = 0.8 {
         didSet { player.volume = Float(min(1, max(0, monitorVolume))) }
     }
@@ -106,6 +112,9 @@ final class RadioLiteAudioEngine: ObservableObject {
     private let maximumBuffers = 25
 
     init() {
+        let microphonePreferences = RadioLiteMicrophonePreferences.load()
+        microphoneProcessingMode = microphonePreferences.processingMode
+        microphoneGain = microphonePreferences.gain
         playbackEngine.attach(player)
         do {
             let codec = try RadioLiteOpusCodec()
@@ -219,6 +228,9 @@ final class RadioLiteAudioEngine: ObservableObject {
         do {
             try activateAudioSession(capturing: true)
             let input = captureEngine.inputNode
+            try input.setVoiceProcessingEnabled(
+                microphoneProcessingMode.configuration.voiceProcessingEnabled
+            )
             let format = input.outputFormat(forBus: 0)
             guard format.channelCount > 0, format.sampleRate > 0 else {
                 throw RadioLiteAudioError.microphoneUnavailable
@@ -297,12 +309,14 @@ final class RadioLiteAudioEngine: ObservableObject {
             let source = Array(captureAccumulator.prefix(sourceFrameCount))
             captureAccumulator.removeFirst(sourceFrameCount)
             let resampled = Self.resample(source, count: RadioLiteOpusCodec.samplesPerFrame)
-            let rms = sqrt(resampled.reduce(0) { $0 + Double($1 * $1) } / Double(resampled.count))
+            let processed = RadioLiteMicrophoneDSP.processFrame(resampled, gain: microphoneGain)
             if microphoneTelemetryLimiter.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
-                microphoneLevel = min(1, rms * 4)
+                microphoneLevel = processed.level
             }
             do {
-                guard let packet = try codec?.encode(resampled) else { throw RadioLiteOpusError.emptyPacket }
+                guard let packet = try codec?.encode(processed.samples) else {
+                    throw RadioLiteOpusError.emptyPacket
+                }
                 sentPackets &+= 1
                 packetHandler?(packet)
             } catch {
@@ -318,14 +332,15 @@ final class RadioLiteAudioEngine: ObservableObject {
         // first prevents iOS from retaining an incompatible input/output graph.
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         if capturing {
+            let mode = microphoneProcessingMode.configuration.audioSessionMode
             do {
                 try session.setCategory(
                     .playAndRecord,
-                    mode: .voiceChat,
+                    mode: mode,
                     options: [.defaultToSpeaker, .allowBluetooth]
                 )
             } catch {
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
+                try session.setCategory(.playAndRecord, mode: mode, options: [.defaultToSpeaker])
             }
         } else {
             do {
@@ -390,6 +405,13 @@ final class RadioLiteAudioEngine: ObservableObject {
             lastError = RadioLiteAudioError.playbackUnavailable(Self.diagnostic(error)).localizedDescription
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
+    }
+
+    private func persistMicrophonePreferences() {
+        RadioLiteMicrophonePreferences(
+            processingMode: microphoneProcessingMode,
+            gain: microphoneGain
+        ).save()
     }
 
     private func requestMicrophonePermission() async -> Bool {

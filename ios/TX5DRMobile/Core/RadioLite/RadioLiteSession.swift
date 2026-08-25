@@ -16,6 +16,9 @@ enum RadioLiteSessionError: LocalizedError {
     case controlRequired
     case transmitNotAllowed
     case invalidFrequency
+    case rigControlUnavailable
+    case invalidRigControlValue
+    case rigControlLocked(String)
     case administratorRequired
 
     var errorDescription: String? {
@@ -25,6 +28,9 @@ enum RadioLiteSessionError: LocalizedError {
         case .controlRequired: "请先取得电台控制权"
         case .transmitNotAllowed: "当前账户或电台不允许发射"
         case .invalidFrequency: "请输入有效频率"
+        case .rigControlUnavailable: "该 Hamlib 控件当前不可用"
+        case .invalidRigControlValue: "控件数值超出电台允许范围"
+        case .rigControlLocked(let reason): reason
         case .administratorRequired: "此操作需要管理员账户"
         }
     }
@@ -43,6 +49,7 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var controlToken: String?
     @Published private(set) var controlExpiresAtMs: Int64?
     @Published private(set) var rigState: RadioLiteRigState?
+    @Published private(set) var rigControls: [RadioLiteRigControl] = []
     @Published private(set) var decodeBatches: [RadioLiteDigitalDecodeBatch] = []
     @Published private(set) var callQueue: RadioLiteCallQueueSnapshot?
     @Published private(set) var automaticQSO: RadioLiteAutoQSO?
@@ -250,6 +257,7 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
+        rigControls = []
         decodeBatches = []
         callQueue = nil
         automaticQSO = nil
@@ -324,6 +332,7 @@ final class RadioLiteSession: ObservableObject {
                 presentNotice("电台当前由其他操作员控制，可稍后接管")
             }
             try await refreshRigState()
+            try? await refreshRigControls()
             try await refreshDigitalSnapshot()
         } catch {
             errorMessage = error.localizedDescription
@@ -420,6 +429,86 @@ final class RadioLiteSession: ObservableObject {
             throw RadioLiteHTTPError.invalidResponse
         }
         rigState = state
+    }
+
+    func refreshRigControls() async throws {
+        guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        let commandId = UUID().uuidString
+        let reply = try await control.request(
+            RadioLiteRigControlProtocol.getRequest(radioId: radioId, commandId: commandId),
+            expecting: ["rig.controls"],
+            commandId: commandId
+        )
+        guard let response: RadioLiteRigControlsResponse = reply.decoded(),
+              response.t == "rig.controls",
+              response.radioId == radioId,
+              response.commandId == commandId else {
+            throw RadioLiteHTTPError.invalidResponse
+        }
+        guard selectedRadioId == radioId else { return }
+        rigControls = response.controls
+    }
+
+    @discardableResult
+    func setRigControl(_ controlId: String, value requestedValue: Double) async -> RadioLiteRigControl? {
+        guard let radioId = selectedRadioId,
+              let controlToken else {
+            errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
+            return nil
+        }
+        guard let current = rigControls.first(where: { $0.id == controlId }) else {
+            errorMessage = RadioLiteSessionError.rigControlUnavailable.localizedDescription
+            return nil
+        }
+
+        let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
+        let display = current.displayState(isTransmitting: transmitting)
+        guard display.writable else {
+            errorMessage = RadioLiteSessionError.rigControlLocked(
+                display.lockedReason ?? "该控件当前不可调整"
+            ).localizedDescription
+            return nil
+        }
+        guard let value = validatedRigControlValue(requestedValue, for: current) else {
+            errorMessage = RadioLiteSessionError.invalidRigControlValue.localizedDescription
+            return nil
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let commandId = UUID().uuidString
+            let reply = try await control.request(
+                RadioLiteRigControlProtocol.setRequest(
+                    radioId: radioId,
+                    controlToken: controlToken,
+                    controlId: controlId,
+                    value: value,
+                    commandId: commandId
+                ),
+                expecting: ["rig.control.confirmed"],
+                commandId: commandId
+            )
+            guard let confirmation: RadioLiteRigControlConfirmation = reply.decoded(),
+                  confirmation.t == "rig.control.confirmed",
+                  confirmation.radioId == radioId,
+                  confirmation.commandId == commandId,
+                  confirmation.control.id == controlId else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            guard selectedRadioId == radioId else { return nil }
+            rigControls = RadioLiteRigControlProtocol.applying(confirmation, to: rigControls)
+            if confirmation.control.kind == .filter,
+               confirmation.control.value.isFinite,
+               confirmation.control.value > Double(Int.min),
+               confirmation.control.value < Double(Int.max) {
+                replaceRigState(passbandHz: Int(confirmation.control.value.rounded()))
+            }
+            return confirmation.control
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
     }
 
     func startReceiveAudio() async {
@@ -854,6 +943,7 @@ final class RadioLiteSession: ObservableObject {
                 try await media.subscribe(radioId: response.radio.id)
                 resolveMediaNotices()
                 try await refreshRigState()
+                try? await refreshRigControls()
             }
             presentNotice(
                 controlReady
@@ -991,6 +1081,7 @@ final class RadioLiteSession: ObservableObject {
             presentNotice("已连接，但电台控制权当前由其他操作员持有")
         }
         try await refreshRigState()
+        try? await refreshRigControls()
         do { try await refreshDigitalSnapshot() } catch {
             presentNotice("FT8/FT4 暂不可用：\(error.localizedDescription)")
         }
@@ -1283,6 +1374,7 @@ final class RadioLiteSession: ObservableObject {
         }
         do { try await acquireControl() } catch { controlToken = nil }
         try await refreshRigState()
+        try? await refreshRigControls()
         try? await refreshDigitalSnapshot()
         startPolling()
         return mediaReady
@@ -1388,6 +1480,7 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
+        rigControls = []
         decodeBatches = []
         callQueue = nil
         automaticQSO = nil
@@ -1441,6 +1534,39 @@ final class RadioLiteSession: ObservableObject {
             passbandHz: passbandHz ?? current.passbandHz,
             ptt: ptt ?? current.ptt
         )
+    }
+
+    private func validatedRigControlValue(
+        _ requestedValue: Double,
+        for control: RadioLiteRigControl
+    ) -> Double? {
+        guard requestedValue.isFinite,
+              control.minimum.isFinite,
+              control.maximum.isFinite,
+              control.step.isFinite,
+              control.minimum <= control.maximum else {
+            return nil
+        }
+
+        let scale = max(
+            1,
+            max(abs(control.minimum), max(abs(control.maximum), abs(control.step)))
+        )
+        let tolerance = scale * 1e-9
+        guard requestedValue >= control.minimum - tolerance,
+              requestedValue <= control.maximum + tolerance else {
+            return nil
+        }
+
+        let clamped = min(control.maximum, max(control.minimum, requestedValue))
+        guard control.step > 0 else { return clamped }
+        let stepCount = ((clamped - control.minimum) / control.step).rounded()
+        let snapped = control.minimum + stepCount * control.step
+        guard snapped.isFinite,
+              abs(snapped - clamped) <= max(tolerance, abs(control.step) * 1e-6) else {
+            return nil
+        }
+        return min(control.maximum, max(control.minimum, snapped))
     }
 
     private func nowMs() -> Int64 {

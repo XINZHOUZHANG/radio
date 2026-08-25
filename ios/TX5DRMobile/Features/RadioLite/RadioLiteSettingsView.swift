@@ -86,6 +86,36 @@ struct RadioLiteSettingsView: View {
                 }
             }
 
+            Section {
+                Picker("处理模式", selection: $audio.microphoneProcessingMode) {
+                    ForEach(RadioLiteMicrophoneProcessingMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .disabled(audio.isCapturingMicrophone)
+
+                Picker("数字增益", selection: $audio.microphoneGain) {
+                    ForEach(RadioLiteMicrophoneGain.allCases) { gain in
+                        Text(gain.label).tag(gain)
+                    }
+                }
+                .disabled(audio.isCapturingMicrophone)
+
+                Text(audio.microphoneProcessingMode.detail)
+                    .font(.footnote)
+                    .foregroundStyle(RadioPalette.muted)
+
+                if audio.isCapturingMicrophone {
+                    Label("PTT 发射中；松开后才能更改麦克风参数", systemImage: "mic.fill")
+                        .font(.footnote)
+                        .foregroundStyle(RadioPalette.transmit)
+                }
+            } header: {
+                Text("PTT 麦克风")
+            } footer: {
+                Text("默认使用远距原声与 +12 dB。样本会先增益，再经平滑软限幅后编码，避免硬削波。")
+            }
+
             if session.isAdmin {
                 Section {
                     ForEach(session.users) { user in

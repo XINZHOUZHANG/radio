@@ -93,6 +93,7 @@ final class RadioLiteMediaClient: ObservableObject {
     private var uplinkSequence: UInt32 = 0
     private var uplinkOwnershipState = RadioLiteUplinkOwnershipState()
     private var spectrumHistoryBuffer = RadioLiteSpectrumHistory()
+    private var spectrumAGC = RadioLiteSpectrumAGC()
 
     init(audio: RadioLiteAudioEngine? = nil) {
         self.audio = audio ?? RadioLiteAudioEngine()
@@ -263,8 +264,14 @@ final class RadioLiteMediaClient: ObservableObject {
             case .spectrum:
                 guard spectrumVisible else { return }
                 let decoded = try RadioLiteMediaFrameCodec.decodeSpectrum(frame.payload)
-                spectrum = decoded
-                spectrumHistoryBuffer.append(decoded)
+                let displayFrame = RadioLiteSpectrumFrame(
+                    centerFrequencyHz: decoded.centerFrequencyHz,
+                    spanHz: decoded.spanHz,
+                    noiseFloorTenthsDBm: decoded.noiseFloorTenthsDBm,
+                    bins: spectrumAGC.normalize(decoded.bins)
+                )
+                spectrum = displayFrame
+                spectrumHistoryBuffer.append(displayFrame)
                 spectrumHistory = spectrumHistoryBuffer.rows
             case .audioUplink, .statistics:
                 break
@@ -402,6 +409,7 @@ final class RadioLiteMediaClient: ObservableObject {
     private func clearSpectrum(keepingCapability: Bool) {
         spectrum = nil
         spectrumHistoryBuffer.reset()
+        spectrumAGC.reset()
         spectrumHistory = []
         if !keepingCapability {
             spectrumCapability = nil
