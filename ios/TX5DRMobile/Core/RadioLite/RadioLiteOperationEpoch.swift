@@ -54,6 +54,35 @@ struct RadioLiteReconnectOwnershipState: Equatable, Sendable {
     }
 }
 
+struct RadioLiteAuthenticationOwnership: Equatable, Sendable {
+    let epoch: UInt64
+}
+
+struct RadioLiteAuthenticationOwnershipState: Equatable, Sendable {
+    private var epoch = RadioLiteOperationEpoch()
+    private var current: RadioLiteAuthenticationOwnership?
+
+    mutating func begin() -> RadioLiteAuthenticationOwnership {
+        let ownership = RadioLiteAuthenticationOwnership(epoch: epoch.begin())
+        current = ownership
+        return ownership
+    }
+
+    func isCurrent(_ ownership: RadioLiteAuthenticationOwnership) -> Bool {
+        current == ownership && epoch.owns(ownership.epoch)
+    }
+
+    var currentOwnership: RadioLiteAuthenticationOwnership? {
+        guard let current, epoch.owns(current.epoch) else { return nil }
+        return current
+    }
+
+    mutating func invalidate() {
+        epoch.invalidate()
+        current = nil
+    }
+}
+
 enum RadioLiteReconnectFailureStage: Equatable, Sendable {
     case credentialRefresh
     case channelReconnect
@@ -71,7 +100,9 @@ enum RadioLiteReconnectFailurePolicy {
         stage: RadioLiteReconnectFailureStage
     ) -> RadioLiteReconnectFailureDisposition {
         if error is CancellationError { return .benign }
-        if let httpError = error as? RadioLiteHTTPError, httpError.isUnauthorized {
+        if stage == .credentialRefresh,
+           let httpError = error as? RadioLiteHTTPError,
+           httpError.isUnauthorized {
             return .signOut
         }
         return .retry

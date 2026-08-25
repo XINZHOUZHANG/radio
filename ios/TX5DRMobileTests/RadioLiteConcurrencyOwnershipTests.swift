@@ -3,6 +3,261 @@ import XCTest
 @testable import TX5DRMobile
 
 final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
+    @MainActor
+    func testCancelledVoicePTTStartupCannotConsumeReceiveRecoveryAfterRelease() async {
+        var events: [String] = []
+        let task = RadioLiteVoicePTTStartup.schedule(
+            requiresMediaSubscription: true,
+            prepareReceiveRecovery: { events.append("receive-recovery-transferred") }
+        ) {
+            events.append("media-subscribe-started")
+        }
+
+        XCTAssertEqual(
+            events,
+            ["receive-recovery-transferred"],
+            "receive recovery must transfer synchronously before the startup Task can be cancelled"
+        )
+
+        task.cancel()
+        await task.value
+
+        XCTAssertEqual(
+            events,
+            ["receive-recovery-transferred"],
+            "a PTT Task cancelled by an immediate release must not begin media subscription"
+        )
+    }
+
+    @MainActor
+    func testCredentialRefreshSharesRotationWhileCancelledWaiterExitsPromptly() async throws {
+        let server = try RadioLiteServer(address: "http://radio.example:8787")
+        let current = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-old",
+            accessExpiresAtMs: 1_000,
+            refreshToken: "refresh-old",
+            refreshExpiresAtMs: 10_000
+        )
+        let refreshed = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-new",
+            accessExpiresAtMs: 2_000,
+            refreshToken: "refresh-new",
+            refreshExpiresAtMs: 20_000
+        )
+        let coordinator = RadioLiteCredentialRefreshCoordinator()
+        let probe = RadioLiteCredentialRefreshProbe()
+        let commitProbe = RadioLiteCredentialCommitProbe(server: server, credential: current)
+
+        let first = Task { @MainActor in
+            try await coordinator.refresh(
+                server: server,
+                current: current,
+                operation: { credential in try await probe.perform(credential) },
+                commit: { request, credentials in
+                    try commitProbe.commit(request: request, credentials: credentials)
+                }
+            )
+        }
+        await probe.waitForCallCount(1)
+        first.cancel()
+
+        do {
+            _ = try await first.value
+            XCTFail("a cancelled waiter must not apply a shared credential lease")
+        } catch is CancellationError {
+            // The shared server rotation remains alive for another waiter.
+        }
+
+        let newerSnapshot = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-newer-snapshot",
+            accessExpiresAtMs: 1_500,
+            refreshToken: "refresh-newer-snapshot",
+            refreshExpiresAtMs: 15_000
+        )
+        let replacement = Task { @MainActor in
+            try await coordinator.refresh(
+                server: server,
+                current: newerSnapshot,
+                operation: { credential in try await probe.perform(credential) },
+                commit: { request, credentials in
+                    try commitProbe.commit(request: request, credentials: credentials)
+                }
+            )
+        }
+        await Task.yield()
+
+        let requestCountBeforeCompletion = await probe.callCount
+        XCTAssertEqual(
+            requestCountBeforeCompletion,
+            1,
+            "all waiters for one refresh token must share exactly one server-side rotation"
+        )
+
+        await probe.succeed(with: refreshed)
+        let replacementLease = try await replacement.value
+
+        XCTAssertEqual(replacementLease.credentials, refreshed)
+        XCTAssertEqual(
+            commitProbe.commitCount,
+            1,
+            "credential persistence and publication must run once inside the shared flight before waiters resume"
+        )
+        XCTAssertEqual(replacementLease.request.refreshToken, "refresh-old")
+    }
+
+    func testAuthenticationOwnershipRejectsSupersededRestoreAndLogout() {
+        var state = RadioLiteAuthenticationOwnershipState()
+        let restore = state.begin()
+        XCTAssertTrue(state.isCurrent(restore))
+        XCTAssertEqual(state.currentOwnership, restore)
+
+        let login = state.begin()
+        XCTAssertFalse(state.isCurrent(restore))
+        XCTAssertTrue(state.isCurrent(login))
+        XCTAssertEqual(state.currentOwnership, login)
+
+        state.invalidate()
+        XCTAssertFalse(state.isCurrent(login))
+        XCTAssertNil(state.currentOwnership)
+    }
+
+    @MainActor
+    func testCredentialRefreshLeaseCannotApplyAfterLogoutOrAccountSwitch() async throws {
+        let server = try RadioLiteServer(address: "http://radio.example:8787")
+        let current = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-old",
+            accessExpiresAtMs: 1_000,
+            refreshToken: "refresh-old",
+            refreshExpiresAtMs: 10_000
+        )
+        let refreshed = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-new",
+            accessExpiresAtMs: 2_000,
+            refreshToken: "refresh-new",
+            refreshExpiresAtMs: 20_000
+        )
+        let coordinator = RadioLiteCredentialRefreshCoordinator()
+        let probe = RadioLiteCredentialRefreshProbe()
+        let commitProbe = RadioLiteCredentialCommitProbe(server: server, credential: current)
+
+        let refresh = Task { @MainActor in
+            try await coordinator.refresh(
+                server: server,
+                current: current,
+                operation: { credential in try await probe.perform(credential) },
+                commit: { request, credentials in
+                    try commitProbe.commit(request: request, credentials: credentials)
+                }
+            )
+        }
+        await probe.waitForCallCount(1)
+        commitProbe.invalidateAccount()
+        await probe.succeed(with: refreshed)
+
+        do {
+            _ = try await refresh.value
+            XCTFail("an old account flight must not publish refreshed credentials")
+        } catch is CancellationError {
+            // Expected: the network flight finished, but its account lease was invalidated.
+        }
+        XCTAssertEqual(commitProbe.commitCount, 0)
+
+        let staleRequest = RadioLiteCredentialRefreshRequest(server: server, current: current)
+        XCTAssertTrue(
+            staleRequest.matches(server: server, credential: .device(current))
+        )
+        XCTAssertFalse(
+            staleRequest.matches(
+                server: try RadioLiteServer(address: "http://other.example:8787"),
+                credential: .device(current)
+            )
+        )
+        XCTAssertFalse(
+            staleRequest.matches(
+                server: server,
+                credential: .device(RadioLiteDeviceCredentials(
+                    deviceId: "device-2",
+                    accessToken: "access-other",
+                    accessExpiresAtMs: 3_000,
+                    refreshToken: "refresh-other",
+                    refreshExpiresAtMs: 30_000
+                ))
+            )
+        )
+    }
+
+    @MainActor
+    func testPersistenceFailureRetriesCommitWithoutRotatingTokenAgain() async throws {
+        let server = try RadioLiteServer(address: "http://radio.example:8787")
+        let current = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-old",
+            accessExpiresAtMs: 1_000,
+            refreshToken: "refresh-old",
+            refreshExpiresAtMs: 10_000
+        )
+        let refreshed = RadioLiteDeviceCredentials(
+            deviceId: "device-1",
+            accessToken: "access-new",
+            accessExpiresAtMs: 2_000,
+            refreshToken: "refresh-new",
+            refreshExpiresAtMs: 20_000
+        )
+        let coordinator = RadioLiteCredentialRefreshCoordinator()
+        let probe = RadioLiteCredentialRefreshProbe()
+        let commitProbe = RadioLiteCredentialCommitProbe(server: server, credential: current)
+        commitProbe.failPersistence()
+
+        let first = Task { @MainActor in
+            try await coordinator.refresh(
+                server: server,
+                current: current,
+                operation: { credential in try await probe.perform(credential) },
+                commit: { request, credentials in
+                    try commitProbe.commit(request: request, credentials: credentials)
+                }
+            )
+        }
+        await probe.waitForCallCount(1)
+        await probe.succeed(with: refreshed)
+
+        do {
+            _ = try await first.value
+            XCTFail("the first Keychain commit is intentionally unavailable")
+        } catch RadioLiteCredentialCommitProbeError.persistenceUnavailable {
+            // The rotated response must remain cached for a commit-only retry.
+        }
+        XCTAssertTrue(coordinator.hasPendingCommit(server: server, deviceId: current.deviceId))
+        XCTAssertEqual(
+            coordinator.pendingCommitCredentials(server: server, deviceId: current.deviceId),
+            refreshed
+        )
+        let requestCountAfterFailure = await probe.callCount
+        XCTAssertEqual(requestCountAfterFailure, 1)
+
+        commitProbe.allowPersistence()
+        let recovered = try await coordinator.refresh(
+            server: server,
+            current: refreshed,
+            operation: { credential in try await probe.rejectUnexpectedRefresh(credential) },
+            commit: { request, credentials in
+                try commitProbe.commit(request: request, credentials: credentials)
+            }
+        )
+
+        XCTAssertEqual(recovered.credentials, refreshed)
+        let requestCountAfterRecovery = await probe.callCount
+        XCTAssertEqual(requestCountAfterRecovery, 1)
+        XCTAssertEqual(commitProbe.commitAttemptCount, 2)
+        XCTAssertEqual(commitProbe.commitCount, 1)
+        XCTAssertFalse(coordinator.hasPendingCommit(server: server, deviceId: current.deviceId))
+    }
+
     func testInvalidatedOperationCannotOwnAReplacement() {
         var epoch = RadioLiteOperationEpoch()
         let old = epoch.begin()
@@ -97,6 +352,18 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
                 stage: .credentialRefresh
             ),
             .signOut
+        )
+        XCTAssertEqual(
+            RadioLiteReconnectFailurePolicy.disposition(
+                for: RadioLiteHTTPError.http(
+                    status: 401,
+                    code: "authentication_required",
+                    message: "expired access token"
+                ),
+                stage: .channelReconnect
+            ),
+            .retry,
+            "only an authoritative refresh rejection may delete paired-device credentials"
         )
     }
 
@@ -199,4 +466,92 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
             .none
         )
     }
+}
+
+private actor RadioLiteCredentialRefreshProbe {
+    private(set) var callCount = 0
+    private var completions: [CheckedContinuation<RadioLiteDeviceCredentials, Error>] = []
+    private var callWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func perform(_ credential: RadioLiteDeviceCredentials) async throws -> RadioLiteDeviceCredentials {
+        callCount += 1
+        let readyWaiters = callWaiters.filter { callCount >= $0.count }
+        callWaiters.removeAll { callCount >= $0.count }
+        readyWaiters.forEach { $0.continuation.resume() }
+        return try await withCheckedThrowingContinuation { continuation in
+            completions.append(continuation)
+        }
+    }
+
+    func waitForCallCount(_ expectedCount: Int) async {
+        guard callCount < expectedCount else { return }
+        await withCheckedContinuation { continuation in
+            callWaiters.append((expectedCount, continuation))
+        }
+    }
+
+    func succeed(with credentials: RadioLiteDeviceCredentials) {
+        let pending = completions
+        completions.removeAll()
+        pending.forEach { $0.resume(returning: credentials) }
+    }
+
+    func rejectUnexpectedRefresh(
+        _ credential: RadioLiteDeviceCredentials
+    ) throws -> RadioLiteDeviceCredentials {
+        callCount += 1
+        throw RadioLiteCredentialCommitProbeError.unexpectedSecondRefresh
+    }
+}
+
+@MainActor
+private final class RadioLiteCredentialCommitProbe {
+    private var accountState = RadioLiteCredentialAccountOwnershipState()
+    private let accountOwnership: RadioLiteCredentialAccountOwnership
+    private let server: RadioLiteServer
+    private let credential: RadioLiteDeviceCredentials
+    private var persistenceAvailable = true
+    private(set) var commitAttemptCount = 0
+    private(set) var commitCount = 0
+
+    init(server: RadioLiteServer, credential: RadioLiteDeviceCredentials) {
+        var state = RadioLiteCredentialAccountOwnershipState()
+        let ownership = state.activate(server: server, credential: credential)
+        self.accountState = state
+        self.accountOwnership = ownership
+        self.server = server
+        self.credential = credential
+    }
+
+    func invalidateAccount() {
+        accountState.invalidate()
+    }
+
+    func failPersistence() {
+        persistenceAvailable = false
+    }
+
+    func allowPersistence() {
+        persistenceAvailable = true
+    }
+
+    func commit(
+        request: RadioLiteCredentialRefreshRequest,
+        credentials: RadioLiteDeviceCredentials
+    ) throws {
+        guard accountState.isCurrent(accountOwnership),
+              request.matches(server: server, credential: .device(credential)) else {
+            throw CancellationError()
+        }
+        commitAttemptCount += 1
+        guard persistenceAvailable else {
+            throw RadioLiteCredentialCommitProbeError.persistenceUnavailable
+        }
+        commitCount += 1
+    }
+}
+
+private enum RadioLiteCredentialCommitProbeError: Error {
+    case persistenceUnavailable
+    case unexpectedSecondRefresh
 }

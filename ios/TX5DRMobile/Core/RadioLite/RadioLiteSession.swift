@@ -78,8 +78,12 @@ final class RadioLiteSession: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var transmitHeartbeatTask: Task<Void, Never>?
     private var credentialRefreshTask: Task<Void, Never>?
+    private var credentialPersistenceRetryTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var reconnectOwnershipState = RadioLiteReconnectOwnershipState()
+    private let credentialRefreshCoordinator = RadioLiteCredentialRefreshCoordinator()
+    private var credentialAccountOwnershipState = RadioLiteCredentialAccountOwnershipState()
+    private var authenticationOwnershipState = RadioLiteAuthenticationOwnershipState()
     private var mediaRetryTask: Task<Void, Never>?
     private var mediaRetryOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTStartupTask: Task<Void, Never>?
@@ -162,13 +166,17 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func restoreSession() async {
+        let authenticationOwnership = authenticationOwnershipState.begin()
+        prepareForAuthentication()
         phase = .launching
         errorMessage = nil
         do {
-            guard var stored = try credentialStore.load() else {
+            guard let stored = try credentialStore.load() else {
+                try requireCurrentAuthentication(authenticationOwnership)
                 phase = .signedOut
                 return
             }
+            try requireCurrentAuthentication(authenticationOwnership)
             serverAddress = stored.serverAddress
             var parsedServer = try RadioLiteServer(address: stored.serverAddress)
             var restoredCredential = stored.credential
@@ -178,58 +186,141 @@ final class RadioLiteSession: ObservableObject {
                 guard device.refreshExpiresAtMs > nowMs() else {
                     throw RadioLiteHTTPError.http(status: 401, code: "refresh_expired", message: "设备配对已过期，请重新配对")
                 }
-                let refreshed = try await RadioLiteHTTPClient(server: parsedServer).refreshDevice(device)
-                restoredCredential = .device(refreshed)
-                stored = RadioLiteStoredLogin(
-                    serverAddress: parsedServer.displayAddress,
-                    credential: restoredCredential,
-                    username: restoredUsername
+                let refreshServer = parsedServer
+                let refreshUsername = restoredUsername
+                let request = RadioLiteCredentialRefreshRequest(
+                    server: refreshServer,
+                    current: device
                 )
-                try credentialStore.save(stored)
+                let accountOwnership: RadioLiteCredentialAccountOwnership
+                if let existing = credentialAccountOwnershipState.ownership(
+                    matching: request.key
+                ) {
+                    accountOwnership = existing
+                } else {
+                    accountOwnership = credentialAccountOwnershipState.activate(
+                        server: refreshServer,
+                        credential: device
+                    )
+                }
+                do {
+                    let lease = try await credentialRefreshCoordinator.refresh(
+                        server: refreshServer,
+                        current: device,
+                        operation: { credential in
+                            try await RadioLiteHTTPClient(server: refreshServer).refreshDevice(credential)
+                        },
+                        commit: { [weak self] refreshRequest, refreshed in
+                            guard let self,
+                                  self.authenticationOwnershipState.isCurrent(authenticationOwnership),
+                                  self.credentialAccountOwnershipState.isCurrent(accountOwnership),
+                                  refreshRequest.matches(
+                                    server: refreshServer,
+                                    credential: .device(device)
+                                  ) else {
+                                throw CancellationError()
+                            }
+                            try self.credentialStore.save(RadioLiteStoredLogin(
+                                serverAddress: refreshServer.displayAddress,
+                                credential: .device(refreshed),
+                                username: refreshUsername
+                            ))
+                        }
+                    )
+                    restoredCredential = .device(lease.credentials)
+                } catch {
+                    try requireCurrentAuthentication(authenticationOwnership)
+                    guard error is KeychainTokenStoreError,
+                          let pending = credentialRefreshCoordinator.pendingCommitCredentials(
+                            server: refreshServer,
+                            deviceId: device.deviceId
+                          ) else {
+                        throw error
+                    }
+                    restoredCredential = .device(pending)
+                    presentNotice(
+                        "刷新凭据已生效，正在后台重试安全保存",
+                        deduplicationKey: "credential.persistence"
+                    )
+                    scheduleCredentialPersistenceRetry(
+                        server: refreshServer,
+                        credential: pending,
+                        username: refreshUsername,
+                        expectedRequest: request,
+                        authenticationOwnership: authenticationOwnership
+                    )
+                }
+                try requireCurrentAuthentication(authenticationOwnership)
+                guard credentialAccountOwnershipState.isCurrent(accountOwnership) else {
+                    throw CancellationError()
+                }
             } else if case .browser = restoredCredential {
                 let restored = try await RadioLiteHTTPClient(
                     server: parsedServer,
                     credential: restoredCredential
                 ).currentSession()
+                try requireCurrentAuthentication(authenticationOwnership)
                 restoredCredential = restored.credential
                 restoredUsername = restored.user.username
                 parsedServer = try RadioLiteServer(address: stored.serverAddress)
             }
+            try requireCurrentAuthentication(authenticationOwnership)
             try await finishAuthentication(
                 server: parsedServer,
                 credential: restoredCredential,
-                username: restoredUsername
+                username: restoredUsername,
+                authenticationOwnership: authenticationOwnership
             )
+        } catch is CancellationError {
+            guard authenticationOwnershipState.isCurrent(authenticationOwnership) else { return }
+            if phase == .launching || phase == .authenticating {
+                phase = .signedOut
+                errorMessage = "登录恢复已取消，请重试"
+            }
         } catch {
-            try? credentialStore.delete()
+            guard authenticationOwnershipState.isCurrent(authenticationOwnership) else { return }
+            if shouldDiscardStoredCredential(after: error) {
+                credentialAccountOwnershipState.invalidate()
+                try? credentialStore.delete()
+            }
             phase = .signedOut
             errorMessage = "登录恢复失败：\(error.localizedDescription)"
         }
     }
 
     func initializeServer(setupCode: String, username: String, password: String) async {
-        await authenticate {
+        await authenticate { authenticationOwnership in
             let server = try RadioLiteServer(address: self.serverAddress)
             let client = RadioLiteHTTPClient(server: server)
             _ = try await client.initialize(setupCode: setupCode, username: username, password: password)
             let login = try await client.login(username: username, password: password)
-            try await self.persistAndFinish(server: server, credential: login.credential, username: login.user.username)
+            try await self.persistAndFinish(
+                server: server,
+                credential: login.credential,
+                username: login.user.username,
+                authenticationOwnership: authenticationOwnership
+            )
         }
     }
 
     func login(username: String, password: String) async {
-        await authenticate {
+        await authenticate { authenticationOwnership in
             let server = try RadioLiteServer(address: self.serverAddress)
             let login = try await RadioLiteHTTPClient(server: server).login(
                 username: username,
                 password: password
             )
-            try await self.persistAndFinish(server: server, credential: login.credential, username: login.user.username)
+            try await self.persistAndFinish(
+                server: server,
+                credential: login.credential,
+                username: login.user.username,
+                authenticationOwnership: authenticationOwnership
+            )
         }
     }
 
     func login(pairingCode: String) async {
-        await authenticate {
+        await authenticate { authenticationOwnership in
             let code = pairingCode.filter(\.isNumber)
             guard code.count == 6 else {
                 throw RadioLiteHTTPError.http(status: 400, code: "invalid_code", message: "配对码必须是 6 位数字")
@@ -239,14 +330,21 @@ final class RadioLiteSession: ObservableObject {
                 code,
                 deviceName: UIDevice.current.name
             )
-            try await self.persistAndFinish(server: server, credential: .device(credentials), username: nil)
+            try await self.persistAndFinish(
+                server: server,
+                credential: .device(credentials),
+                username: nil,
+                authenticationOwnership: authenticationOwnership
+            )
         }
     }
 
     func logout() {
+        authenticationOwnershipState.invalidate()
+        credentialPersistenceRetryTask?.cancel()
+        credentialPersistenceRetryTask = nil
         intentionalDisconnect = true
-        endVoicePTT()
-        endTuning()
+        _ = stopLocalTransmit()
         stopReceiveAudio()
         cancelRuntimeTasks()
         let logoutClient = http
@@ -256,26 +354,7 @@ final class RadioLiteSession: ObservableObject {
         control.disconnect()
         media.disconnect()
         try? credentialStore.delete()
-        server = nil
-        credential = nil
-        http = nil
-        principal = nil
-        username = nil
-        radios = []
-        selectedRadioId = nil
-        controlToken = nil
-        controlExpiresAtMs = nil
-        rigState = nil
-        invalidateRigControlCatalogue()
-        decodeBatches = []
-        callQueue = nil
-        automaticQSO = nil
-        qsos = []
-        qsoTotal = 0
-        grids = []
-        users = []
-        issuedPairingCode = nil
-        resetNotices()
+        clearAuthenticatedState()
         phase = .signedOut
         intentionalDisconnect = false
     }
@@ -284,7 +363,8 @@ final class RadioLiteSession: ObservableObject {
         force: Bool = false,
         expectedRadioId: String? = nil,
         reconnectOwnership: RadioLiteReconnectOwnership? = nil,
-        configurationOwnership: RadioLiteRadioConfigurationReconnectOwnership? = nil
+        configurationOwnership: RadioLiteRadioConfigurationReconnectOwnership? = nil,
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
     ) async throws {
         let radioId = expectedRadioId ?? selectedRadioId
         guard let radioId else { throw RadioLiteSessionError.radioUnavailable }
@@ -292,7 +372,8 @@ final class RadioLiteSession: ObservableObject {
               reconnectOwnership.map(reconnectOwnershipState.isCurrent) ?? true,
               configurationOwnership.map({
                   radioConfigurationReconnectState.isCurrent($0, selectedRadioId: selectedRadioId)
-              }) ?? true else {
+              }) ?? true,
+              authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
             throw CancellationError()
         }
         var fields: [String: JSONValue] = [
@@ -309,7 +390,8 @@ final class RadioLiteSession: ObservableObject {
               reconnectOwnership.map(reconnectOwnershipState.isCurrent) ?? true,
               configurationOwnership.map({
                   radioConfigurationReconnectState.isCurrent($0, selectedRadioId: selectedRadioId)
-              }) ?? true else {
+              }) ?? true,
+              authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
             throw CancellationError()
         }
         controlToken = token
@@ -459,11 +541,15 @@ final class RadioLiteSession: ObservableObject {
     func refreshRigState(
         expectedRadioId: String? = nil,
         reconnectOwnership: RadioLiteReconnectOwnership? = nil,
-        configurationOwnership: RadioLiteRadioConfigurationReconnectOwnership? = nil
+        configurationOwnership: RadioLiteRadioConfigurationReconnectOwnership? = nil,
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
     ) async throws {
         let radioId = expectedRadioId ?? selectedRadioId
         guard let radioId else { throw RadioLiteSessionError.radioUnavailable }
         guard selectedRadioId == radioId else { throw CancellationError() }
+        guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+            throw CancellationError()
+        }
         let commandId = UUID().uuidString
         let reply = try await control.request(
             .object([
@@ -482,14 +568,20 @@ final class RadioLiteSession: ObservableObject {
               reconnectOwnership.map({ reconnectOwnershipState.isCurrent($0) }) ?? true,
               configurationOwnership.map({
                   radioConfigurationReconnectState.isCurrent($0, selectedRadioId: selectedRadioId)
-              }) ?? true else {
+              }) ?? true,
+              authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
             throw CancellationError()
         }
         rigState = state
     }
 
-    func refreshRigControls() async throws {
+    func refreshRigControls(
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async throws {
         guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+            throw CancellationError()
+        }
         let catalogueGeneration = beginRigControlDiscovery()
         let commandId = UUID().uuidString
         do {
@@ -498,9 +590,10 @@ final class RadioLiteSession: ObservableObject {
                 expecting: ["rig.controls"],
                 commandId: commandId
             )
-            guard selectedRadioId == radioId,
+            guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true,
+                  selectedRadioId == radioId,
                   rigControlCatalogue.isCurrent(catalogueGeneration) else {
-                return
+                throw CancellationError()
             }
             guard let response: RadioLiteRigControlsResponse = reply.decoded(),
                   response.t == "rig.controls",
@@ -516,19 +609,26 @@ final class RadioLiteSession: ObservableObject {
             }
             rigControls = rigControlCatalogue.controls
         } catch {
-            guard selectedRadioId == radioId,
+            guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true,
+                  selectedRadioId == radioId,
                   rigControlCatalogue.isCurrent(catalogueGeneration) else {
-                return
+                throw CancellationError()
             }
             rigControls = rigControlCatalogue.controls
             throw error
         }
     }
 
-    private func refreshRigControlsAutomatically() async {
+    private func refreshRigControlsAutomatically(
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async {
         do {
-            try await refreshRigControls()
+            try await refreshRigControls(authenticationOwnership: authenticationOwnership)
         } catch {
+            guard !(error is CancellationError),
+                  authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+                return
+            }
             errorMessage = "读取 Hamlib 控件失败：\(error.localizedDescription)"
         }
     }
@@ -774,7 +874,15 @@ final class RadioLiteSession: ObservableObject {
         let generation = transmitEpoch.begin()
         voicePTTGeneration = generation
         isVoicePTTHeld = true
-        voicePTTStartupTask = Task { [weak self] in
+        voicePTTStartupTask = RadioLiteVoicePTTStartup.schedule(
+            requiresMediaSubscription: media.subscribedRadioId != radioId,
+            prepareReceiveRecovery: { [weak self] in
+                self?.transferMediaRetryMonitoringToVoicePTT(
+                    radioId: radioId,
+                    transmitGeneration: generation
+                )
+            }
+        ) { [weak self] in
             guard let self else { return }
             var startedToken: String?
             var capture: RadioLiteMicrophoneCaptureOwnership?
@@ -784,10 +892,6 @@ final class RadioLiteSession: ObservableObject {
                     throw RadioLiteSocketError.notConnected
                 }
                 if self.media.subscribedRadioId != radioId {
-                    self.transferMediaRetryMonitoringToVoicePTT(
-                        radioId: radioId,
-                        transmitGeneration: generation
-                    )
                     try await self.media.subscribe(radioId: radioId)
                     try Task.checkCancellation()
                     guard self.isVoicePTTHeld, self.transmitEpoch.owns(generation) else { return }
@@ -988,11 +1092,15 @@ final class RadioLiteSession: ObservableObject {
 
     func refreshDigitalSnapshot(
         expectedRadioId: String? = nil,
-        reconnectOwnership: RadioLiteReconnectOwnership? = nil
+        reconnectOwnership: RadioLiteReconnectOwnership? = nil,
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
     ) async throws {
         let radioId = expectedRadioId ?? selectedRadioId
         guard let radioId else { throw RadioLiteSessionError.radioUnavailable }
-        guard selectedRadioId == radioId else { throw CancellationError() }
+        guard selectedRadioId == radioId,
+              authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+            throw CancellationError()
+        }
         let reply = try await control.request(
             .object([
                 "t": .string("digital.snapshot.get"),
@@ -1005,7 +1113,8 @@ final class RadioLiteSession: ObservableObject {
         }
         try Task.checkCancellation()
         guard selectedRadioId == radioId,
-              reconnectOwnership.map({ reconnectOwnershipState.isCurrent($0) }) ?? true else {
+              reconnectOwnership.map({ reconnectOwnershipState.isCurrent($0) }) ?? true,
+              authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
             throw CancellationError()
         }
         applyDigitalSnapshot(snapshot)
@@ -1081,16 +1190,27 @@ final class RadioLiteSession: ObservableObject {
         } expected: { ["digital.auto.stopped"] }
     }
 
-    func refreshLogs(limit: Int = 200, offset: Int = 0) async {
-        guard let http else { return }
+    func refreshLogs(
+        limit: Int = 200,
+        offset: Int = 0,
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async {
+        guard let ownership = authenticationOwnership
+                ?? authenticationOwnershipState.currentOwnership,
+              authenticationOwnershipState.isCurrent(ownership),
+              let http else {
+            return
+        }
         do {
             async let page = http.logs(limit: limit, offset: offset)
             async let gridResponse = http.grids(resolution: 4)
             let (pageValue, gridValue) = try await (page, gridResponse)
+            guard authenticationOwnershipState.isCurrent(ownership) else { return }
             qsos = pageValue.records
             qsoTotal = pageValue.total
             grids = gridValue.grids
         } catch {
+            guard authenticationOwnershipState.isCurrent(ownership) else { return }
             errorMessage = "日志读取失败：\(error.localizedDescription)"
         }
     }
@@ -1119,11 +1239,22 @@ final class RadioLiteSession: ObservableObject {
         return (result.imported, result.duplicates)
     }
 
-    func refreshUsers() async {
-        guard isAdmin, let http else { return }
+    func refreshUsers(
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async {
+        guard let ownership = authenticationOwnership
+                ?? authenticationOwnershipState.currentOwnership,
+              authenticationOwnershipState.isCurrent(ownership),
+              isAdmin,
+              let http else {
+            return
+        }
         do {
-            users = try await http.users()
+            let refreshedUsers = try await http.users()
+            guard authenticationOwnershipState.isCurrent(ownership) else { return }
+            users = refreshedUsers
         } catch {
+            guard authenticationOwnershipState.isCurrent(ownership) else { return }
             errorMessage = "账户读取失败：\(error.localizedDescription)"
         }
     }
@@ -1281,7 +1412,7 @@ final class RadioLiteSession: ObservableObject {
     func appDidBecomeActive() {
         media.setSpectrumVisible(true)
         guard phase == .ready else { return }
-        if case .device(let device) = credential, device.accessExpiresAtMs <= nowMs() + 30_000 {
+        if case .device(let device) = credential, credentialNeedsRefresh(device) {
             credentialRefreshTask?.cancel()
             credentialRefreshTask = Task { [weak self] in
                 await self?.refreshCredentialAndReconnect()
@@ -1300,15 +1431,21 @@ final class RadioLiteSession: ObservableObject {
         scheduleReconnect()
     }
 
-    private func authenticate(_ operation: () async throws -> Void) async {
+    private func authenticate(
+        _ operation: (RadioLiteAuthenticationOwnership) async throws -> Void
+    ) async {
+        let authenticationOwnership = authenticationOwnershipState.begin()
+        prepareForAuthentication()
         phase = .authenticating
         isWorking = true
         errorMessage = nil
         resetNotices()
         defer { isWorking = false }
         do {
-            try await operation()
+            try await operation(authenticationOwnership)
+            try requireCurrentAuthentication(authenticationOwnership)
         } catch {
+            guard authenticationOwnershipState.isCurrent(authenticationOwnership) else { return }
             phase = .signedOut
             errorMessage = error.localizedDescription
         }
@@ -1317,23 +1454,33 @@ final class RadioLiteSession: ObservableObject {
     private func persistAndFinish(
         server: RadioLiteServer,
         credential: RadioLiteCredential,
-        username: String?
+        username: String?,
+        authenticationOwnership: RadioLiteAuthenticationOwnership
     ) async throws {
+        try requireCurrentAuthentication(authenticationOwnership)
         let stored = RadioLiteStoredLogin(
             serverAddress: server.displayAddress,
             credential: credential,
             username: username
         )
         try credentialStore.save(stored)
+        try requireCurrentAuthentication(authenticationOwnership)
         UserDefaults.standard.set(server.displayAddress, forKey: Self.addressDefaultsKey)
-        try await finishAuthentication(server: server, credential: credential, username: username)
+        try await finishAuthentication(
+            server: server,
+            credential: credential,
+            username: username,
+            authenticationOwnership: authenticationOwnership
+        )
     }
 
     private func finishAuthentication(
         server: RadioLiteServer,
         credential: RadioLiteCredential,
-        username: String?
+        username: String?,
+        authenticationOwnership: RadioLiteAuthenticationOwnership
     ) async throws {
+        try requireCurrentAuthentication(authenticationOwnership)
         phase = .authenticating
         let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
@@ -1347,9 +1494,16 @@ final class RadioLiteSession: ObservableObject {
         self.credential = credential
         self.username = username
         self.http = RadioLiteHTTPClient(server: server, credential: credential)
+        if case .device(let device) = credential {
+            _ = credentialAccountOwnershipState.activate(server: server, credential: device)
+        } else {
+            credentialAccountOwnershipState.invalidate()
+        }
 
         let controlWelcome = try await control.connect(server: server, credential: credential)
+        try requireCurrentAuthentication(authenticationOwnership)
         let mediaWelcome = try await media.connect(server: server, credential: credential)
+        try requireCurrentAuthentication(authenticationOwnership)
         guard controlWelcome.principal.userId == mediaWelcome.principal.userId else {
             throw RadioLiteHTTPError.invalidResponse
         }
@@ -1363,7 +1517,8 @@ final class RadioLiteSession: ObservableObject {
         var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
-            guard selectedRadioId == radioId,
+            guard authenticationOwnershipState.isCurrent(authenticationOwnership),
+                  selectedRadioId == radioId,
                   receiveMonitoringIntent.isCurrent(receiveGeneration),
                   media.subscribedRadioId == radioId else {
                 throw CancellationError()
@@ -1373,6 +1528,7 @@ final class RadioLiteSession: ObservableObject {
                 expectedRadioId: radioId,
                 generation: receiveGeneration
             )
+            try requireCurrentAuthentication(authenticationOwnership)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -1380,16 +1536,24 @@ final class RadioLiteSession: ObservableObject {
             presentMediaNotice(error)
         }
         do {
-            try await acquireControl()
+            try await acquireControl(authenticationOwnership: authenticationOwnership)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             controlToken = nil
             presentNotice("已连接，但电台控制权当前由其他操作员持有")
         }
-        try await refreshRigState()
-        await refreshRigControlsAutomatically()
-        do { try await refreshDigitalSnapshot() } catch {
+        try await refreshRigState(authenticationOwnership: authenticationOwnership)
+        await refreshRigControlsAutomatically(authenticationOwnership: authenticationOwnership)
+        try requireCurrentAuthentication(authenticationOwnership)
+        do {
+            try await refreshDigitalSnapshot(authenticationOwnership: authenticationOwnership)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
             presentNotice("FT8/FT4 暂不可用：\(error.localizedDescription)")
         }
+        try requireCurrentAuthentication(authenticationOwnership)
         phase = .ready
         startPolling()
         scheduleCredentialRefresh()
@@ -1397,8 +1561,8 @@ final class RadioLiteSession: ObservableObject {
             scheduleMediaRetry()
         }
         Task { [weak self] in
-            await self?.refreshLogs()
-            await self?.refreshUsers()
+            await self?.refreshLogs(authenticationOwnership: authenticationOwnership)
+            await self?.refreshUsers(authenticationOwnership: authenticationOwnership)
         }
     }
 
@@ -1660,9 +1824,10 @@ final class RadioLiteSession: ObservableObject {
                 }
 
                 if case .device(let device) = self.credential,
-                   device.accessExpiresAtMs <= self.nowMs() + 30_000 {
+                   self.credentialNeedsRefresh(device) {
                     do {
-                        try await self.refreshCredential(reconnectOwnership: ownership)
+                        try await self.refreshCredential()
+                        try self.requireCurrentReconnect(ownership)
                     } catch {
                         switch RadioLiteReconnectFailurePolicy.disposition(
                             for: error,
@@ -1748,6 +1913,15 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
+    private func requireCurrentAuthentication(
+        _ ownership: RadioLiteAuthenticationOwnership
+    ) throws {
+        try Task.checkCancellation()
+        guard authenticationOwnershipState.isCurrent(ownership) else {
+            throw CancellationError()
+        }
+    }
+
     private func clearReconnect(_ ownership: RadioLiteReconnectOwnership) {
         guard reconnectOwnershipState.complete(ownership) else { return }
         reconnectTask = nil
@@ -1758,11 +1932,33 @@ final class RadioLiteSession: ObservableObject {
         reconnectOwnership: RadioLiteReconnectOwnership
     ) {
         guard reconnectOwnershipState.isCurrent(reconnectOwnership) else { return }
+        let storedLogin = server.flatMap { server in
+            credential.map { credential in
+                RadioLiteStoredLogin(
+                    serverAddress: server.displayAddress,
+                    credential: credential,
+                    username: username
+                )
+            }
+        }
         clearReconnect(reconnectOwnership)
-        stopLocalTransmit()
+        authenticationOwnershipState.invalidate()
+        credentialPersistenceRetryTask?.cancel()
+        credentialPersistenceRetryTask = nil
+        credentialAccountOwnershipState.invalidate()
+        intentionalDisconnect = true
+        _ = stopLocalTransmit()
+        stopReceiveAudio()
+        cancelRuntimeTasks()
+        control.disconnect()
+        media.disconnect()
+        clearAuthenticatedState()
+        if let storedLogin {
+            try? credentialStore.delete(ifMatching: storedLogin)
+        }
         phase = .signedOut
         errorMessage = "设备配对刷新失败，请重新配对：\(error.localizedDescription)"
-        try? credentialStore.delete()
+        intentionalDisconnect = false
     }
 
     private func reconnectChannels(
@@ -1837,11 +2033,96 @@ final class RadioLiteSession: ObservableObject {
         guard case .device(let device) = credential else { return }
         credentialRefreshTask = Task { [weak self] in
             guard let self else { return }
-            let delay = max(1, Double(device.accessExpiresAtMs - self.nowMs() - 60_000) / 1_000)
+            let hasPendingCommit = self.server.map {
+                self.credentialRefreshCoordinator.hasPendingCommit(
+                    server: $0,
+                    deviceId: device.deviceId
+                )
+            } ?? false
+            let delay = hasPendingCommit
+                ? 1
+                : max(1, Double(device.accessExpiresAtMs - self.nowMs() - 60_000) / 1_000)
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             await self.refreshCredentialAndReconnect()
         }
+    }
+
+    private func scheduleCredentialPersistenceRetry(
+        server: RadioLiteServer,
+        credential: RadioLiteDeviceCredentials,
+        username: String?,
+        expectedRequest: RadioLiteCredentialRefreshRequest,
+        authenticationOwnership: RadioLiteAuthenticationOwnership
+    ) {
+        credentialPersistenceRetryTask?.cancel()
+        credentialPersistenceRetryTask = Task { [weak self] in
+            guard let self else { return }
+            var delay = 1.0
+            while !Task.isCancelled,
+                  self.authenticationOwnershipState.isCurrent(authenticationOwnership) {
+                do {
+                    let lease = try await self.credentialRefreshCoordinator.refresh(
+                        server: server,
+                        current: credential,
+                        operation: { _ in throw CancellationError() },
+                        commit: { [weak self] request, refreshed in
+                            guard let self,
+                                  self.authenticationOwnershipState.isCurrent(authenticationOwnership),
+                                  request == expectedRequest,
+                                  refreshed == credential else {
+                                throw CancellationError()
+                            }
+                            try self.credentialStore.save(RadioLiteStoredLogin(
+                                serverAddress: server.displayAddress,
+                                credential: .device(refreshed),
+                                username: username
+                            ))
+                        }
+                    )
+                    guard self.authenticationOwnershipState.isCurrent(authenticationOwnership),
+                          lease.request == expectedRequest,
+                          lease.credentials == credential else {
+                        return
+                    }
+                    self.resolveCredentialNotices()
+                    self.credentialPersistenceRetryTask = nil
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.authenticationOwnershipState.isCurrent(authenticationOwnership) else {
+                        return
+                    }
+                    self.presentNotice(
+                        "安全保存暂时失败，正在后台重试：\(error.localizedDescription)",
+                        deduplicationKey: "credential.persistence"
+                    )
+                    try? await Task.sleep(for: .seconds(delay))
+                    delay = min(30, delay * 1.8)
+                }
+            }
+        }
+    }
+
+    private func credentialNeedsRefresh(_ device: RadioLiteDeviceCredentials) -> Bool {
+        if device.accessExpiresAtMs <= nowMs() + 30_000 { return true }
+        guard let server else { return false }
+        return credentialRefreshCoordinator.hasPendingCommit(
+            server: server,
+            deviceId: device.deviceId
+        )
+    }
+
+    private func shouldDiscardStoredCredential(after error: Error) -> Bool {
+        if let httpError = error as? RadioLiteHTTPError, httpError.isUnauthorized {
+            return true
+        }
+        if let keychainError = error as? KeychainTokenStoreError,
+           case .unexpectedData = keychainError {
+            return true
+        }
+        return false
     }
 
     private func scheduleMediaRetry() {
@@ -1952,7 +2233,8 @@ final class RadioLiteSession: ObservableObject {
         let ownership = reconnectOwnershipState.begin()
 
         do {
-            try await refreshCredential(reconnectOwnership: ownership)
+            try await refreshCredential()
+            try requireCurrentReconnect(ownership)
         } catch {
             switch RadioLiteReconnectFailurePolicy.disposition(
                 for: error,
@@ -2011,20 +2293,56 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
-    private func refreshCredential(
-        reconnectOwnership: RadioLiteReconnectOwnership? = nil
-    ) async throws {
+    private func refreshCredential() async throws {
         guard let server, case .device(let current) = credential else { return }
-        let refreshed = try await RadioLiteHTTPClient(server: server).refreshDevice(current)
-        try requireCurrentReconnect(reconnectOwnership)
-        let updated: RadioLiteCredential = .device(refreshed)
-        credential = updated
-        http = RadioLiteHTTPClient(server: server, credential: updated)
-        try credentialStore.save(RadioLiteStoredLogin(
-            serverAddress: server.displayAddress,
-            credential: updated,
-            username: username
-        ))
+        let request = RadioLiteCredentialRefreshRequest(server: server, current: current)
+        guard let accountOwnership = credentialAccountOwnershipState.ownership(
+            matching: request.key
+        ) else {
+            throw CancellationError()
+        }
+        let lease = try await credentialRefreshCoordinator.refresh(
+            server: server,
+            current: current,
+            operation: { credential in
+                try await RadioLiteHTTPClient(server: server).refreshDevice(credential)
+            },
+            commit: { [weak self] refreshRequest, refreshed in
+                guard let self,
+                      self.credentialAccountOwnershipState.isCurrent(accountOwnership),
+                      refreshRequest.matchesCurrentOrRefreshed(
+                        server: self.server,
+                        credential: self.credential,
+                        refreshed: refreshed
+                      ) else {
+                    throw CancellationError()
+                }
+
+                let updated: RadioLiteCredential = .device(refreshed)
+                let stored = RadioLiteStoredLogin(
+                    serverAddress: server.displayAddress,
+                    credential: updated,
+                    username: self.username
+                )
+                do {
+                    try self.credentialStore.save(stored)
+                } catch {
+                    // The server has already rotated the token. Keep the new
+                    // credential alive in memory while the coordinator retains
+                    // the response for a persistence-only retry.
+                    self.credential = updated
+                    self.http = RadioLiteHTTPClient(server: server, credential: updated)
+                    throw error
+                }
+                self.credential = updated
+                self.http = RadioLiteHTTPClient(server: server, credential: updated)
+            }
+        )
+        guard credentialAccountOwnershipState.isCurrent(accountOwnership),
+              lease.request.key == request.key else {
+            throw CancellationError()
+        }
+        resolveCredentialNotices()
     }
 
     private func cancelRuntimeTasks() {
@@ -2040,6 +2358,7 @@ final class RadioLiteSession: ObservableObject {
         transmitEpoch.invalidate()
         receiveAudioEpoch.invalidate()
         reconnectOwnershipState.invalidate()
+        credentialAccountOwnershipState.invalidate()
         radioConfigurationReconnectState.invalidate()
         voicePTTReceiveRestoreState.invalidate()
         controlHeartbeatTask = nil
@@ -2054,6 +2373,42 @@ final class RadioLiteSession: ObservableObject {
         tuningStartupTask = nil
         receiveAudioStartupTask = nil
         receiveAudioStartupOwnership = nil
+    }
+
+    private func prepareForAuthentication() {
+        credentialPersistenceRetryTask?.cancel()
+        credentialPersistenceRetryTask = nil
+        intentionalDisconnect = true
+        _ = stopLocalTransmit()
+        stopReceiveAudio()
+        cancelRuntimeTasks()
+        control.disconnect()
+        media.disconnect()
+        clearAuthenticatedState()
+        intentionalDisconnect = false
+    }
+
+    private func clearAuthenticatedState() {
+        server = nil
+        credential = nil
+        http = nil
+        principal = nil
+        username = nil
+        radios = []
+        selectedRadioId = nil
+        controlToken = nil
+        controlExpiresAtMs = nil
+        rigState = nil
+        invalidateRigControlCatalogue()
+        decodeBatches = []
+        callQueue = nil
+        automaticQSO = nil
+        qsos = []
+        qsoTotal = 0
+        grids = []
+        users = []
+        issuedPairingCode = nil
+        resetNotices()
     }
 
     private func clearRadioState() {
@@ -2103,6 +2458,11 @@ final class RadioLiteSession: ObservableObject {
 
     private func resolveModeNotices() {
         noticeState.resolve(keysWithPrefix: "rig.mode.")
+        noticeMessage = noticeState.message
+    }
+
+    private func resolveCredentialNotices() {
+        noticeState.resolve(keysWithPrefix: "credential.")
         noticeMessage = noticeState.message
     }
 

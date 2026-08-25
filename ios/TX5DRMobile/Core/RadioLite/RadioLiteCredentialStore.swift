@@ -56,4 +56,11 @@ struct RadioLiteCredentialStore: Sendable {
             throw KeychainTokenStoreError.status(status)
         }
     }
+
+    @discardableResult
+    func delete(ifMatching expected: RadioLiteStoredLogin) throws -> Bool {
+        guard try load() == expected else { return false }
+        try delete()
+        return true
+    }
 }
