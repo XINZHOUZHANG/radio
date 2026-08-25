@@ -48,7 +48,8 @@ final class RadioLiteMediaFrameTests: XCTestCase {
     }
 
     func testDecodesSpectrumSourceCapability() throws {
-        let data = Data(#"{
+        let data = Data(#"""
+        {
           "available": true,
           "source": "audio-fft",
           "simulated": false,
@@ -56,7 +57,8 @@ final class RadioLiteMediaFrameTests: XCTestCase {
           "maxBins": 512,
           "maxFps": 5,
           "spanHz": 8000
-        }"#.utf8)
+        }
+        """#.utf8)
 
         let capability = try JSONDecoder().decode(RadioLiteSpectrumCapability.self, from: data)
 
