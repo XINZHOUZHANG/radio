@@ -3,11 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 
 import { DeviceStore } from "../src/auth/device-store.ts";
 import { SessionStore } from "../src/auth/session-store.ts";
 import { UserStore } from "../src/auth/user-store.ts";
+import { DummyDigitalWorker } from "../src/digital/dummy-worker.ts";
 import { parseAdif } from "../src/log/adif.ts";
 import { decodeMediaFrame, encodeMediaFrame, MediaKind } from "../src/media/frame.ts";
 import type { MediaPolicy } from "../src/media/adaptive-policy.ts";
@@ -66,6 +67,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
         close: async () => undefined,
       };
     },
+    digitalWorkerFactory: () => new DummyDigitalWorker({ playbackDelayMs: 0 }),
   });
   const address = await service.listen();
   context.after(() => service.close());
@@ -240,6 +242,52 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.frequencyHz, 7_074_000);
 
   reply = await sendJsonAndReceive(webSocket, {
+    t: "digital.snapshot.get",
+    radioId: "main",
+  });
+  assert.equal(reply.t, "digital.snapshot", JSON.stringify(reply));
+  assert.equal(reply.decodes.revision, 0);
+  assert.equal(reply.queue.entries.length, 0);
+
+  reply = await sendJsonUntil(webSocket, {
+    t: "digital.queue.add.manual",
+    radioId: "main",
+    controlToken,
+    targetCallsign: "JA1ABC",
+    targetGrid: "PM95",
+    mode: "FT8",
+    audioFrequencyHz: 1_300,
+    txParity: "odd",
+    commandId: "digital-add-1",
+  }, "digital.queue.added");
+  assert.equal(reply.commandId, "digital-add-1");
+  assert.equal(reply.entry.targetCallsign, "JA1ABC");
+  assert.equal(reply.entry.status, "queued");
+
+  reply = await sendJsonUntil(webSocket, {
+    t: "digital.auto.stop",
+    radioId: "main",
+    controlToken,
+    commandId: "digital-stop-1",
+  }, "digital.auto.stopped");
+  assert.equal(reply.commandId, "digital-stop-1");
+  assert.equal(reply.stopped.targetCallsign, "JA1ABC");
+  assert.equal(reply.queue.entries.length, 0);
+  assert.equal(rig.ptt, false);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "tx.start",
+    radioId: "main",
+    controlToken,
+    mode: "digital",
+    commandId: "unsafe-digital-carrier",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.code, "invalid_command");
+  assert.match(reply.message, /FT8\/FT4 queue/u);
+  assert.equal(rig.ptt, false);
+
+  reply = await sendJsonAndReceive(webSocket, {
     t: "tx.start",
     radioId: "main",
     controlToken,
@@ -381,14 +429,24 @@ function postJson(
 
 function nextJsonMessage(webSocket: WebSocket): Promise<any> {
   return new Promise((resolve, reject) => {
-    webSocket.once("message", (data) => {
+    const onMessage = (data: RawData) => {
+      cleanup();
       try {
         resolve(JSON.parse(data.toString()));
       } catch (error) {
         reject(error);
       }
-    });
-    webSocket.once("error", reject);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      webSocket.off("message", onMessage);
+      webSocket.off("error", onError);
+    };
+    webSocket.once("message", onMessage);
+    webSocket.once("error", onError);
   });
 }
 
@@ -398,16 +456,57 @@ function sendJsonAndReceive(webSocket: WebSocket, value: unknown): Promise<any> 
   return response;
 }
 
+function sendJsonUntil(webSocket: WebSocket, value: unknown, expectedType: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (data: RawData, isBinary: boolean) => {
+      if (isBinary) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(data.toString());
+        if (parsed.t === expectedType) {
+          cleanup();
+          resolve(parsed);
+        }
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      webSocket.off("message", onMessage);
+      webSocket.off("error", onError);
+    };
+    webSocket.on("message", onMessage);
+    webSocket.on("error", onError);
+    webSocket.send(JSON.stringify(value));
+  });
+}
+
 function nextBinaryMessage(webSocket: WebSocket): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    webSocket.once("message", (data, isBinary) => {
+    const onMessage = (data: RawData, isBinary: boolean) => {
+      cleanup();
       if (!isBinary) {
         reject(new Error(`expected binary WebSocket message, received: ${data.toString()}`));
         return;
       }
       resolve(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
-    });
-    webSocket.once("error", reject);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      webSocket.off("message", onMessage);
+      webSocket.off("error", onError);
+    };
+    webSocket.once("message", onMessage);
+    webSocket.once("error", onError);
   });
 }
 

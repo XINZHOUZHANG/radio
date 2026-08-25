@@ -75,6 +75,11 @@ or `text/plain`.
 radio commands require the per-radio `controlToken` returned by
 `control.acquire`. `tx.start` returns a separate high-entropy `transmitToken`.
 
+Clients may use `tx.start` only for `voice` and `tuning`. FT8/FT4 transmission
+must go through the digital queue below; the server rejects a raw client
+`tx.start` with `mode: "digital"` so a client cannot create an unmodulated
+digital carrier outside UTC scheduling and the automatic safety controller.
+
 Voice transmit startup is deliberately ordered as follows:
 
 1. Open and authenticate `/ws/media` from the same browser session or device.
@@ -89,7 +94,48 @@ Voice transmit startup is deliberately ordered as follows:
 The server refuses voice PTT without a ready same-principal media subscription.
 It de-keys automatically if binding does not arrive, the media socket closes,
 the worker fails, a heartbeat expires, or the continuous-transmit limit is
-reached. Digital and tuning transmissions do not accept microphone binding.
+reached. Tuning transmissions do not accept microphone binding.
+
+## FT8/FT4 control
+
+The server commits one immutable decode batch only after a UTC slot finishes.
+Each decode has a stable ID derived from radio, mode, slot, normalized message
+and audio frequency. Duplicate native decode passes are collapsed before the
+batch is broadcast as `digital.decode.batch`; clients therefore do not reorder
+the visible list for every individual decoder result.
+
+Read the current digital state with:
+
+```json
+{"t":"digital.snapshot.get","radioId":"main"}
+```
+
+The `digital.snapshot` reply contains recent decode batches, the call queue and
+the active automatic-QSO state. Queue mutations require the same control lease
+used for CAT commands:
+
+```json
+{"t":"digital.queue.add.decode","radioId":"main","controlToken":"...","decodeId":"decode_...","commandId":"q1"}
+{"t":"digital.queue.add.manual","radioId":"main","controlToken":"...","targetCallsign":"JA1ABC","targetGrid":"PM95","mode":"FT8","audioFrequencyHz":1300,"txParity":"odd","commandId":"q2"}
+{"t":"digital.queue.skip","radioId":"main","controlToken":"...","commandId":"q3"}
+{"t":"digital.queue.remove","radioId":"main","controlToken":"...","entryId":"call_...","commandId":"q4"}
+{"t":"digital.auto.stop","radioId":"main","controlToken":"...","requeue":false,"commandId":"q5"}
+```
+
+Adding a selected CQ automatically chooses the opposite even/odd transmit slot.
+Manual calls specify parity explicitly. `targetGrid` and `requeue` are optional.
+The control connection must continue its ordinary `control.heartbeat` while an
+automatic QSO is active; closing it immediately cancels prepared audio, clears
+that owner's queue entries and de-keys any active digital transmission.
+
+The automatic caller exchange is server-owned: grid call, received report,
+R-report, RR73/73 and final 73. Missing replies cause bounded retransmission and
+then a visible `failed` state. A successful final transmission appends one
+`FT8_AUTO` or `FT4_AUTO` record to ADIF before broadcasting
+`digital.log.created`. Other server events are `digital.queue`, `digital.qso`,
+`digital.tx.scheduled`, `digital.tx.started`, `digital.tx.stopped` and
+`digital.error`. Clients should match command replies by `commandId`, because
+events can arrive between a command and its reply.
 
 ## Media control messages
 

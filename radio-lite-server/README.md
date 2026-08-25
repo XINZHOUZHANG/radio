@@ -46,9 +46,25 @@ The logging milestone adds a database-free station log:
   authentication for the native iOS app.
 
 The ADIF import endpoint accepts at most 16 MiB per request, and the service
-refuses to load a station log larger than 256 MiB. FT8/FT4 DSP, the automatic
-QSO state machine and the SwiftUI Radio Lite adapter are the next implementation
-slices; see the design document for their exact boundaries.
+refuses to load a station log larger than 256 MiB.
+
+The digital-control milestone now includes:
+
+- exact UTC FT8 (15 s) and FT4 (7.5 s) slot calculation on the server;
+- immutable per-slot decode batches with stable IDs and duplicate suppression,
+  so the iOS list updates once per cycle instead of jumping per decode;
+- common CQ, grid, signal-report, R-report, RRR, RR73 and 73 parsing;
+- per-radio call queues with manual/selected-decode add, skip, remove and stop;
+- a bounded automatic caller QSO state machine with retry failure states;
+- server-timed encode/playback through an injectable native-worker contract;
+- digital/voice/internal-tuner mutual exclusion and automatic PTT OFF on worker,
+  control or playback failure; and
+- automatic FT8/FT4 ADIF append after the final 73, with duplicate protection.
+
+Hamlib Dummy profiles use the deterministic dummy digital worker for end-to-end
+tests. A real profile currently requires a native digital worker supplied via
+`digitalWorkerFactory`; the Debian `wsjtx-lib` process adapter and shared audio
+bridge are the next server slice. The native SwiftUI adapter follows that slice.
 
 On Debian 13, real audio currently requires `alsa-utils` or
 `pulseaudio-utils`, plus `opus-tools`. These remain operating-system packages

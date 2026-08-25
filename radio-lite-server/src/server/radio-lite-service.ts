@@ -33,6 +33,9 @@ import {
 import { SyntheticMediaWorker } from "../media/synthetic-media-worker.ts";
 import { SystemMediaWorker } from "../media/system-media-worker.ts";
 import { AdifLogStore } from "../log/adif-log-store.ts";
+import { DigitalRadioHub, DigitalWorkerUnavailableError } from "../digital/hub.ts";
+import { isDigitalMode } from "../digital/types.ts";
+import type { DigitalWorkerFactory } from "../digital/worker.ts";
 
 export type RadioLiteServiceOptions = {
   dataDirectory: string;
@@ -46,6 +49,7 @@ export type RadioLiteServiceOptions = {
   runtimeFactory?: RadioRuntimeFactory;
   hardwareDiscovery?: HardwareDiscovery;
   mediaWorkerFactory?: MediaWorkerFactory;
+  digitalWorkerFactory?: DigitalWorkerFactory;
   logStore?: AdifLogStore;
   logPath?: string;
 };
@@ -73,11 +77,13 @@ export class RadioLiteService {
   readonly #runtimes: RadioRuntimeRegistry;
   readonly #media: MediaHub;
   readonly #log: AdifLogStore;
+  readonly #digital: DigitalRadioHub;
   readonly #hardwareDiscovery: HardwareDiscovery;
   readonly #secureCookies: boolean;
   #server: Server | null = null;
   #webSocketServer: WebSocketServer | null = null;
   readonly #webSockets = new Set<WebSocket>();
+  readonly #controlWebSockets = new Set<WebSocket>();
   #initialized = false;
   #setupCode: string | null = null;
 
@@ -137,6 +143,14 @@ export class RadioLiteService {
       options.logPath ?? join(options.dataDirectory, "station-log.adif"),
       { now: this.#now },
     );
+    this.#digital = new DigitalRadioHub({
+      radios: () => this.#radios.snapshot(),
+      runtimes: this.#runtimes,
+      logStore: this.#log,
+      workerFactory: options.digitalWorkerFactory,
+      now: this.#now,
+      onEvent: (event) => this.#broadcastControl(event),
+    });
     this.#hardwareDiscovery = options.hardwareDiscovery ?? new HardwareDiscovery();
     this.#secureCookies = options.secureCookies === true;
   }
@@ -227,6 +241,8 @@ export class RadioLiteService {
       webSocket.terminate();
     }
     this.#webSockets.clear();
+    this.#controlWebSockets.clear();
+    await this.#digital.close();
     await this.#media.close();
     await this.#runtimes.close();
     if (webSocketServer !== null) {
@@ -287,6 +303,9 @@ export class RadioLiteService {
         },
         radios: this.#radios.snapshot().radios,
       });
+      if (channel === "control") {
+        this.#controlWebSockets.add(webSocket);
+      }
       if (channel === "media") {
         this.#media.connect({
           id: connectionOwnerId,
@@ -406,11 +425,15 @@ export class RadioLiteService {
         clearTimeout(expiryTimer);
       }
       this.#webSockets.delete(webSocket);
+      this.#controlWebSockets.delete(webSocket);
       if (channel === "media") {
         void this.#media.disconnect(connectionOwnerId).catch(() => undefined);
       } else {
         this.#media.revokeOwner(connectionOwnerId);
-        void this.#runtimes.ownerDisconnected(connectionOwnerId).catch(() => undefined);
+        void (async () => {
+          await this.#digital.ownerDisconnected(connectionOwnerId).catch(() => undefined);
+          await this.#runtimes.ownerDisconnected(connectionOwnerId).catch(() => undefined);
+        })();
       }
     });
     webSocket.once("error", () => {
@@ -523,6 +546,7 @@ export class RadioLiteService {
         const result = await runtime.acquireControl(ownerId, user, message.force === true);
         if (result.displacedOwnerId !== null) {
           this.#media.revokeOwner(result.displacedOwnerId);
+          await this.#digital.ownerDisconnected(result.displacedOwnerId);
         }
         sendWebSocketJson(webSocket, {
           t: "control.acquired",
@@ -548,6 +572,7 @@ export class RadioLiteService {
       }
       if (message.t === "control.release") {
         exactMessageKeys(message, ["t", "radioId", "controlToken"]);
+        await this.#digital.ownerDisconnected(ownerId);
         await runtime.releaseControl(
           ownerId,
           messageText(message.controlToken, "controlToken", 128),
@@ -588,10 +613,127 @@ export class RadioLiteService {
         sendWebSocketJson(webSocket, { t: "rig.mode.confirmed", radioId, commandId, ...result });
         return;
       }
+      if (message.t === "digital.snapshot.get") {
+        exactMessageKeys(message, ["t", "radioId"]);
+        const digital = await this.#digital.get(radioId);
+        sendWebSocketJson(webSocket, {
+          t: "digital.snapshot",
+          radioId,
+          decodes: digital.decodeSnapshot(),
+          queue: digital.queueSnapshot(),
+          qso: digital.qsoSnapshot(),
+        });
+        return;
+      }
+      const digitalContext = () => ({
+        ownerId,
+        user,
+        controlToken: controlToken(),
+      });
+      if (message.t === "digital.queue.add.decode") {
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "controlToken", "decodeId", "commandId"],
+        );
+        const digital = await this.#digital.get(radioId);
+        const added = await digital.enqueueDecode(
+          digitalContext(),
+          messageText(message.decodeId, "decodeId", 128),
+        );
+        sendWebSocketJson(webSocket, {
+          t: "digital.queue.added", radioId, commandId, ...added,
+        });
+        return;
+      }
+      if (message.t === "digital.queue.add.manual") {
+        exactMessageKeys(
+          message,
+          [
+            "t", "radioId", "controlToken", "targetCallsign", "targetGrid", "mode",
+            "audioFrequencyHz", "txParity", "commandId",
+          ],
+          ["targetGrid"],
+        );
+        if (!isDigitalMode(message.mode)) {
+          throw new Error("digital mode must be FT8 or FT4");
+        }
+        if (message.txParity !== "even" && message.txParity !== "odd") {
+          throw new Error("txParity must be even or odd");
+        }
+        const digital = await this.#digital.get(radioId);
+        const added = await digital.enqueueManual(digitalContext(), {
+          targetCallsign: messageText(message.targetCallsign, "targetCallsign", 32),
+          targetGrid: optionalMessageText(message.targetGrid, "targetGrid", 6),
+          mode: message.mode,
+          audioFrequencyHz: safeInteger(message.audioFrequencyHz, "audioFrequencyHz"),
+          txParity: message.txParity,
+        });
+        sendWebSocketJson(webSocket, {
+          t: "digital.queue.added", radioId, commandId, ...added,
+        });
+        return;
+      }
+      if (message.t === "digital.queue.skip") {
+        exactMessageKeys(message, ["t", "radioId", "controlToken", "commandId"]);
+        const digital = await this.#digital.get(radioId);
+        const active = await digital.skip(digitalContext());
+        sendWebSocketJson(webSocket, {
+          t: "digital.queue.skipped",
+          radioId,
+          commandId,
+          active,
+          queue: digital.queueSnapshot(),
+          qso: digital.qsoSnapshot(),
+        });
+        return;
+      }
+      if (message.t === "digital.queue.remove") {
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "controlToken", "entryId", "commandId"],
+        );
+        const digital = await this.#digital.get(radioId);
+        const removed = await digital.remove(
+          digitalContext(),
+          messageText(message.entryId, "entryId", 128),
+        );
+        sendWebSocketJson(webSocket, {
+          t: "digital.queue.removed",
+          radioId,
+          commandId,
+          removed,
+          queue: digital.queueSnapshot(),
+          qso: digital.qsoSnapshot(),
+        });
+        return;
+      }
+      if (message.t === "digital.auto.stop") {
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "controlToken", "requeue", "commandId"],
+          ["requeue"],
+        );
+        if (message.requeue !== undefined && typeof message.requeue !== "boolean") {
+          throw new Error("requeue must be boolean");
+        }
+        const digital = await this.#digital.get(radioId);
+        const stopped = await digital.stop(digitalContext(), message.requeue === true);
+        sendWebSocketJson(webSocket, {
+          t: "digital.auto.stopped",
+          radioId,
+          commandId,
+          stopped,
+          queue: digital.queueSnapshot(),
+        });
+        return;
+      }
       if (message.t === "tx.start") {
         exactMessageKeys(message, ["t", "radioId", "controlToken", "mode", "commandId"]);
         if (message.mode !== "voice" && message.mode !== "digital" && message.mode !== "tuning") {
           throw new Error("transmit mode must be voice, digital or tuning");
+        }
+        if (message.mode === "digital") {
+          throw new Error("digital transmission must be scheduled through the FT8/FT4 queue");
         }
         if (
           message.mode === "voice" &&
@@ -666,6 +808,14 @@ export class RadioLiteService {
         code: mapped.code,
         message: mapped.message,
       });
+    }
+  }
+
+  #broadcastControl(value: unknown): void {
+    for (const webSocket of this.#controlWebSockets) {
+      if (webSocket.readyState === WebSocket.OPEN && webSocket.bufferedAmount <= 256 * 1_024) {
+        sendWebSocketJson(webSocket, value);
+      }
     }
   }
 
@@ -811,6 +961,7 @@ export class RadioLiteService {
           throw new HttpError(409, "hardware_tx_confirmation_required", "confirm the exact radio id to enable hardware TX");
         }
         const saved = await this.#radios.upsert(profile);
+        await this.#digital.invalidate(saved.id);
         await this.#runtimes.invalidate(saved.id);
         sendJson(response, 200, { radio: saved });
         return;
@@ -1300,6 +1451,9 @@ function nonNegativeNumber(value: unknown, field: string): number {
 }
 
 function mapControlError(error: unknown): { code: string; message: string } {
+  if (error instanceof DigitalWorkerUnavailableError) {
+    return { code: "digital_worker_unavailable", message: error.message };
+  }
   if (error instanceof MediaSubscriptionRequiredError) {
     return { code: "media_required", message: error.message };
   }
