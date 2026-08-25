@@ -9,6 +9,7 @@ on:
       - ios/**
       - docs/tx5dr/**
       - scripts/check-ios-tx5dr-contract.mjs
+      - scripts/check-ios-radio-lite-contract.mjs
       - scripts/tests/**
       - .github/workflows/ios.yml
   pull_request:
@@ -16,6 +17,7 @@ on:
       - ios/**
       - docs/tx5dr/**
       - scripts/check-ios-tx5dr-contract.mjs
+      - scripts/check-ios-radio-lite-contract.mjs
       - scripts/tests/**
       - .github/workflows/ios.yml
   workflow_dispatch:
@@ -35,6 +37,7 @@ jobs:
           node-version: 22
       - run: node --test scripts/tests/*.test.mjs
       - run: node scripts/check-ios-tx5dr-contract.mjs
+      - run: node scripts/check-ios-radio-lite-contract.mjs
 
   xcode-build-and-test:
     runs-on: macos-15

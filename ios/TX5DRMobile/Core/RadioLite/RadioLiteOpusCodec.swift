@@ -29,6 +29,7 @@ final class RadioLiteOpusCodec {
 
     private var encoder: AVAudioConverter
     private let decoder: AVAudioConverter
+    private let opusFramesPerPacket: UInt32
     private(set) var bitrate: Int
 
     init(bitrate: Int = 20_000) throws {
@@ -38,26 +39,36 @@ final class RadioLiteOpusCodec {
             channels: 1,
             interleaved: false
         ) else { throw RadioLiteOpusError.formatUnavailable }
-        var description = AudioStreamBasicDescription(
-            mSampleRate: Self.sampleRate,
-            mFormatID: kAudioFormatOpus,
-            mFormatFlags: 0,
-            mBytesPerPacket: 0,
-            mFramesPerPacket: UInt32(Self.samplesPerFrame),
-            mBytesPerFrame: 0,
-            mChannelsPerFrame: 1,
-            mBitsPerChannel: 0,
-            mReserved: 0
-        )
-        guard let opus = AVAudioFormat(streamDescription: &description),
-              let encoder = AVAudioConverter(from: pcm, to: opus),
-              let decoder = AVAudioConverter(from: opus, to: pcm) else {
+        var selected: (AVAudioFormat, AVAudioConverter, AVAudioConverter, UInt32)?
+        // Some iOS releases expose Opus only with its 48 kHz RTP clock even when
+        // the decoded PCM is 16 kHz. AudioConverter performs that rate change.
+        for opusRate in [Self.sampleRate, 48_000] {
+            var description = AudioStreamBasicDescription(
+                mSampleRate: opusRate,
+                mFormatID: kAudioFormatOpus,
+                mFormatFlags: 0,
+                mBytesPerPacket: 0,
+                mFramesPerPacket: UInt32(opusRate * 0.02),
+                mBytesPerFrame: 0,
+                mChannelsPerFrame: 1,
+                mBitsPerChannel: 0,
+                mReserved: 0
+            )
+            if let opus = AVAudioFormat(streamDescription: &description),
+               let encoder = AVAudioConverter(from: pcm, to: opus),
+               let decoder = AVAudioConverter(from: opus, to: pcm) {
+                selected = (opus, encoder, decoder, description.mFramesPerPacket)
+                break
+            }
+        }
+        guard let selected else {
             throw RadioLiteOpusError.converterUnavailable
         }
         self.pcmFormat = pcm
-        self.opusFormat = opus
-        self.encoder = encoder
-        self.decoder = decoder
+        self.opusFormat = selected.0
+        self.encoder = selected.1
+        self.decoder = selected.2
+        self.opusFramesPerPacket = selected.3
         self.bitrate = Self.clampBitrate(bitrate)
         encoder.bitRate = self.bitrate
         encoder.primeMethod = .none
@@ -131,7 +142,7 @@ final class RadioLiteOpusCodec {
         input.packetCount = 1
         input.packetDescriptions?[0] = AudioStreamPacketDescription(
             mStartOffset: 0,
-            mVariableFramesInPacket: UInt32(Self.samplesPerFrame),
+            mVariableFramesInPacket: opusFramesPerPacket,
             mDataByteSize: UInt32(packet.count)
         )
 

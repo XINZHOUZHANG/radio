@@ -904,6 +904,7 @@ final class RadioLiteSession: ObservableObject {
                     )
                 } catch {
                     self.stopLocalTransmit()
+                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     self.errorMessage = "发射心跳中断：\(error.localizedDescription)"
                     return
                 }
@@ -962,6 +963,7 @@ final class RadioLiteSession: ObservableObject {
                         throw RadioLiteSessionError.notConnected
                     }
                     try await self.reconnectChannels(server: server, credential: credential)
+                    self.scheduleCredentialRefresh()
                     self.noticeMessage = "已恢复连接"
                     self.reconnectTask = nil
                     return

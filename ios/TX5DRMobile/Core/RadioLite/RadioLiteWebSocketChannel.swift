@@ -208,13 +208,16 @@ final class RadioLiteWebSocketChannel {
             if type == "command.error" {
                 return commandMatches && (item.requestType == nil || item.requestType == requestType)
             }
+            if type == "media.error" {
+                return commandMatches
+            }
             return commandMatches && type.map(item.expectedTypes.contains) == true
         }) {
             let id = match.key
             let item = match.value
             pending.removeValue(forKey: id)
             item.timeoutTask?.cancel()
-            if type == "command.error" {
+            if type == "command.error" || type == "media.error" {
                 item.continuation.resume(throwing: RadioLiteSocketError.command(
                     code: value["code"]?.stringValue ?? "command_error",
                     message: value["message"]?.stringValue ?? "服务器拒绝了操作"
