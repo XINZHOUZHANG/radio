@@ -107,7 +107,7 @@ struct RadioLiteFT8View: View {
                     ProgressView(value: snapshot.progress)
                         .tint(displayColor(state))
                     HStack {
-                        Text("剩余 \(snapshot.remainingSeconds, specifier: \"%.1f\") 秒")
+                        Text("剩余 \(snapshot.remainingSeconds, specifier: "%.1f") 秒")
                             .monospacedDigit()
                         Spacer()
                         Label(displayLabel(state), systemImage: displaySymbol(state))
