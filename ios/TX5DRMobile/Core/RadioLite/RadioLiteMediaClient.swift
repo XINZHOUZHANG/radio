@@ -14,6 +14,7 @@ final class RadioLiteMediaClient: ObservableObject {
 
     var onDisconnect: ((Error) -> Void)?
     var onUplinkFailure: ((Error) -> Void)?
+    var onReconnectRequired: ((Error) -> Void)?
 
     let audio: RadioLiteAudioEngine
 
@@ -80,7 +81,9 @@ final class RadioLiteMediaClient: ObservableObject {
         subscribedRadioId = radioId
         self.policy = policy
         audio.setOpusBitrate(policy.opusBitrate)
-        try audio.startMonitoring()
+        if AudioRuntimePolicy.startsMonitoringOnMediaSubscription {
+            try audio.startMonitoring()
+        }
     }
 
     func unsubscribe() async {
@@ -199,6 +202,9 @@ final class RadioLiteMediaClient: ObservableObject {
                 stopUplink()
                 audio.stopMicrophoneCapture()
                 onUplinkFailure?(error)
+            }
+            if value["reconnectRequired"]?.boolValue == true {
+                onReconnectRequired?(error)
             }
         case "pong":
             if let started = pingStartedAt {

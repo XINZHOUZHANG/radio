@@ -1,4 +1,6 @@
+import type { PttMethod } from "../config/types.ts";
 import type { RigResponse } from "./extended-protocol.ts";
+import { RigReportError } from "./transport.ts";
 
 export type RigRequester = {
   request(command: string): Promise<RigResponse>;
@@ -11,24 +13,31 @@ export type HamlibRigState = {
   ptt: boolean;
 };
 
+export type HamlibRigOptions = {
+  pttMethod?: PttMethod;
+};
+
 export class HamlibRig {
   readonly #transport: RigRequester;
+  readonly #unavailablePttIsSafe: boolean;
+  #lastCommandedPtt = false;
 
-  constructor(transport: RigRequester) {
+  constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
     this.#transport = transport;
+    this.#unavailablePttIsSafe = options.pttMethod === "None";
   }
 
   async readState(): Promise<HamlibRigState> {
     const [frequency, mode, ptt] = await Promise.all([
       this.#transport.request("\\get_freq"),
       this.#transport.request("\\get_mode"),
-      this.#transport.request("\\get_ptt"),
+      this.#readPtt(),
     ]);
     return {
       frequencyHz: integerField(frequency, "Frequency"),
       mode: tokenField(mode, "Mode"),
       passbandHz: integerField(mode, "Passband"),
-      ptt: booleanField(ptt, "PTT"),
+      ptt,
     };
   }
 
@@ -66,12 +75,40 @@ export class HamlibRig {
     if (typeof enabled !== "boolean") {
       throw new Error("PTT state must be boolean");
     }
-    await this.#transport.request(`\\set_ptt ${enabled ? 1 : 0}`);
-    const confirmed = booleanField(await this.#transport.request("\\get_ptt"), "PTT");
+    try {
+      await this.#transport.request(`\\set_ptt ${enabled ? 1 : 0}`);
+    } catch (error) {
+      if (!this.#isUnavailablePtt(error)) {
+        throw error;
+      }
+      this.#lastCommandedPtt = enabled;
+      return enabled;
+    }
+    this.#lastCommandedPtt = enabled;
+    const confirmed = await this.#readPtt();
     if (confirmed !== enabled) {
       throw new Error("PTT read-back mismatch");
     }
     return confirmed;
+  }
+
+  async #readPtt(): Promise<boolean> {
+    try {
+      const confirmed = booleanField(await this.#transport.request("\\get_ptt"), "PTT");
+      this.#lastCommandedPtt = confirmed;
+      return confirmed;
+    } catch (error) {
+      if (this.#isUnavailablePtt(error)) {
+        return this.#lastCommandedPtt;
+      }
+      throw error;
+    }
+  }
+
+  #isUnavailablePtt(error: unknown): boolean {
+    return this.#unavailablePttIsSafe &&
+      error instanceof RigReportError &&
+      error.report === -11;
   }
 
   async setInternalTuner(enabled: boolean): Promise<boolean> {

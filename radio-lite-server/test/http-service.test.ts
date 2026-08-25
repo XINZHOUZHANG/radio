@@ -78,10 +78,12 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal((await response.json()).status, "ok");
   assert.equal(service.setupCode, "123456");
 
+  const longPassword = "界".repeat(1_200);
+
   response = await postJson(`${base}/api/v1/setup/initialize`, {
     setupCode: "123456",
     username: "connor",
-    password: "Admin radio password 2026!",
+    password: longPassword,
   });
   assert.equal(response.status, 201);
   const initialized = await response.json();
@@ -89,7 +91,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
 
   response = await postJson(`${base}/api/v1/session/login`, {
     username: "connor",
-    password: "Admin radio password 2026!",
+    password: longPassword,
   });
   assert.equal(response.status, 200);
   const login = await response.json();
@@ -140,7 +142,10 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
   );
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).radio.id, "main");
+  const savedRadio = await response.json();
+  assert.equal(savedRadio.radio.id, "main");
+  assert.deepEqual(savedRadio.radio.ptt, { method: "RIG" });
+  assert.equal(savedRadio.reconnectRequired, true);
 
   response = await fetch(`${base}/api/v1/radios`, { headers: { Cookie: cookie! } });
   assert.equal(response.status, 200);

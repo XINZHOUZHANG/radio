@@ -139,6 +139,24 @@ final class RadioLiteHTTPClient: @unchecked Sendable {
         try await send(method: "GET", path: "/api/v1/radios")
     }
 
+    func hardwareDiscovery() async throws -> RadioLiteHardwareDiscovery {
+        try await send(method: "GET", path: "/api/v1/hardware/discovery")
+    }
+
+    func upsertRadio(
+        _ profile: RadioLiteRadioProfile,
+        confirmHardwareTransmission: Bool
+    ) async throws -> RadioLiteSavedRadioResponse {
+        try await send(
+            method: "POST",
+            path: "/api/v1/radios",
+            body: RadioLiteRadioUpsertRequest(
+                profile: profile,
+                confirmHardwareTransmission: confirmHardwareTransmission
+            )
+        )
+    }
+
     func users() async throws -> [RadioLiteUser] {
         let response: RadioLiteUsersResponse = try await send(method: "GET", path: "/api/v1/users")
         return response.users

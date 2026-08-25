@@ -149,14 +149,25 @@ struct RadioLiteLoginView: View {
                 .keyboardType(.numberPad)
                 .radioLiteInputStyle()
                 .onChange(of: setupCode) { _, value in setupCode = String(value.filter(\.isNumber).prefix(6)) }
+            setupRequirement(setupValidation.setupCodeHint, satisfied: setupValidation.setupCodeIsValid)
             TextField("管理员用户名", text: $username)
                 .focused($focused, equals: .username)
                 .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
                 .radioLiteInputStyle()
+            setupRequirement(setupValidation.usernameHint, satisfied: setupValidation.usernameIsValid)
             SecureField("管理员密码", text: $password)
                 .focused($focused, equals: .password)
                 .radioLiteInputStyle()
+            setupRequirement(setupValidation.passwordHint, satisfied: setupValidation.passwordIsValid)
         }
+    }
+
+    private func setupRequirement(_ text: String, satisfied: Bool) -> some View {
+        Label(text, systemImage: satisfied ? "checkmark.circle.fill" : "exclamationmark.circle")
+            .font(.caption)
+            .foregroundStyle(satisfied ? RadioPalette.accent : RadioPalette.warning)
+            .animation(.easeOut(duration: 0.15), value: satisfied)
     }
 
     private var submitButton: some View {
@@ -185,11 +196,15 @@ struct RadioLiteLoginView: View {
 
     private var canSubmit: Bool {
         guard !session.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        if session.setupRequired { return setupCode.count == 6 && username.count >= 3 && password.count >= 15 }
+        if session.setupRequired { return setupValidation.isValid }
         switch method {
         case .account: return !username.isEmpty && !password.isEmpty
         case .pairing: return pairingCode.count == 6
         }
+    }
+
+    private var setupValidation: RadioLiteSetupValidation {
+        RadioLiteSetupValidation(setupCode: setupCode, username: username, password: password)
     }
 }
 

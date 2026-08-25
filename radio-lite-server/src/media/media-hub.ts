@@ -59,7 +59,7 @@ export type StopVoiceTransmitRequest = {
   radioId: string;
   ownerId: string;
   transmitToken: string;
-  reason: "media_disconnected" | "media_unsubscribed" | "transmit_expired" | "uplink_bind_timeout" | "audio_uplink_failed" | "media_worker_failed";
+  reason: "media_disconnected" | "media_unsubscribed" | "transmit_expired" | "uplink_bind_timeout" | "audio_uplink_failed" | "media_worker_failed" | "media_configuration_changed";
 };
 
 export type RegisteredTransmit = {
@@ -487,6 +487,65 @@ export class MediaHub {
 
   statistics(clientId: string): { droppedFrames: number } {
     return { droppedFrames: this.#client(clientId).droppedFrames };
+  }
+
+  async invalidate(radioId: string): Promise<void> {
+    this.#assertOpen();
+    const starting = this.#startingWorkers.get(radioId);
+    if (starting !== undefined) {
+      await starting.catch(() => undefined);
+    }
+    this.#startingWorkers.delete(radioId);
+
+    const active = [...this.#transmits.values()].filter(
+      (transmit) => transmit.radioId === radioId && transmit.mode === "voice",
+    );
+    await Promise.all(active.map(async (transmit) => {
+      await this.#stopBoundTransmit(
+        transmit.transmitToken,
+        "media_configuration_changed",
+      ).catch((error) => this.#notifyStopFailure(radioId, error));
+    }));
+
+    const error = new Error("radio media configuration changed");
+    this.#digitalPlaybackOwners.delete(radioId);
+    const digitalSubscriptions = this.#digitalAudioSubscriptions.get(radioId);
+    this.#digitalAudioSubscriptions.delete(radioId);
+    if (digitalSubscriptions !== undefined) {
+      for (const subscription of digitalSubscriptions.values()) {
+        if (subscription.closed || subscription.faulted) {
+          continue;
+        }
+        subscription.faulted = true;
+        try {
+          subscription.consumer.fault(error);
+        } catch {
+          // Configuration invalidation remains authoritative if a consumer fails.
+        }
+      }
+    }
+
+    for (const client of this.#subscribers(radioId)) {
+      client.radioId = null;
+      client.radioSlot = null;
+      client.boundTransmitToken = null;
+      client.lastUplinkSequence = null;
+      try {
+        client.transport.sendJson({
+          t: "media.error",
+          code: "media_configuration_changed",
+          message: error.message,
+          reconnectRequired: true,
+        });
+      } catch {
+        // The server-side subscription is already invalidated. A failed
+        // notification must not keep the old worker or rig runtime alive.
+      }
+    }
+
+    const worker = this.#workers.get(radioId);
+    this.#workers.delete(radioId);
+    await worker?.worker.close().catch(() => undefined);
   }
 
   async close(): Promise<void> {

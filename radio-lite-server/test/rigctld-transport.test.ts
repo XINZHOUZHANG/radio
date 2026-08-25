@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { encodeRigCommand, ExtendedResponseParser } from "../src/rig/extended-protocol.ts";
 import { HamlibRig } from "../src/rig/hamlib-rig.ts";
-import { RigctldTransport } from "../src/rig/transport.ts";
+import { RigctldTransport, RigReportError } from "../src/rig/transport.ts";
 
 test("extended protocol parser handles fragmented fields and report framing", () => {
   const parser = new ExtendedResponseParser();
@@ -40,6 +40,52 @@ test("persistent rigctld transport serializes commands and HamlibRig confirms re
   assert.equal(fake.connectionCount(), 1);
   assert.deepEqual(fake.commands.slice(0, 2), ["\\set_freq 7074000", "\\get_freq"]);
 });
+
+test("PTT None caches commanded state when Hamlib rejects get_ptt and set_ptt", async () => {
+  const commands: string[] = [];
+  const requester = {
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_freq") return response("get_freq", { Frequency: "14074000" });
+      if (command === "\\get_mode") return response("get_mode", { Mode: "USB", Passband: "3000" });
+      if (command === "\\get_ptt" || command.startsWith("\\set_ptt ")) {
+        throw new RigReportError(command.slice(1).split(" ")[0], -11);
+      }
+      return response(command.slice(1), {});
+    },
+  };
+  const rig = new HamlibRig(requester, { pttMethod: "None" });
+
+  assert.equal((await rig.readState()).ptt, false);
+  assert.equal(await rig.setPtt(true), true);
+  assert.equal((await rig.readState()).ptt, true);
+  assert.ok(commands.includes("\\set_ptt 1"));
+});
+
+test("real rigs still surface unavailable PTT read-back from Hamlib", async () => {
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      if (command === "\\get_freq") return response("get_freq", { Frequency: "14074000" });
+      if (command === "\\get_mode") return response("get_mode", { Mode: "USB", Passband: "3000" });
+      throw new RigReportError("get_ptt", -11);
+    },
+  }, { pttMethod: "RIG" });
+  await assert.rejects(rig.readState(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -11,
+  );
+  await assert.rejects(rig.setPtt(true), (error: unknown) =>
+    error instanceof RigReportError && error.report === -11,
+  );
+});
+
+function response(command: string, fields: Record<string, string>) {
+  return {
+    command,
+    fields: new Map(Object.entries(fields)),
+    values: [],
+    report: 0,
+  };
+}
 
 async function startFakeRigctld(): Promise<{
   server: Server;

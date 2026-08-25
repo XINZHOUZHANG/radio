@@ -850,7 +850,7 @@ export class RadioLiteService {
         this.#codes.redeem(text(body.setupCode, "setupCode"), "initial_setup", sourceAddress(request));
         const user = await this.#users.initializeAdmin(
           text(body.username, "username"),
-          text(body.password, "password"),
+          passwordText(body.password),
         );
         this.#setupCode = null;
         await this.#audit.append({
@@ -864,7 +864,7 @@ export class RadioLiteService {
         const body = await jsonObject(request, ["username", "password"]);
         const user = await this.#users.authenticate(
           text(body.username, "username"),
-          text(body.password, "password"),
+          passwordText(body.password),
         );
         if (user === null) {
           await this.#audit.append({
@@ -912,7 +912,7 @@ export class RadioLiteService {
         const body = await jsonObject(request, ["username", "password", "role", "canTransmit", "mustChangePassword"], ["canTransmit", "mustChangePassword"]);
         const user = await this.#users.create({
           username: text(body.username, "username"),
-          password: text(body.password, "password"),
+          password: passwordText(body.password),
           role: body.role === "admin" ? "admin" : body.role === "operator" ? "operator" : invalidRole(),
           canTransmit: optionalBoolean(body.canTransmit, "canTransmit"),
           mustChangePassword: optionalBoolean(body.mustChangePassword, "mustChangePassword"),
@@ -972,8 +972,9 @@ export class RadioLiteService {
         }
         const saved = await this.#radios.upsert(profile);
         await this.#digital.invalidate(saved.id);
+        await this.#media.invalidate(saved.id);
         await this.#runtimes.invalidate(saved.id);
-        sendJson(response, 200, { radio: saved });
+        sendJson(response, 200, { radio: saved, reconnectRequired: true });
         return;
       }
       if (method === "GET" && url.pathname === "/api/v1/logs") {
@@ -1325,6 +1326,13 @@ function expiredSessionCookie(secure: boolean): string {
 function text(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length < 1 || value.length > 1_024) {
     throw new HttpError(400, "invalid_request", `${field} must be non-empty text`);
+  }
+  return value;
+}
+
+function passwordText(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1) {
+    throw new HttpError(400, "invalid_request", "password must be non-empty text");
   }
   return value;
 }

@@ -20,7 +20,13 @@ as visual/reference components while migration tests are retired.
   QSO state;
 - server-owned ADIF log list, manual voice records, import/export and worked-grid
   map;
-- administrator account creation and six-digit pairing-code generation.
+- administrator account creation and six-digit pairing-code generation;
+- administrator hardware setup with searchable full `rigctl -l` model catalog,
+  CAT/baud, Hamlib PTT method and PulseAudio/PipeWire/ALSA endpoint selection;
+- non-empty passwords without complexity or character-count rules, with clear
+  setup validation before submission;
+- opt-in speaker playback, recoverable media-only retry and dismiss-once error
+  notices so a temporary iOS audio-route failure does not block radio control.
 
 Voice PTT deliberately removes the microphone input tap and switches the audio
 session back to playback synchronously when the button is released, before it

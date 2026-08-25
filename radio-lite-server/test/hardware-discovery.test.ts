@@ -28,6 +28,12 @@ test("hardware discovery combines installed Hamlib, stable serial and PulseAudio
   assert.equal(result.serialDevices[0].stable, true);
   assert.equal(result.audioInputs[0].id, "radio-in");
   assert.equal(result.audioOutputs[0].id, "radio-out");
+  assert.deepEqual(result.pttMethods, [
+    "RIG", "DTR", "RTS", "Parallel", "CM108", "GPIO", "GPION", "None",
+  ]);
+  assert.deepEqual(result.baudRates, [
+    1_200, 2_400, 4_800, 9_600, 19_200, 38_400, 57_600, 115_200, 230_400,
+  ]);
   assert.deepEqual(result.warnings, []);
 });
 

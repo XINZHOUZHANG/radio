@@ -7,6 +7,7 @@ struct RadioLiteSettingsView: View {
     @State private var showCreateUser = false
     @State private var showPairingCode = false
     @State private var confirmLogout = false
+    @State private var editingRadio: RadioLiteRadioProfile?
 
     var body: some View {
         List {
@@ -46,9 +47,17 @@ struct RadioLiteSettingsView: View {
                     LabeledContent("本站呼号", value: radio.station.callsign)
                     if let grid = radio.station.grid { LabeledContent("本站网格", value: grid) }
                     LabeledContent("CAT", value: connectionText(radio.connection))
+                    LabeledContent("PTT", value: radio.ptt.method.label)
                     LabeledContent("音频输入", value: radio.audioInput.label ?? radio.audioInput.id)
                     LabeledContent("音频输出", value: radio.audioOutput.label ?? radio.audioOutput.id)
                     LabeledContent("硬件发射", value: radio.hardwareTxEnabled || radio.hamlibModelId == 1 ? "允许" : "服务器已禁用")
+                    if session.isAdmin {
+                        Button {
+                            editingRadio = radio
+                        } label: {
+                            Label("编辑电台、PTT 与音频", systemImage: "slider.horizontal.3")
+                        }
+                    }
                 }
                 if session.hasControl {
                     Button("释放控制权", role: .destructive) { Task { await session.releaseControl() } }
@@ -129,6 +138,9 @@ struct RadioLiteSettingsView: View {
         .task { await session.refreshUsers() }
         .refreshable { await session.refreshUsers() }
         .sheet(isPresented: $showCreateUser) { RadioLiteCreateUserView() }
+        .sheet(item: $editingRadio) { radio in
+            RadioLiteDeviceConfigurationView(profile: radio)
+        }
         .sheet(isPresented: $showPairingCode) {
             if let code = session.issuedPairingCode {
                 RadioLitePairingCodeView(code: code)
@@ -175,8 +187,14 @@ private struct RadioLiteCreateUserView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .focused($focused)
-                    SecureField("密码（至少 15 个字符）", text: $password)
+                    SecureField("密码（不能为空）", text: $password)
                         .focused($focused)
+                    Label(
+                        "密码仅需非空，可使用任意字符",
+                        systemImage: password.isEmpty ? "exclamationmark.circle" : "checkmark.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(password.isEmpty ? RadioPalette.warning : RadioPalette.accent)
                 }
                 Section("权限") {
                     Picker("角色", selection: $role) {
@@ -187,7 +205,7 @@ private struct RadioLiteCreateUserView: View {
                     Toggle("首次登录必须修改密码", isOn: $mustChangePassword)
                 }
                 Section {
-                    Text("密码不能包含用户名，也不能使用常见弱密码。服务端使用 Argon2id 保存密码摘要。")
+                    Text("密码仅要求非空，可使用任意字符；服务端仍使用 Argon2id 保存密码摘要，不保存明文密码。")
                         .font(.footnote)
                         .foregroundStyle(RadioPalette.muted)
                 }
@@ -212,8 +230,7 @@ private struct RadioLiteCreateUserView: View {
     private var valid: Bool {
         let name = username.lowercased()
         return name.range(of: "^[a-z0-9][a-z0-9_.-]{2,31}$", options: .regularExpression) != nil
-            && password.count >= 15
-            && password.count <= 128
+            && !password.isEmpty
     }
 
     private func save() async {

@@ -4,12 +4,14 @@ import Foundation
 
 enum RadioLiteAudioError: LocalizedError {
     case codecUnavailable(String)
+    case playbackUnavailable(String)
     case microphonePermissionDenied
     case microphoneUnavailable
 
     var errorDescription: String? {
         switch self {
         case .codecUnavailable(let message): message
+        case .playbackUnavailable(let message): "无法启动接收音频：\(message)"
         case .microphonePermissionDenied: "未获得麦克风权限"
         case .microphoneUnavailable: "当前设备没有可用的麦克风输入"
         }
@@ -64,9 +66,20 @@ final class RadioLiteAudioEngine: ObservableObject {
         guard codec != nil else {
             throw RadioLiteAudioError.codecUnavailable(lastError ?? "系统 Opus 编解码器不可用")
         }
-        isMonitoring = true
-        try configureAudioSession(capturing: isCapturingMicrophone)
-        try ensureEngineStarted()
+        do {
+            try configureAudioSession(capturing: isCapturingMicrophone)
+            try ensureEngineStarted()
+            isMonitoring = true
+            lastError = nil
+        } catch {
+            isMonitoring = false
+            player.stop()
+            engine.stop()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            let wrapped = RadioLiteAudioError.playbackUnavailable(Self.diagnostic(error))
+            lastError = wrapped.localizedDescription
+            throw wrapped
+        }
     }
 
     func stopMonitoring() {
@@ -172,7 +185,11 @@ final class RadioLiteAudioEngine: ObservableObject {
                 try ensureEngineStarted()
                 if scheduledBuffers > 0 { player.play() }
             } catch {
-                lastError = error.localizedDescription
+                isMonitoring = false
+                player.stop()
+                engine.stop()
+                lastError = RadioLiteAudioError.playbackUnavailable(Self.diagnostic(error)).localizedDescription
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
         } else {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -216,16 +233,26 @@ final class RadioLiteAudioEngine: ObservableObject {
     private func configureAudioSession(capturing: Bool) throws {
         let session = AVAudioSession.sharedInstance()
         if capturing {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .voiceChat,
-                options: [.defaultToSpeaker, .allowBluetooth]
-            )
+            do {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .voiceChat,
+                    options: [.defaultToSpeaker, .allowBluetooth]
+                )
+            } catch {
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
+            }
         } else {
-            try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
+            do {
+                try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
+            } catch {
+                try session.setCategory(.playback, mode: .default)
+            }
         }
-        try session.setPreferredSampleRate(48_000)
-        try session.setPreferredIOBufferDuration(0.02)
+        // These are preferences, not correctness requirements. Some routes
+        // reject one of them with OSStatus even though playback itself works.
+        try? session.setPreferredSampleRate(48_000)
+        try? session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
     }
 
@@ -239,6 +266,14 @@ final class RadioLiteAudioEngine: ObservableObject {
         await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) }
         }
+    }
+
+    private static func diagnostic(_ error: Error) -> String {
+        let value = error as NSError
+        if value.domain == NSOSStatusErrorDomain {
+            return "系统音频错误 OSStatus \(value.code)"
+        }
+        return "\(value.localizedDescription)（\(value.domain) \(value.code)）"
     }
 
     nonisolated private static func copyMonoSamples(_ buffer: AVAudioPCMBuffer) -> [Float] {

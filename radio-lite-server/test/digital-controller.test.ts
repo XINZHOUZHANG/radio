@@ -285,6 +285,7 @@ function profile(): RadioProfile {
     connection: { kind: "hamlib-dummy" },
     audioInput: { backend: "alsa", id: "dummy-in" },
     audioOutput: { backend: "alsa", id: "dummy-out" },
+    ptt: { method: "None" },
     station: { callsign: "BI1XYZ", grid: "OM89" },
     hardwareTxEnabled: false,
   };

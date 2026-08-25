@@ -24,6 +24,37 @@ export type AudioEndpoint = {
   label?: string;
 };
 
+export const PTT_METHODS = [
+  "RIG",
+  "DTR",
+  "RTS",
+  "Parallel",
+  "CM108",
+  "GPIO",
+  "GPION",
+  "None",
+] as const;
+
+export type PttMethod = typeof PTT_METHODS[number];
+
+export type PttConfiguration = {
+  method: PttMethod;
+  path?: string;
+  bit?: number;
+};
+
+export const SERIAL_BAUD_RATES = [
+  1_200,
+  2_400,
+  4_800,
+  9_600,
+  19_200,
+  38_400,
+  57_600,
+  115_200,
+  230_400,
+] as const;
+
 export type StationIdentity = {
   callsign: string;
   grid?: string;
@@ -36,6 +67,7 @@ export type RadioProfile = {
   connection: RigConnection;
   audioInput: AudioEndpoint;
   audioOutput: AudioEndpoint;
+  ptt: PttConfiguration;
   station: StationIdentity;
   hardwareTxEnabled: boolean;
 };
@@ -49,9 +81,8 @@ const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const CALLSIGN_PATTERN = /^[A-Z0-9/]{3,16}$/;
 const GRID_PATTERN = /^[A-R]{2}[0-9]{2}(?:[A-X]{2})?$/;
 const SAFE_HOST_PATTERN = /^[A-Za-z0-9._:-]{1,253}$/;
-const ALLOWED_BAUD_RATES = new Set([
-  1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400,
-]);
+const ALLOWED_BAUD_RATES = new Set<number>(SERIAL_BAUD_RATES);
+const ALLOWED_PTT_METHODS = new Set<string>(PTT_METHODS);
 
 export function parseRadioConfig(value: unknown): RadioConfigFile {
   const root = objectValue(value, "configuration");
@@ -86,6 +117,7 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
       "connection",
       "audioInput",
       "audioOutput",
+      "ptt",
       "station",
       "hardwareTxEnabled",
     ],
@@ -108,6 +140,15 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
   if ((hamlibModelId === 1) !== (connection.kind === "hamlib-dummy")) {
     throw new Error("Hamlib Dummy model and hamlib-dummy connection must be selected together");
   }
+  const ptt = radio.ptt === undefined
+    ? { method: connection.kind === "hamlib-dummy" ? "None" as const : "RIG" as const }
+    : parsePttConfiguration(radio.ptt, `${field}.ptt`);
+  if (connection.kind === "network-rigctld" && ptt.method !== "RIG") {
+    throw new Error(`${field}.connection network rigctld manages PTT externally`);
+  }
+  if (hardwareTxEnabled && ptt.method === "None") {
+    throw new Error(`${field}.ptt None cannot enable hardware transmission`);
+  }
   return {
     id,
     name,
@@ -115,8 +156,52 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
     connection,
     audioInput: parseAudioEndpoint(radio.audioInput, `${field}.audioInput`),
     audioOutput: parseAudioEndpoint(radio.audioOutput, `${field}.audioOutput`),
+    ptt,
     station: parseStation(radio.station, `${field}.station`),
     hardwareTxEnabled,
+  };
+}
+
+function parsePttConfiguration(value: unknown, field: string): PttConfiguration {
+  const ptt = objectValue(value, field);
+  exactKeys(ptt, ["method", "path", "bit"], field);
+  const method = text(ptt.method, `${field}.method`, 1, 32);
+  if (!ALLOWED_PTT_METHODS.has(method)) {
+    throw new Error(`${field}.method is unsupported`);
+  }
+  const typedMethod = method as PttMethod;
+  const path = ptt.path === undefined
+    ? undefined
+    : text(ptt.path, `${field}.path`, 1, 512);
+  const pathRequired = typedMethod === "DTR" ||
+    typedMethod === "RTS" ||
+    typedMethod === "Parallel" ||
+    typedMethod === "CM108" ||
+    typedMethod === "GPIO" ||
+    typedMethod === "GPION";
+  if (path !== undefined) {
+    if (!pathRequired) {
+      throw new Error(`${field}.path is not used by ${typedMethod}`);
+    }
+    if (!path.startsWith("/dev/") || /[\0\r\n]/u.test(path)) {
+      throw new Error(`${field}.path must be an absolute /dev path`);
+    }
+  } else if (pathRequired) {
+    throw new Error(`${field}.path is required by ${typedMethod}`);
+  }
+  const bit = ptt.bit === undefined ? undefined : ptt.bit;
+  if (bit !== undefined) {
+    if (!Number.isSafeInteger(bit) || (bit as number) < 0 || (bit as number) > 7) {
+      throw new Error(`${field}.bit must be in 0..7`);
+    }
+    if (typedMethod !== "GPIO" && typedMethod !== "GPION") {
+      throw new Error(`${field}.bit is only used by GPIO or GPION`);
+    }
+  }
+  return {
+    method: typedMethod,
+    ...(path === undefined ? {} : { path }),
+    ...(bit === undefined ? {} : { bit: bit as number }),
   };
 }
 
@@ -209,7 +294,15 @@ function exactKeys(
     }
   }
   for (const required of allowed) {
-    if (!(required in value) && required !== "baudRate" && required !== "label" && required !== "grid") {
+    if (
+      !(required in value) &&
+      required !== "baudRate" &&
+      required !== "label" &&
+      required !== "grid" &&
+      required !== "ptt" &&
+      required !== "path" &&
+      required !== "bit"
+    ) {
       throw new Error(`${field}.${required} is required`);
     }
   }

@@ -25,17 +25,24 @@ struct RadioPanel<Content: View>: View {
     }
 }
 struct RadioActionButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
     var tint: Color = RadioPalette.accent
     var prominent = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(prominent ? Color.black.opacity(0.82) : Color.white)
+            .foregroundStyle(
+                isEnabled
+                    ? (prominent ? Color.black.opacity(0.82) : Color.white)
+                    : Color.white.opacity(0.38)
+            )
             .padding(.horizontal, 16)
             .frame(minHeight: 44)
             .background(
-                prominent ? tint.opacity(configuration.isPressed ? 0.7 : 1) : tint.opacity(configuration.isPressed ? 0.28 : 0.14),
+                isEnabled
+                    ? (prominent ? tint.opacity(configuration.isPressed ? 0.7 : 1) : tint.opacity(configuration.isPressed ? 0.28 : 0.14))
+                    : Color.white.opacity(0.07),
                 in: RoundedRectangle(cornerRadius: 13, style: .continuous)
             )
             .overlay {
@@ -44,6 +51,7 @@ struct RadioActionButtonStyle: ButtonStyle {
                         .strokeBorder(tint.opacity(0.32))
                 }
             }
+            .saturation(isEnabled ? 1 : 0)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }

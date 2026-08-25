@@ -33,7 +33,7 @@ struct RootView: View {
         .overlay(alignment: .top) {
             if let notice = session.noticeMessage {
                 NoticeBanner(text: notice) {
-                    session.noticeMessage = nil
+                    session.dismissNotice()
                 }
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))

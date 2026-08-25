@@ -113,6 +113,65 @@ test("media worker failure revokes voice PTT and removes the failed pipeline", a
   );
 });
 
+test("radio configuration invalidation de-keys voice and permits a fresh media subscription", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  const transport = fixture.connect("media-a", "device:a", "user-a");
+  await fixture.hub.subscribe("media-a", "main", true);
+  const originalWorker = fixture.worker;
+  const digitalFaults: string[] = [];
+  const digitalPort = await fixture.hub.openDigitalAudio("main", {
+    pcm: () => undefined,
+    fault: (error) => digitalFaults.push(error instanceof Error ? error.message : String(error)),
+  });
+  context.after(() => digitalPort.close());
+  fixture.hub.registerTransmit({
+    radioId: "main",
+    ownerId: "control-a",
+    principalId: "device:a",
+    userId: "user-a",
+    transmitToken: "tx-token",
+    mode: "voice",
+    heartbeatDeadlineMs: 8_000,
+    hardDeadlineMs: 180_000,
+  });
+  await fixture.hub.bindUplink("media-a", "main", "tx-token");
+
+  await fixture.hub.invalidate("main");
+
+  assert.equal(originalWorker?.closed, true);
+  assert.equal(fixture.stops.at(-1)?.reason, "media_configuration_changed");
+  assert.deepEqual(digitalFaults, ["radio media configuration changed"]);
+  assert.deepEqual(transport.json.at(-1), {
+    t: "media.error",
+    code: "media_configuration_changed",
+    message: "radio media configuration changed",
+    reconnectRequired: true,
+  });
+  assert.equal(fixture.hub.hasReadySubscription("device:a", "user-a", "main"), false);
+  await assert.rejects(
+    digitalPort.play(new Int16Array([1]), 12_000, new AbortController().signal),
+    /unavailable/u,
+  );
+
+  await fixture.hub.subscribe("media-a", "main", true);
+  assert.notEqual(fixture.worker, originalWorker);
+  assert.equal(fixture.hub.hasReadySubscription("device:a", "user-a", "main"), true);
+});
+
+test("radio configuration invalidation survives an old worker close failure", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  fixture.connect("media-a", "device:a", "user-a");
+  await fixture.hub.subscribe("media-a", "main", true);
+  const originalWorker = fixture.worker!;
+  originalWorker.failClose = true;
+
+  await assert.doesNotReject(fixture.hub.invalidate("main"));
+  await fixture.hub.subscribe("media-a", "main", false);
+  assert.notEqual(fixture.worker, originalWorker);
+});
+
 test("expired, replayed and oversized microphone frames are rejected", async (context) => {
   let nowMs = 1_000;
   const fixture = createFixture(() => nowMs);
@@ -249,6 +308,7 @@ function createFixture(now: () => number = () => 1_000, uplinkBindTimeoutMs = 3_
         connection: { kind: "hamlib-dummy" },
         audioInput: { backend: "alsa", id: "dummy" },
         audioOutput: { backend: "alsa", id: "dummy" },
+        ptt: { method: "None" },
         station: { callsign: "BI1ABC", grid: "OM89" },
         hardwareTxEnabled: false,
       }],
@@ -284,6 +344,7 @@ class FakeMediaWorker implements MediaWorker {
   };
   digitalStopCount = 0;
   closed = false;
+  failClose = false;
 
   updatePolicy(policy: ReturnType<AdaptiveMediaPolicy["current"]>): void {
     this.policies.push(policy);
@@ -294,7 +355,12 @@ class FakeMediaWorker implements MediaWorker {
     return true;
   }
 
-  async close(): Promise<void> { this.closed = true; }
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.failClose) {
+      throw new Error("worker close failed");
+    }
+  }
 }
 
 class FakeTransport implements MediaClientTransport {

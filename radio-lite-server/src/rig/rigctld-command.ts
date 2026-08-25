@@ -35,6 +35,13 @@ export function rigctldTarget(
       args.push("-s", String(profile.connection.baudRate));
     }
   }
+  args.push("-P", rigctldPttMethod(profile.ptt.method));
+  if (profile.ptt.path !== undefined) {
+    args.push("-p", profile.ptt.path);
+  }
+  if (profile.ptt.bit !== undefined) {
+    args.push("-C", `ptt_bitnum=${profile.ptt.bit}`);
+  }
   args.push("-T", "127.0.0.1", "-t", String(managedPort));
   return {
     managed: true,
@@ -47,4 +54,14 @@ export function rigctldTarget(
       port: managedPort,
     },
   };
+}
+
+function rigctldPttMethod(method: RadioProfile["ptt"]["method"]): string {
+  if (method === "Parallel") {
+    return "PARALLEL";
+  }
+  if (method === "None") {
+    return "NONE";
+  }
+  return method;
 }

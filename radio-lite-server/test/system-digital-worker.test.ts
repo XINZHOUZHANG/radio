@@ -89,6 +89,7 @@ function profile(): RadioProfile {
     connection: { kind: "network-rigctld", host: "127.0.0.1", port: 4532 },
     audioInput: { backend: "alsa", id: "hw:1,0" },
     audioOutput: { backend: "alsa", id: "hw:1,0" },
+    ptt: { method: "RIG" },
     station: { callsign: "BI1XYZ", grid: "OM89" },
     hardwareTxEnabled: true,
   };

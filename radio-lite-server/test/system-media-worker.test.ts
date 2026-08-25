@@ -69,6 +69,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
     connection: { kind: "network-rigctld", host: "127.0.0.1", port: 4532 },
     audioInput: { backend: "alsa", id: "hw:1,0" },
     audioOutput: { backend: "pulse", id: "radio-sink" },
+    ptt: { method: "RIG" },
     station: { callsign: "BI1ABC", grid: "OM89" },
     hardwareTxEnabled: true,
   }, {

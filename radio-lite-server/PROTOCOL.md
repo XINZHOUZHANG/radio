@@ -27,6 +27,84 @@ Authorization: Bearer <accessToken>
 X-Radio-Lite-Device-Id: <deviceId>
 ```
 
+## Radio hardware HTTP API
+
+| Method | Path | Permission | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/hardware/discovery` | administrator | Discover Hamlib models, serial ports, audio devices, PTT methods and baud rates |
+| `GET` | `/api/v1/radios` | authenticated | Read the versioned radio-profile list |
+| `POST` | `/api/v1/radios` | administrator | Create or replace one radio profile by `id` |
+
+Discovery returns this shape; host-specific catalog and device arrays are
+abbreviated here:
+
+```json
+{
+  "hamlibModels": [
+    {"modelId":1049,"manufacturer":"Yaesu","model":"FT-710","backendVersion":"20250101.0","status":"Stable"}
+  ],
+  "curatedPresets": [],
+  "serialDevices": [
+    {"id":"by-id:usb-Yaesu-if00","path":"/dev/serial/by-id/usb-Yaesu-if00","label":"Yaesu","stable":true}
+  ],
+  "audioInputs": [
+    {"backend":"alsa","direction":"input","id":"hw:1,0","label":"USB Audio CODEC"}
+  ],
+  "audioOutputs": [
+    {"backend":"alsa","direction":"output","id":"hw:1,0","label":"USB Audio CODEC"}
+  ],
+  "pttMethods": ["RIG","DTR","RTS","Parallel","CM108","GPIO","GPION","None"],
+  "baudRates": [1200,2400,4800,9600,19200,38400,57600,115200,230400],
+  "warnings": []
+}
+```
+
+The `POST /api/v1/radios` body contains one complete profile:
+
+```json
+{
+  "profile": {
+    "id": "main",
+    "name": "FT-710",
+    "hamlibModelId": 1049,
+    "connection": {
+      "kind": "managed-serial",
+      "devicePath": "/dev/serial/by-id/usb-Yaesu-if00",
+      "baudRate": 38400
+    },
+    "audioInput": {"backend":"alsa","id":"hw:1,0","label":"USB Audio CODEC"},
+    "audioOutput": {"backend":"alsa","id":"hw:1,0","label":"USB Audio CODEC"},
+    "ptt": {"method":"DTR","path":"/dev/serial/by-id/usb-Yaesu-if01"},
+    "station": {"callsign":"BI1ABC","grid":"OM89"},
+    "hardwareTxEnabled": true
+  },
+  "hardwareTxConfirmation": "main"
+}
+```
+
+`connection` is alternatively
+`{"kind":"network-rigctld","host":"rig.local","port":4532}` or
+`{"kind":"hamlib-dummy"}`. Audio endpoints use the discovered `alsa` or
+`pulse` backend and device `id`. `ptt` defaults to `RIG` for an old real-radio
+profile and `None` for an old Dummy profile. `RIG` does not take
+a PTT path. `DTR`, `RTS`, `Parallel`, `CM108`, `GPIO` and `GPION` require an
+absolute `/dev/...` path; GPIO/GPION may additionally provide `bit` from 0 to
+7. `network-rigctld` accepts only `RIG`, because PTT options belong to that
+external process. `None` cannot be combined with hardware transmission.
+
+Enabling hardware TX requires `hardwareTxConfirmation` to equal the exact
+profile `id`. A successful save de-keys active transmission, invalidates the
+old digital, media and rig workers, and returns:
+
+```json
+{"radio":{"id":"main"},"reconnectRequired":true}
+```
+
+The returned `radio` is the full normalized profile. Subscribed media clients
+also receive `media.error` with code `media_configuration_changed`; they may
+immediately subscribe again, or reconnect both WebSockets as requested by the
+HTTP response.
+
 ## Station log HTTP API
 
 The service stores one plain-text ADIF 3.1.7 file at

@@ -56,7 +56,7 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var isWorking = false
     @Published private(set) var digitalActionStatus: String?
     @Published var errorMessage: String?
-    @Published var noticeMessage: String?
+    @Published private(set) var noticeMessage: String?
 
     let control = RadioLiteControlClient()
     let media: RadioLiteMediaClient
@@ -72,8 +72,10 @@ final class RadioLiteSession: ObservableObject {
     private var transmitHeartbeatTask: Task<Void, Never>?
     private var credentialRefreshTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var mediaRetryTask: Task<Void, Never>?
     private var activeTransmitToken: String?
     private var transmitGeneration = 0
+    private var noticeState = RadioLiteNoticeState()
 
     private static let addressDefaultsKey = "radio-lite.server-address"
     private static let radioDefaultsKey = "radio-lite.selected-radio"
@@ -92,6 +94,11 @@ final class RadioLiteSession: ObservableObject {
             self?.endVoicePTT()
             self?.errorMessage = "麦克风上行已停止：\(error.localizedDescription)"
         }
+        media.onReconnectRequired = { [weak self] error in
+            guard let self, !self.intentionalDisconnect, self.phase == .ready else { return }
+            self.presentMediaNotice(error)
+            self.scheduleMediaRetry()
+        }
     }
 
     var isAuthenticated: Bool { phase == .ready }
@@ -106,6 +113,11 @@ final class RadioLiteSession: ObservableObject {
     }
     var displayIdentity: String {
         username ?? selectedRadio?.station.callsign ?? principal?.userId ?? "操作员"
+    }
+
+    func dismissNotice() {
+        noticeState.dismiss()
+        noticeMessage = noticeState.message
     }
 
     func probeServer() async {
@@ -238,6 +250,7 @@ final class RadioLiteSession: ObservableObject {
         grids = []
         users = []
         issuedPairingCode = nil
+        resetNotices()
         phase = .signedOut
         intentionalDisconnect = false
     }
@@ -287,17 +300,27 @@ final class RadioLiteSession: ObservableObject {
         selectedRadioId = radioId
         UserDefaults.standard.set(radioId, forKey: Self.radioDefaultsKey)
         clearRadioState()
+        var mediaReady = true
         do {
-            try await media.subscribe(radioId: radioId)
+            do {
+                try await media.subscribe(radioId: radioId)
+                resolveMediaNotices()
+            } catch {
+                mediaReady = false
+                presentMediaNotice(error)
+            }
             do {
                 try await acquireControl()
             } catch {
-                noticeMessage = "电台当前由其他操作员控制，可稍后接管"
+                presentNotice("电台当前由其他操作员控制，可稍后接管")
             }
             try await refreshRigState()
             try await refreshDigitalSnapshot()
         } catch {
             errorMessage = error.localizedDescription
+        }
+        if !mediaReady {
+            scheduleMediaRetry()
         }
     }
 
@@ -636,6 +659,72 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
+    func loadHardwareDiscovery() async throws -> RadioLiteHardwareDiscovery {
+        guard isAdmin else { throw RadioLiteSessionError.administratorRequired }
+        guard let http else { throw RadioLiteSessionError.notConnected }
+        return try await http.hardwareDiscovery()
+    }
+
+    @discardableResult
+    func saveRadioConfiguration(
+        _ profile: RadioLiteRadioProfile,
+        confirmHardwareTransmission: Bool
+    ) async throws -> Bool {
+        guard isAdmin else { throw RadioLiteSessionError.administratorRequired }
+        guard let http else { throw RadioLiteSessionError.notConnected }
+
+        isWorking = true
+        defer { isWorking = false }
+        endVoicePTT()
+        endTuning()
+
+        let response = try await http.upsertRadio(
+            profile,
+            confirmHardwareTransmission: confirmHardwareTransmission
+        )
+        if let index = radios.firstIndex(where: { $0.id == response.radio.id }) {
+            radios[index] = response.radio
+        } else {
+            radios.append(response.radio)
+            radios.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+
+        guard response.reconnectRequired else {
+            presentNotice("设备配置已保存")
+            return true
+        }
+        controlHeartbeatTask?.cancel()
+        controlHeartbeatTask = nil
+        controlToken = nil
+        controlExpiresAtMs = nil
+        var controlReady = true
+        do {
+            try await acquireControl()
+        } catch {
+            controlReady = false
+        }
+        do {
+            if selectedRadioId == response.radio.id {
+                try await media.subscribe(radioId: response.radio.id)
+                resolveMediaNotices()
+                try await refreshRigState()
+            }
+            presentNotice(
+                controlReady
+                    ? "设备配置已保存，电台与音频已重新连接"
+                    : "设备配置和媒体已生效，但当前未取得电台控制权"
+            )
+            return true
+        } catch {
+            presentNotice(
+                "设备配置已保存，后台正在重连：\(error.localizedDescription)",
+                deduplicationKey: "radio.configuration.reconnect"
+            )
+            scheduleMediaRetry()
+            return false
+        }
+    }
+
     func createUser(
         username: String,
         password: String,
@@ -687,6 +776,7 @@ final class RadioLiteSession: ObservableObject {
         phase = .authenticating
         isWorking = true
         errorMessage = nil
+        resetNotices()
         defer { isWorking = false }
         do {
             try await operation()
@@ -740,24 +830,30 @@ final class RadioLiteSession: ObservableObject {
         let preferred = UserDefaults.standard.string(forKey: Self.radioDefaultsKey)
         selectedRadioId = radios.contains(where: { $0.id == preferred }) ? preferred : radios[0].id
         guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
+            resolveMediaNotices()
         } catch {
-            noticeMessage = "媒体订阅受限：\(error.localizedDescription)"
+            mediaReady = false
+            presentMediaNotice(error)
         }
         do {
             try await acquireControl()
         } catch {
             controlToken = nil
-            noticeMessage = "已连接，但电台控制权当前由其他操作员持有"
+            presentNotice("已连接，但电台控制权当前由其他操作员持有")
         }
         try await refreshRigState()
         do { try await refreshDigitalSnapshot() } catch {
-            noticeMessage = "FT8/FT4 暂不可用：\(error.localizedDescription)"
+            presentNotice("FT8/FT4 暂不可用：\(error.localizedDescription)")
         }
         phase = .ready
         startPolling()
         scheduleCredentialRefresh()
+        if !mediaReady {
+            scheduleMediaRetry()
+        }
         Task { [weak self] in
             await self?.refreshLogs()
             await self?.refreshUsers()
@@ -868,7 +964,7 @@ final class RadioLiteSession: ObservableObject {
                     self.controlExpiresAtMs = nil
                     self.endVoicePTT()
                     self.endTuning()
-                    self.noticeMessage = "控制租约已失效，请重新取得控制权"
+                    self.presentNotice("控制租约已失效，请重新取得控制权")
                     return
                 }
             }
@@ -942,7 +1038,10 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         guard !intentionalDisconnect, phase == .ready else { return }
-        noticeMessage = "连接中断，正在自动重连：\(error.localizedDescription)"
+        presentNotice(
+            "连接中断，正在自动重连：\(error.localizedDescription)",
+            deduplicationKey: "connection.loss:\(error.localizedDescription)"
+        )
         scheduleReconnect()
     }
 
@@ -962,13 +1061,24 @@ final class RadioLiteSession: ObservableObject {
                     guard let server = self.server, let credential = self.credential else {
                         throw RadioLiteSessionError.notConnected
                     }
-                    try await self.reconnectChannels(server: server, credential: credential)
+                    let mediaReady = try await self.reconnectChannels(server: server, credential: credential)
                     self.scheduleCredentialRefresh()
-                    self.noticeMessage = "已恢复连接"
+                    if mediaReady {
+                        self.presentNotice("已恢复连接")
+                    } else {
+                        self.presentNotice(
+                            "电台控制已恢复，频谱与音频仍在后台重试",
+                            deduplicationKey: "media.failure"
+                        )
+                        self.scheduleMediaRetry()
+                    }
                     self.reconnectTask = nil
                     return
                 } catch {
-                    self.noticeMessage = "重连失败，将继续尝试：\(error.localizedDescription)"
+                    self.presentNotice(
+                        "重连失败，将继续尝试：\(error.localizedDescription)",
+                        deduplicationKey: "connection.reconnect:\(error.localizedDescription)"
+                    )
                     delay = min(30, delay * 1.8)
                 }
             }
@@ -976,7 +1086,7 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
-    private func reconnectChannels(server: RadioLiteServer, credential: RadioLiteCredential) async throws {
+    private func reconnectChannels(server: RadioLiteServer, credential: RadioLiteCredential) async throws -> Bool {
         intentionalDisconnect = true
         control.disconnect()
         media.disconnect()
@@ -988,11 +1098,19 @@ final class RadioLiteSession: ObservableObject {
         guard let radioId = selectedRadioId, radios.contains(where: { $0.id == radioId }) else {
             throw RadioLiteSessionError.radioUnavailable
         }
-        try await media.subscribe(radioId: radioId)
+        var mediaReady = true
+        do {
+            try await media.subscribe(radioId: radioId)
+            resolveMediaNotices()
+        } catch {
+            mediaReady = false
+            presentMediaNotice(error)
+        }
         do { try await acquireControl() } catch { controlToken = nil }
         try await refreshRigState()
         try? await refreshDigitalSnapshot()
         startPolling()
+        return mediaReady
     }
 
     private func scheduleCredentialRefresh() {
@@ -1007,12 +1125,46 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
+    private func scheduleMediaRetry() {
+        guard mediaRetryTask == nil, phase == .ready else { return }
+        mediaRetryTask = Task { [weak self] in
+            guard let self else { return }
+            var delay = 2.0
+            while !Task.isCancelled, self.phase == .ready {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                guard self.media.state == .ready else {
+                    self.mediaRetryTask = nil
+                    self.scheduleReconnect()
+                    return
+                }
+                guard let radioId = self.selectedRadioId else {
+                    self.mediaRetryTask = nil
+                    return
+                }
+                do {
+                    try await self.media.subscribe(radioId: radioId)
+                    self.resolveMediaNotices()
+                    self.mediaRetryTask = nil
+                    return
+                } catch {
+                    self.presentMediaNotice(error)
+                    delay = min(30, delay * 1.8)
+                }
+            }
+            self.mediaRetryTask = nil
+        }
+    }
+
     private func refreshCredentialAndReconnect() async {
         do {
             try await refreshCredential()
             guard let server, let credential else { throw RadioLiteSessionError.notConnected }
-            try await reconnectChannels(server: server, credential: credential)
+            let mediaReady = try await reconnectChannels(server: server, credential: credential)
             scheduleCredentialRefresh()
+            if !mediaReady {
+                scheduleMediaRetry()
+            }
         } catch {
             stopLocalTransmit()
             phase = .signedOut
@@ -1040,11 +1192,13 @@ final class RadioLiteSession: ObservableObject {
         transmitHeartbeatTask?.cancel()
         credentialRefreshTask?.cancel()
         reconnectTask?.cancel()
+        mediaRetryTask?.cancel()
         controlHeartbeatTask = nil
         pollingTask = nil
         transmitHeartbeatTask = nil
         credentialRefreshTask = nil
         reconnectTask = nil
+        mediaRetryTask = nil
     }
 
     private func clearRadioState() {
@@ -1054,6 +1208,31 @@ final class RadioLiteSession: ObservableObject {
         decodeBatches = []
         callQueue = nil
         automaticQSO = nil
+    }
+
+    private func presentNotice(_ message: String, deduplicationKey: String? = nil) {
+        noticeState.present(message, deduplicationKey: deduplicationKey)
+        noticeMessage = noticeState.message
+    }
+
+    private func presentMediaNotice(_ error: Error) {
+        let detail = error.localizedDescription
+        presentNotice(
+            "媒体订阅受限：\(detail)",
+            deduplicationKey: "media.failure"
+        )
+    }
+
+    private func resolveMediaNotices() {
+        mediaRetryTask?.cancel()
+        mediaRetryTask = nil
+        noticeState.resolve(keysWithPrefix: "media.")
+        noticeMessage = noticeState.message
+    }
+
+    private func resetNotices() {
+        noticeState.reset()
+        noticeMessage = nil
     }
 
     private func replaceRigState(

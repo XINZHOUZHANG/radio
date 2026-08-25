@@ -93,15 +93,104 @@ struct RadioLiteStationIdentity: Codable, Equatable, Sendable {
     let grid: String?
 }
 
+enum RadioLitePTTMethod: String, Codable, CaseIterable, Identifiable, Sendable {
+    case rig = "RIG"
+    case dtr = "DTR"
+    case rts = "RTS"
+    case parallel = "Parallel"
+    case cm108 = "CM108"
+    case gpio = "GPIO"
+    case gpion = "GPION"
+    case none = "None"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .rig: "电台 CAT"
+        case .dtr: "串口 DTR"
+        case .rts: "串口 RTS"
+        case .parallel: "并口"
+        case .cm108: "CM108 GPIO"
+        case .gpio: "GPIO（高电平发射）"
+        case .gpion: "GPIO（低电平发射）"
+        case .none: "不控制 PTT"
+        }
+    }
+
+    var requiresDevicePath: Bool {
+        switch self {
+        case .dtr, .rts, .parallel, .cm108, .gpio, .gpion: true
+        case .rig, .none: false
+        }
+    }
+
+    var requiresBit: Bool { self == .gpio || self == .gpion }
+}
+
+struct RadioLitePTTConfiguration: Codable, Equatable, Sendable {
+    let method: RadioLitePTTMethod
+    let path: String?
+    let bit: Int?
+
+    init(method: RadioLitePTTMethod, path: String? = nil, bit: Int? = nil) {
+        self.method = method
+        self.path = path
+        self.bit = bit
+    }
+}
+
 struct RadioLiteRadioProfile: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let hamlibModelId: Int
     let connection: RadioLiteRigConnection
+    let ptt: RadioLitePTTConfiguration
     let audioInput: RadioLiteAudioEndpoint
     let audioOutput: RadioLiteAudioEndpoint
     let station: RadioLiteStationIdentity
     let hardwareTxEnabled: Bool
+
+    init(
+        id: String,
+        name: String,
+        hamlibModelId: Int,
+        connection: RadioLiteRigConnection,
+        ptt: RadioLitePTTConfiguration,
+        audioInput: RadioLiteAudioEndpoint,
+        audioOutput: RadioLiteAudioEndpoint,
+        station: RadioLiteStationIdentity,
+        hardwareTxEnabled: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.hamlibModelId = hamlibModelId
+        self.connection = connection
+        self.ptt = ptt
+        self.audioInput = audioInput
+        self.audioOutput = audioOutput
+        self.station = station
+        self.hardwareTxEnabled = hardwareTxEnabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, hamlibModelId, connection, ptt, audioInput, audioOutput, station, hardwareTxEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        hamlibModelId = try container.decode(Int.self, forKey: .hamlibModelId)
+        let decodedConnection = try container.decode(RadioLiteRigConnection.self, forKey: .connection)
+        connection = decodedConnection
+        ptt = try container.decodeIfPresent(RadioLitePTTConfiguration.self, forKey: .ptt)
+            ?? .init(method: decodedConnection.kind == "hamlib-dummy" ? .none : .rig)
+        audioInput = try container.decode(RadioLiteAudioEndpoint.self, forKey: .audioInput)
+        audioOutput = try container.decode(RadioLiteAudioEndpoint.self, forKey: .audioOutput)
+        station = try container.decode(RadioLiteStationIdentity.self, forKey: .station)
+        hardwareTxEnabled = try container.decode(Bool.self, forKey: .hardwareTxEnabled)
+    }
 }
 
 struct RadioLiteRadiosResponse: Codable, Equatable, Sendable {

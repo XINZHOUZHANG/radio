@@ -76,6 +76,28 @@ On Debian 13, real audio currently requires `alsa-utils` or
 `pulseaudio-utils`, plus `opus-tools`. These remain operating-system packages
 and are not copied into the Node application.
 
+## Radio hardware configuration
+
+An administrator uses `GET /api/v1/hardware/discovery` to retrieve the full
+installed Hamlib model catalog, curated presets, serial devices, ALSA or
+PulseAudio inputs/outputs, supported PTT methods and serial baud rates. A
+profile is created or replaced with `POST /api/v1/radios`; see `PROTOCOL.md`
+for the complete JSON shape.
+
+Managed serial and Dummy profiles start a private loopback-only `rigctld`.
+Their PTT configuration supports Hamlib CLI methods `RIG`, `DTR`, `RTS`,
+`Parallel`, `CM108`, `GPIO`, `GPION` and `None`. DTR/RTS, parallel, CM108 and
+GPIO methods require an explicit `/dev/...` PTT path; GPIO/GPION may also set
+bit 0 through 7. A `network-rigctld` profile always uses `RIG` because the
+external rigctld process owns its PTT wiring.
+
+Saving a profile first de-keys voice or digital transmission, then closes the
+old media, digital and rig workers. The response sets `reconnectRequired` so
+the client can resubscribe and rebuild all three paths from the saved profile.
+Hamlib Dummy uses cached simulated PTT state only when its backend returns
+`RPRT -11` for unavailable PTT read-back; real-radio Hamlib errors are never
+suppressed.
+
 ## Local tests
 
 Node.js 24.7 or newer is required because password hashing uses the built-in

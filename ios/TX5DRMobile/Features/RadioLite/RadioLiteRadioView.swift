@@ -134,10 +134,7 @@ struct RadioLiteRadioView: View {
                         .foregroundStyle(RadioPalette.cyan)
                 }
                 HStack(spacing: 12) {
-                    Button {
-                        if audio.isMonitoring { audio.stopMonitoring() }
-                        else { try? audio.startMonitoring() }
-                    } label: {
+                    Button(action: toggleMonitoring) {
                         Image(systemName: audio.isMonitoring ? "speaker.wave.2.fill" : "speaker.slash.fill")
                             .frame(width: 38, height: 38)
                             .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -158,6 +155,18 @@ struct RadioLiteRadioView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(RadioPalette.muted)
             }
+        }
+    }
+
+    private func toggleMonitoring() {
+        if audio.isMonitoring {
+            audio.stopMonitoring()
+            return
+        }
+        do {
+            try audio.startMonitoring()
+        } catch {
+            session.errorMessage = error.localizedDescription
         }
     }
 

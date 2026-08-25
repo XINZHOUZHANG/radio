@@ -192,6 +192,7 @@ export class RadioRuntimeRegistry {
   readonly #profiles: () => RadioConfigFile;
   readonly #factory: RadioRuntimeFactory;
   readonly #runtimes = new Map<string, Promise<RadioRuntime>>();
+  readonly #invalidations = new Map<string, Promise<void>>();
 
   constructor(
     profiles: () => RadioConfigFile,
@@ -202,6 +203,10 @@ export class RadioRuntimeRegistry {
   }
 
   get(radioId: string): Promise<RadioRuntime> {
+    const invalidation = this.#invalidations.get(radioId);
+    if (invalidation !== undefined) {
+      return invalidation.then(() => this.get(radioId));
+    }
     const existing = this.#runtimes.get(radioId);
     if (existing !== undefined) {
       return existing;
@@ -211,9 +216,12 @@ export class RadioRuntimeRegistry {
     if (index < 0) {
       throw new Error("radio does not exist");
     }
-    const runtime = this.#factory(config.radios[index], 4_600 + index)
+    let runtime!: Promise<RadioRuntime>;
+    runtime = this.#factory(config.radios[index], 4_600 + index)
       .catch((error) => {
-        this.#runtimes.delete(radioId);
+        if (this.#runtimes.get(radioId) === runtime) {
+          this.#runtimes.delete(radioId);
+        }
         throw error;
       });
     this.#runtimes.set(radioId, runtime);
@@ -221,13 +229,29 @@ export class RadioRuntimeRegistry {
   }
 
   async invalidate(radioId: string): Promise<void> {
+    const active = this.#invalidations.get(radioId);
+    if (active !== undefined) {
+      return active;
+    }
     const runtime = this.#runtimes.get(radioId);
-    this.#runtimes.delete(radioId);
-    if (runtime !== undefined) {
-      try {
-        await (await runtime).close();
-      } catch {
-        // A failed initialization is already removed; there is no live runtime to close.
+    if (this.#runtimes.get(radioId) === runtime) {
+      this.#runtimes.delete(radioId);
+    }
+    const invalidation = (async () => {
+      if (runtime !== undefined) {
+        try {
+          await (await runtime).close();
+        } catch {
+          // A failed initialization is already removed; there is no live runtime to close.
+        }
+      }
+    })();
+    this.#invalidations.set(radioId, invalidation);
+    try {
+      await invalidation;
+    } finally {
+      if (this.#invalidations.get(radioId) === invalidation) {
+        this.#invalidations.delete(radioId);
       }
     }
   }
@@ -265,7 +289,9 @@ async function createDefaultRadioRuntime(
   const transport = new RigctldTransport(target.host, target.port);
   const runtime = new RadioRuntime(
     profile,
-    new HamlibRig(transport),
+    new HamlibRig(transport, {
+      pttMethod: profile.ptt.method,
+    }),
     async () => {
       await transport.close();
       await managed?.close();

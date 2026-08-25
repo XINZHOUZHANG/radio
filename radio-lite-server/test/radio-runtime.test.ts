@@ -7,6 +7,7 @@ import { ControlBusyError } from "../src/control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
   RadioRuntime,
+  RadioRuntimeRegistry,
   TransmitPermissionError,
   type RigControl,
 } from "../src/rig/radio-runtime.ts";
@@ -83,6 +84,79 @@ test("tuner is mutually exclusive with voice and disconnect releases both TX and
   assert.equal(runtime.control.snapshot(), null);
 });
 
+test("runtime registry waits for invalidated resources to close before creating a replacement", async (context) => {
+  const configuredProfile = profile(false);
+  const closeStarted = deferred();
+  const allowClose = deferred();
+  let factoryCalls = 0;
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      factoryCalls += 1;
+      const generation = factoryCalls;
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig(), async () => {
+        if (generation === 1) {
+          closeStarted.resolve();
+          await allowClose.promise;
+        }
+      });
+      await runtime.initialize();
+      return runtime;
+    },
+  );
+  context.after(() => registry.close());
+
+  const original = await registry.get("main");
+  const invalidating = registry.invalidate("main");
+  await closeStarted.promise;
+  const replacementPromise = registry.get("main");
+
+  try {
+    assert.equal(factoryCalls, 1, "replacement factory must wait for the old close");
+  } finally {
+    allowClose.resolve();
+    await invalidating;
+  }
+
+  const replacement = await replacementPromise;
+  assert.notEqual(replacement, original);
+  assert.equal(factoryCalls, 2);
+});
+
+test("failed stale runtime initialization cannot evict or leak its replacement", async () => {
+  const configuredProfile = profile(false);
+  const failFirstInitialization = deferred<never>();
+  const closed: number[] = [];
+  let factoryCalls = 0;
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      factoryCalls += 1;
+      const generation = factoryCalls;
+      if (generation === 1) {
+        return failFirstInitialization.promise;
+      }
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig(), async () => {
+        closed.push(generation);
+      });
+      await runtime.initialize();
+      return runtime;
+    },
+  );
+
+  void registry.get("main").catch(() => undefined);
+  const invalidating = registry.invalidate("main");
+  const replacementPromise = registry.get("main");
+  failFirstInitialization.reject(new Error("old runtime initialization failed"));
+  await invalidating;
+
+  const replacement = await replacementPromise;
+  assert.equal(await registry.get("main"), replacement);
+  assert.equal(factoryCalls, 2);
+  await registry.close();
+  assert.deepEqual(closed, [2]);
+});
+
 function profile(hardwareTxEnabled: boolean) {
   return parseRadioProfile({
     id: "main",
@@ -109,4 +183,18 @@ function user(id: string, role: "admin" | "operator", canTransmit: boolean): Pub
     updatedAtMs: 0,
     lastLoginAtMs: null,
   };
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }

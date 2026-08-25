@@ -2,6 +2,10 @@ import XCTest
 @testable import TX5DRMobile
 
 final class AudioRuntimePolicyTests: XCTestCase {
+    func testMediaSubscriptionDoesNotStartSpeakerPlaybackAutomatically() {
+        XCTAssertFalse(AudioRuntimePolicy.startsMonitoringOnMediaSubscription)
+    }
+
     func testStoppingPTTReleasesRecordingWhilePreservingOptionalPlayback() {
         XCTAssertEqual(
             AudioRuntimePolicy.intent(isCapturingMicrophone: true, isListening: true),

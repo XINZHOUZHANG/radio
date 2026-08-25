@@ -14,6 +14,7 @@ import {
   type HamlibModel,
   type ResolvedRigPreset,
 } from "./hamlib-catalog.ts";
+import { PTT_METHODS, SERIAL_BAUD_RATES, type PttMethod } from "./types.ts";
 
 export type DiscoveryCommandRunner = (
   executable: string,
@@ -28,6 +29,8 @@ export type HardwareDiscoveryResult = {
   serialDevices: SerialDevice[];
   audioInputs: DiscoveredAudioDevice[];
   audioOutputs: DiscoveredAudioDevice[];
+  pttMethods: PttMethod[];
+  baudRates: number[];
   warnings: string[];
 };
 
@@ -58,6 +61,8 @@ export class HardwareDiscovery {
       serialDevices,
       audioInputs: audio.inputs,
       audioOutputs: audio.outputs,
+      pttMethods: [...PTT_METHODS],
+      baudRates: [...SERIAL_BAUD_RATES],
       warnings,
     };
   }

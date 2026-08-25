@@ -65,6 +65,7 @@ test("builds managed rigctld argv without a shell and leaves network targets ext
     executable: "rigctld",
     args: [
       "-m", "1049", "-r", "/dev/serial/by-id/main", "-s", "38400",
+      "-P", "RIG",
       "-T", "127.0.0.1", "-t", "4601",
     ],
     host: "127.0.0.1",
@@ -84,6 +85,28 @@ test("builds managed rigctld argv without a shell and leaves network targets ext
     connection: { kind: "hamlib-dummy" },
   }), 4603);
   assert.deepEqual(dummy.command?.args, [
-    "-m", "1", "-T", "127.0.0.1", "-t", "4603",
+    "-m", "1", "-P", "NONE", "-T", "127.0.0.1", "-t", "4603",
+  ]);
+});
+
+test("passes Hamlib PTT method, device and GPIO bit without invoking a shell", () => {
+  const gpio = rigctldTarget(parseRadioProfile({
+    ...profile(),
+    ptt: { method: "GPIO", path: "/dev/gpiochip0", bit: 4 },
+  }), 4604);
+  assert.deepEqual(gpio.command?.args, [
+    "-m", "1049", "-r", "/dev/serial/by-id/main", "-s", "38400",
+    "-P", "GPIO", "-p", "/dev/gpiochip0", "-C", "ptt_bitnum=4",
+    "-T", "127.0.0.1", "-t", "4604",
+  ]);
+
+  const none = rigctldTarget(parseRadioProfile({
+    ...profile("dummy"),
+    hamlibModelId: 1,
+    connection: { kind: "hamlib-dummy" },
+    ptt: { method: "None" },
+  }), 4605);
+  assert.deepEqual(none.command?.args, [
+    "-m", "1", "-P", "NONE", "-T", "127.0.0.1", "-t", "4605",
   ]);
 });

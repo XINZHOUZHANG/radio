@@ -21,34 +21,13 @@ type ParsedHash = PasswordHashPolicy & {
   tag: Buffer;
 };
 
-const COMMON_PASSWORDS = new Set([
-  "123456789012345",
-  "passwordpassword",
-  "qwertyuiop12345",
-  "radio-lite-server",
-]);
-
-export function normalizeNewPassword(password: string, username?: string): string {
+export function normalizeNewPassword(password: string, _username?: string): string {
   if (typeof password !== "string") {
     throw new TypeError("password must be text");
   }
   const normalized = password.normalize("NFC");
-  const characters = Array.from(normalized);
-  if (characters.length < 15 || characters.length > 128) {
-    throw new Error("password must contain 15..128 Unicode characters");
-  }
-  if (Buffer.byteLength(normalized, "utf8") > 1_024) {
-    throw new Error("password is too large when encoded as UTF-8");
-  }
-  const folded = normalized.toLocaleLowerCase("en-US");
-  if (COMMON_PASSWORDS.has(folded)) {
-    throw new Error("password is too common");
-  }
-  if (username !== undefined) {
-    const normalizedUsername = username.trim().toLocaleLowerCase("en-US");
-    if (normalizedUsername.length >= 3 && folded.includes(normalizedUsername)) {
-      throw new Error("password must not contain the username");
-    }
+  if (normalized.length === 0) {
+    throw new Error("password must not be empty");
   }
   return normalized;
 }
@@ -61,7 +40,7 @@ export async function hashPassword(password: string, username?: string): Promise
 }
 
 export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
-  if (typeof password !== "string" || Buffer.byteLength(password, "utf8") > 1_024) {
+  if (typeof password !== "string") {
     return false;
   }
   const parsed = parsePhc(encoded);

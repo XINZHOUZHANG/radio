@@ -23,17 +23,16 @@ test("stores and verifies an Argon2id PHC hash without plaintext", async () => {
   assert.equal(passwordHashNeedsUpgrade(encoded), false);
 });
 
-test("password policy accepts Unicode and rejects short, common and username-derived values", () => {
+test("password policy accepts any non-empty Unicode password without complexity rules", () => {
   assert.equal(
     normalizeNewPassword("远程电台安全密码，长度足够 2026", "connor"),
     "远程电台安全密码，长度足够 2026",
   );
-  assert.throws(() => normalizeNewPassword("too short"), /15\.\.128/u);
-  assert.throws(() => normalizeNewPassword("passwordpassword"), /too common/u);
-  assert.throws(
-    () => normalizeNewPassword("connor-has-a-long-password", "connor"),
-    /username/u,
-  );
+  assert.equal(normalizeNewPassword("1", "connor"), "1");
+  assert.equal(normalizeNewPassword("passwordpassword", "connor"), "passwordpassword");
+  assert.equal(normalizeNewPassword("connor", "connor"), "connor");
+  assert.throws(() => normalizeNewPassword(""), /must not be empty/u);
+  assert.equal(normalizeNewPassword("界".repeat(2_000)), "界".repeat(2_000));
 });
 
 test("users.json supports first admin, operators, login and the final-admin invariant", async (context) => {
@@ -56,6 +55,14 @@ test("users.json supports first admin, operators, login and the final-admin inva
     store.initializeAdmin("second", "Another admin password 2026!"),
     /already has/u,
   );
+
+  const shortPasswordUser = await store.create({
+    username: "short.password",
+    password: "x",
+    role: "operator",
+    canTransmit: false,
+  });
+  assert.equal((await store.authenticate(shortPasswordUser.username, "x"))?.id, shortPasswordUser.id);
 
   const operator = await store.create({
     username: "operator.one",

@@ -51,6 +51,83 @@ test("validates and normalizes a multi-radio configuration", () => {
   assert.equal(result.radios.length, 2);
   assert.equal(result.radios[1].station.callsign, "BI1XYZ/P");
   assert.equal(result.radios[1].station.grid, "OM89AA");
+  assert.deepEqual(result.radios[0].ptt, { method: "RIG" });
+});
+
+test("validates Hamlib PTT methods, device paths and GPIO bit numbers", () => {
+  const gpio = parseRadioConfig({
+    version: RADIO_CONFIG_VERSION,
+    radios: [validRadio({
+      ptt: { method: "GPIO", path: "/dev/gpiochip0", bit: 4 },
+    })],
+  });
+  assert.deepEqual(gpio.radios[0].ptt, {
+    method: "GPIO",
+    path: "/dev/gpiochip0",
+    bit: 4,
+  });
+
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({
+        ptt: { method: "GPIO", path: "/dev/gpiochip0", bit: 8 },
+      })],
+    }),
+    /bit must be in 0\.\.7/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({ ptt: { method: "RIG", path: "/dev/ttyUSB1" } })],
+    }),
+    /path is not used/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({ ptt: { method: "DTR" } })],
+    }),
+    /path is required/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({
+        ptt: { method: "AUTO" },
+      })],
+    }),
+    /method is unsupported/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({
+        connection: { kind: "network-rigctld", host: "rig.local", port: 4532 },
+        ptt: { method: "DTR", path: "/dev/ttyUSB1" },
+      })],
+    }),
+    /network rigctld manages PTT externally/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({
+        hardwareTxEnabled: true,
+        ptt: { method: "None" },
+      })],
+    }),
+    /cannot enable hardware transmission/u,
+  );
+  assert.throws(
+    () => parseRadioConfig({
+      version: RADIO_CONFIG_VERSION,
+      radios: [validRadio({
+        ptt: { method: "DTR", path: "/dev/ttyUSB1", bit: 2 },
+      })],
+    }),
+    /bit is only used/u,
+  );
 });
 
 test("rejects duplicate ids, unknown fields, unsafe serial paths and Dummy TX", () => {
@@ -88,6 +165,7 @@ test("rejects duplicate ids, unknown fields, unsafe serial paths and Dummy TX", 
     })],
   });
   assert.deepEqual(dummy.radios[0].connection, { kind: "hamlib-dummy" });
+  assert.deepEqual(dummy.radios[0].ptt, { method: "None" });
 });
 
 test("parses the installed Hamlib catalog instead of freezing model ids", () => {
