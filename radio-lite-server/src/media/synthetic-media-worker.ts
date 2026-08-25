@@ -6,6 +6,7 @@ import type {
   MediaWorkerOutput,
   SpectrumCapability,
 } from "./media-hub.ts";
+import { SPECTRUM_SPAN_HZ } from "./spectrum-analyzer.ts";
 
 export const createSyntheticMediaWorker: MediaWorkerFactory = async (
   _profile,
@@ -21,7 +22,7 @@ export class SyntheticMediaWorker implements MediaWorker {
     supportsWaterfall: true,
     maxBins: 512,
     maxFps: 5,
-    spanHz: 3_000,
+    spanHz: SPECTRUM_SPAN_HZ,
   };
   readonly #output: MediaWorkerOutput;
   #policy: MediaPolicy = {
@@ -83,7 +84,7 @@ export class SyntheticMediaWorker implements MediaWorker {
     this.#phase = (this.#phase + 0.15) % (Math.PI * 2);
     this.#output.spectrum({
       centerFrequencyHz: 14_074_000,
-      spanHz: 3_000,
+      spanHz: SPECTRUM_SPAN_HZ,
       noiseFloorTenthsDbm: -1_200,
       bins,
     });

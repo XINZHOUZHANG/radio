@@ -275,6 +275,10 @@ class DigitalFakeRig implements RigControl {
     return value;
   }
   async setInternalTuner(_value: boolean) { return true; }
+  async readControls() { return []; }
+  async setControl(_id: string, _value: number): Promise<never> {
+    throw new Error("digital controller test rig has no adjustable controls");
+  }
 }
 
 function profile(): RadioProfile {

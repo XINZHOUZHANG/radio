@@ -3,6 +3,8 @@ export type SpectrumAnalysis = {
   noiseFloorTenthsDbm: number;
 };
 
+export const SPECTRUM_SPAN_HZ = 4_000;
+
 export class PcmSpectrumAnalyzer {
   readonly #sampleRate: number;
   readonly #fftSize: number;
@@ -10,7 +12,7 @@ export class PcmSpectrumAnalyzer {
 
   constructor(options: { sampleRate?: number; fftSize?: number } = {}) {
     this.#sampleRate = positiveInteger(options.sampleRate ?? 16_000, "sample rate");
-    this.#fftSize = positivePowerOfTwo(options.fftSize ?? 1_024, "FFT size");
+    this.#fftSize = positivePowerOfTwo(options.fftSize ?? 2_048, "FFT size");
     if (this.#fftSize < 256 || this.#fftSize > 8_192) {
       throw new Error("FFT size must be in 256..8192");
     }
@@ -37,7 +39,11 @@ export class PcmSpectrumAnalyzer {
     if (binCount !== 128 && binCount !== 256 && binCount !== 512) {
       throw new Error("spectrum bins must be 128, 256 or 512");
     }
-    if (binCount > this.#fftSize / 2) {
+    const rawBins = Math.min(
+      this.#fftSize / 2,
+      Math.floor(this.#fftSize * SPECTRUM_SPAN_HZ / this.#sampleRate) + 1,
+    );
+    if (binCount > rawBins) {
       throw new Error("spectrum bins exceed the FFT Nyquist output");
     }
     if (this.#samples.length < this.#fftSize) {
@@ -50,7 +56,6 @@ export class PcmSpectrumAnalyzer {
       real[index] = this.#samples[index] * hann;
     }
     fftInPlace(real, imaginary);
-    const rawBins = this.#fftSize / 2;
     const decibels = new Float64Array(rawBins);
     for (let index = 0; index < rawBins; index += 1) {
       const magnitude = Math.hypot(real[index], imaginary[index]) / (this.#fftSize / 2);

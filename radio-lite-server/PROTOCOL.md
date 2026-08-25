@@ -160,6 +160,34 @@ normalizes them before calling rigctld. A successful `rig.mode.confirmed` reply
 returns the actual Hamlib read-back token. Hamlib rejection and failed read-back
 use the stable error codes `rig_mode_rejected` and `rig_mode_unconfirmed`.
 
+The client discovers safe radio adjustments instead of assuming that every
+Hamlib backend exposes the same knobs:
+
+```json
+{"t":"rig.controls.get","radioId":"main","commandId":"controls-1"}
+{"t":"rig.controls","radioId":"main","commandId":"controls-1","controls":[
+  {"id":"level:RFPOWER","kind":"level","token":"RFPOWER","value":0.25,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true},
+  {"id":"function:NB","kind":"function","token":"NB","value":1,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":false},
+  {"id":"passband:CURRENT","kind":"passband","token":"CURRENT","value":3000,"minimum":100,"maximum":12000,"step":50,"unit":"hertz","transmitLocked":false}
+]}
+```
+
+Only the readable/writable Hamlib capability intersection and the server's
+finite safety allowlist are returned. Level granularity comes from rigctl's
+`set_level <token> ?` query when the backend reports it. A write carries the
+opaque discovered `id`, never a raw CAT or rigctl command, and the server reads
+the value back before confirming it:
+
+```json
+{"t":"rig.control.set","radioId":"main","controlToken":"...","controlId":"level:RFPOWER","value":0.35,"commandId":"control-1"}
+{"t":"rig.control.confirmed","radioId":"main","commandId":"control-1","control":{"id":"level:RFPOWER","kind":"level","token":"RFPOWER","value":0.35,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true}}
+```
+
+`RFPOWER`, `MICGAIN` and compressor controls are marked `transmitLocked` and
+cannot change while any transmission lease is active. The server enforces this
+atomically with transmit start/stop; the iOS disabled state is only a visual
+hint. Unsupported controls are absent rather than presented as inert switches.
+
 Clients may use `tx.start` only for `voice` and `tuning`. FT8/FT4 transmission
 must go through the digital queue below; the server rejects a raw client
 `tx.start` with `mode: "digital"` so a client cannot create an unmodulated
@@ -269,7 +297,7 @@ unrelated subscribe or uplink-bind request.
   "radioId":"main",
   "radioSlot":0,
   "policy":{"tier":"normal","opusBitrate":20000,"opusFrameMs":20,"spectrumBins":512,"spectrumFps":5},
-  "spectrum":{"available":true,"source":"audio-fft","simulated":false,"supportsWaterfall":true,"maxBins":512,"maxFps":5,"spanHz":8000}
+  "spectrum":{"available":true,"source":"audio-fft","simulated":false,"supportsWaterfall":true,"maxBins":512,"maxFps":5,"spanHz":4000}
 }
 ```
 
@@ -312,8 +340,9 @@ rejected. The server never enables WebSocket compression for binary media.
 
 The spectrum payload begins with another 16-byte header. For the `audio-fft`
 source, `center frequency` is the tuned radio reference and the FFT bins cover
-the one-sided receive-audio range from 0 Hz through `span`; it is not presented
-as a calibrated wideband SDR panadapter:
+the receive-audio baseband from 0 Hz through the advertised 4 kHz `span`; it is
+not presented as a calibrated wideband SDR panadapter. Opus and digital PCM stay
+at 16 kHz; only out-of-band spectrum bins are omitted:
 
 ```text
 offset  size  field

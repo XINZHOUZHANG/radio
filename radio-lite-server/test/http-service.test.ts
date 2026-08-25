@@ -263,6 +263,42 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.frequencyHz, 7_074_000);
 
   reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.controls.get",
+    radioId: "main",
+    commandId: "controls-1",
+  });
+  assert.equal(reply.t, "rig.controls");
+  assert.equal(reply.commandId, "controls-1");
+  assert.deepEqual(reply.controls.map((control: { id: string }) => control.id), [
+    "level:RFPOWER",
+    "level:AF",
+  ]);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.controls.get",
+    radioId: "main",
+    commandId: "controls-extra-field",
+    unexpected: true,
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.requestType, "rig.controls.get");
+  assert.equal(reply.code, "invalid_command");
+  assert.match(reply.message, /unknown control field/u);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "level:RFPOWER",
+    value: 0.3,
+    commandId: "control-power-1",
+  });
+  assert.equal(reply.t, "rig.control.confirmed");
+  assert.equal(reply.commandId, "control-power-1");
+  assert.equal(reply.control.id, "level:RFPOWER");
+  assert.equal(reply.control.value, 0.3);
+
+  reply = await sendJsonAndReceive(webSocket, {
     t: "digital.snapshot.get",
     radioId: "main",
   });
@@ -405,6 +441,19 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.t, "tx.started");
   assert.equal(rig.ptt, true);
   const transmitToken = reply.transmitToken;
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "level:RFPOWER",
+    value: 0.6,
+    commandId: "control-power-during-tx",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.requestType, "rig.control.set");
+  assert.equal(reply.code, "rig_control_tx_locked");
+  assert.equal(rig.controls.get("level:RFPOWER"), 0.3);
 
   reply = await sendJsonAndReceive(mediaSocket, {
     t: "media.uplink.bind",
@@ -591,6 +640,10 @@ class ApiFakeRig implements RigControl {
   ptt = false;
   tuner = false;
   rejectedMode: string | null = null;
+  controls = new Map<string, number>([
+    ["level:RFPOWER", 0.5],
+    ["level:AF", 0.4],
+  ]);
 
   async readState() {
     return {
@@ -611,4 +664,23 @@ class ApiFakeRig implements RigControl {
   }
   async setPtt(value: boolean) { this.ptt = value; return value; }
   async setInternalTuner(value: boolean) { this.tuner = value; return value; }
+  async readControls() {
+    return [...this.controls].map(([id, value]) => ({
+      id,
+      kind: "level" as const,
+      token: id.split(":")[1]!,
+      value,
+      minimum: 0,
+      maximum: 1,
+      step: 0.01,
+      unit: "ratio" as const,
+      transmitLocked: id === "level:RFPOWER",
+    }));
+  }
+  async setControl(id: string, value: number) {
+    const control = (await this.readControls()).find((candidate) => candidate.id === id);
+    if (control === undefined) throw new Error("control unavailable");
+    this.controls.set(id, value);
+    return { ...control, value };
+  }
 }

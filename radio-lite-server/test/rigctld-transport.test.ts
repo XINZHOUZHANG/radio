@@ -140,11 +140,177 @@ test("real rigs still surface unavailable PTT read-back from Hamlib", async () =
   );
 });
 
+test("Hamlib controls are the safe readable and writable capability intersection", async () => {
+  const commands: string[] = [];
+  const levelValues = new Map([
+    ["AF", "0.42"],
+    ["RFPOWER", "0.25"],
+  ]);
+  const functionValues = new Map([
+    ["NB", "1"],
+    ["ANF", "0"],
+  ]);
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_level ?") {
+        return responseValues("get_level", ["AF RFPOWER STRENGTH NB"]);
+      }
+      if (command === "\\set_level ?") {
+        return response("set_level", { Level: "MICGAIN RFPOWER AF RAWSTR" });
+      }
+      if (command === "\\get_func ?") {
+        return response("get_func", { Func: "NB NR ANF TUNER" });
+      }
+      if (command === "\\set_func ?") {
+        return responseValues("set_func", ["COMP NB ANF"]);
+      }
+      if (command === "\\set_level AF ?" || command === "\\set_level RFPOWER ?") {
+        return responseValues("set_level", ["(0.000000..1.000000/0.010000)"]);
+      }
+      if (command.startsWith("\\get_level ")) {
+        const token = command.split(" ")[1] ?? "";
+        return responseValues("get_level", [levelValues.get(token) ?? "0"]);
+      }
+      if (command.startsWith("\\get_func ")) {
+        const token = command.split(" ")[1] ?? "";
+        return responseValues("get_func", [functionValues.get(token) ?? "0"]);
+      }
+      if (command === "\\get_mode") {
+        return response("get_mode", { Mode: "PKTUSB", Passband: "3000" });
+      }
+      throw new Error(`unexpected command ${command}`);
+    },
+  });
+
+  const controls = await rig.readControls();
+  assert.deepEqual(controls.map((control) => control.id), [
+    "level:RFPOWER",
+    "level:AF",
+    "function:NB",
+    "function:ANF",
+    "passband:CURRENT",
+  ]);
+  assert.deepEqual(controls[0], {
+    id: "level:RFPOWER",
+    kind: "level",
+    token: "RFPOWER",
+    value: 0.25,
+    minimum: 0,
+    maximum: 1,
+    step: 0.01,
+    unit: "ratio",
+    transmitLocked: true,
+  });
+  assert.equal(controls[1]?.value, 0.42);
+  assert.equal(controls[2]?.value, 1);
+  assert.deepEqual(controls.at(-1), {
+    id: "passband:CURRENT",
+    kind: "passband",
+    token: "CURRENT",
+    value: 3_000,
+    minimum: 100,
+    maximum: 12_000,
+    step: 50,
+    unit: "hertz",
+    transmitLocked: false,
+  });
+  assert.equal(commands.filter((command) => command === "\\get_level ?").length, 1);
+  assert.equal(commands.filter((command) => command === "\\set_level ?").length, 1);
+});
+
+test("Hamlib control writes validate, write once and confirm the read-back", async () => {
+  const commands: string[] = [];
+  let rfPower = 0.2;
+  let noiseBlanker = false;
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_level ?" || command === "\\set_level ?") {
+        return responseValues(command.includes("get_") ? "get_level" : "set_level", ["RFPOWER"]);
+      }
+      if (command === "\\get_func ?" || command === "\\set_func ?") {
+        return responseValues(command.includes("get_") ? "get_func" : "set_func", ["NB"]);
+      }
+      if (command === "\\set_level RFPOWER ?") {
+        return responseValues("set_level", ["(0.000000..1.000000/0.010000)"]);
+      }
+      if (command.startsWith("\\set_level RFPOWER ")) {
+        rfPower = Number(command.split(" ")[2]);
+        return response("set_level", {});
+      }
+      if (command === "\\get_level RFPOWER") {
+        return responseValues("get_level", [String(rfPower)]);
+      }
+      if (command.startsWith("\\set_func NB ")) {
+        noiseBlanker = command.endsWith(" 1");
+        return response("set_func", {});
+      }
+      if (command === "\\get_func NB") {
+        return responseValues("get_func", [noiseBlanker ? "1" : "0"]);
+      }
+      if (command === "\\get_mode") {
+        return response("get_mode", { Mode: "USB", Passband: "2400" });
+      }
+      throw new Error(`unexpected command ${command}`);
+    },
+  });
+
+  await rig.readControls();
+  const power = await rig.setControl("level:RFPOWER", 0.35);
+  assert.equal(power.value, 0.35);
+  const nb = await rig.setControl("function:NB", 1);
+  assert.equal(nb.value, 1);
+  await assert.rejects(rig.setControl("level:RFPOWER", 1.5), /outside/u);
+  await assert.rejects(rig.setControl("level:STRENGTH", 0.5), /unavailable/u);
+  assert.deepEqual(commands.slice(-4), [
+    "\\set_level RFPOWER 0.35",
+    "\\get_level RFPOWER",
+    "\\set_func NB 1",
+    "\\get_func NB",
+  ]);
+});
+
+test("Hamlib rejects a control write whose read-back does not match", async () => {
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      if (command === "\\get_level ?" || command === "\\set_level ?") {
+        return responseValues(command.includes("get_") ? "get_level" : "set_level", ["RFPOWER"]);
+      }
+      if (command === "\\get_func ?" || command === "\\set_func ?") {
+        return responseValues(command.includes("get_") ? "get_func" : "set_func", []);
+      }
+      if (command === "\\set_level RFPOWER ?") {
+        return responseValues("set_level", ["(0.000000..1.000000/0.010000)"]);
+      }
+      if (command === "\\get_level RFPOWER") {
+        return responseValues("get_level", ["0.10"]);
+      }
+      if (command === "\\get_mode") {
+        return response("get_mode", { Mode: "USB", Passband: "2400" });
+      }
+      return response(command.slice(1).split(" ")[0] ?? "set_level", {});
+    },
+  });
+
+  await rig.readControls();
+  await assert.rejects(rig.setControl("level:RFPOWER", 0.5), /read-back mismatch/u);
+});
+
 function response(command: string, fields: Record<string, string>) {
   return {
     command,
     fields: new Map(Object.entries(fields)),
     values: [],
+    report: 0,
+  };
+}
+
+function responseValues(command: string, values: string[]) {
+  return {
+    command,
+    fields: new Map<string, string>(),
+    values,
     report: 0,
   };
 }

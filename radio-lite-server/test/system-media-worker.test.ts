@@ -49,6 +49,46 @@ test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => 
   assert.throws(() => opusEncoderCommand(100_000), /bitrate/u);
 });
 
+test("system worker advertises a 4 kHz spectrum span", async (context) => {
+  const processes: FakeProcess[] = [];
+  const spawnProcess = (() => {
+    const child = new FakeProcess();
+    processes.push(child);
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  }) as unknown as typeof spawn;
+  const worker = await SystemMediaWorker.create(profile(), {
+    audioDownlink: () => undefined,
+    spectrum: () => undefined,
+    fault: (error) => { throw error; },
+  }, { spawnProcess });
+  context.after(() => worker.close());
+
+  assert.equal(worker.spectrumCapability.spanHz, 4_000);
+});
+
+test("system worker emits spectrum frames with a 4 kHz span", async (context) => {
+  const processes: FakeProcess[] = [];
+  const frames: Array<{ spanHz: number }> = [];
+  const spawnProcess = (() => {
+    const child = new FakeProcess();
+    processes.push(child);
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  }) as unknown as typeof spawn;
+  const worker = await SystemMediaWorker.create(profile(), {
+    audioDownlink: () => undefined,
+    spectrum: (frame) => frames.push(frame),
+    fault: (error) => { throw error; },
+  }, { spawnProcess, now: () => 5_000 });
+  context.after(() => worker.close());
+
+  processes[0].stdout.write(Buffer.alloc(2_048 * 2));
+  await delay(240);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].spanHz, 4_000);
+});
+
 test("system worker routes capture, Opus packets and playback through bounded child pipes", async (context) => {
   const processes: FakeProcess[] = [];
   const commands: Array<{ file: string; args: string[] }> = [];
@@ -62,17 +102,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   const downlink: Buffer[] = [];
   const capturedPcm: Array<{ pcm: Buffer; sampleRate: number; startedAtMs: number }> = [];
   const faults: unknown[] = [];
-  const worker = await SystemMediaWorker.create({
-    id: "main",
-    name: "FT-710",
-    hamlibModelId: 1049,
-    connection: { kind: "network-rigctld", host: "127.0.0.1", port: 4532 },
-    audioInput: { backend: "alsa", id: "hw:1,0" },
-    audioOutput: { backend: "pulse", id: "radio-sink" },
-    ptt: { method: "RIG" },
-    station: { callsign: "BI1ABC", grid: "OM89" },
-    hardwareTxEnabled: true,
-  }, {
+  const worker = await SystemMediaWorker.create(profile(), {
     audioDownlink: (payload) => downlink.push(Buffer.from(payload)),
     spectrum: () => undefined,
     pcmCapture: (value) => capturedPcm.push({ ...value, pcm: Buffer.from(value.pcm) }),
@@ -176,4 +206,22 @@ class FakeProcess extends EventEmitter {
 
 function immediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function profile() {
+  return {
+    id: "main",
+    name: "FT-710",
+    hamlibModelId: 1049,
+    connection: { kind: "network-rigctld" as const, host: "127.0.0.1", port: 4532 },
+    audioInput: { backend: "alsa" as const, id: "hw:1,0" },
+    audioOutput: { backend: "pulse" as const, id: "radio-sink" },
+    ptt: { method: "RIG" as const },
+    station: { callsign: "BI1ABC", grid: "OM89" },
+    hardwareTxEnabled: true,
+  };
 }

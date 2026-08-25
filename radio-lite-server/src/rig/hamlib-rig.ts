@@ -13,6 +13,23 @@ export type HamlibRigState = {
   ptt: boolean;
 };
 
+export type HamlibRigControlKind = "level" | "function" | "passband";
+export type HamlibRigControlUnit = "ratio" | "decibel" | "index" | "boolean" | "hertz";
+
+export type HamlibRigControl = {
+  id: string;
+  kind: HamlibRigControlKind;
+  token: string;
+  value: number;
+  minimum: number;
+  maximum: number;
+  step: number;
+  unit: HamlibRigControlUnit;
+  transmitLocked: boolean;
+};
+
+type HamlibRigControlDefinition = Omit<HamlibRigControl, "value">;
+
 export type HamlibRigOptions = {
   pttMethod?: PttMethod;
 };
@@ -81,10 +98,53 @@ export function normalizeHamlibMode(mode: string): string {
   return canonical;
 }
 
+const LEVEL_CONTROL_DEFINITIONS: readonly HamlibRigControlDefinition[] = [
+  levelDefinition("RFPOWER", "ratio", 0, 1, 0.01, true),
+  levelDefinition("AF", "ratio", 0, 1, 0.01),
+  levelDefinition("RF", "ratio", 0, 1, 0.01),
+  levelDefinition("SQL", "ratio", 0, 1, 0.01),
+  levelDefinition("MICGAIN", "ratio", 0, 1, 0.01, true),
+  levelDefinition("COMP", "ratio", 0, 1, 0.01, true),
+  levelDefinition("AGC", "index", 0, 6, 1),
+  levelDefinition("ATT", "decibel", 0, 60, 1),
+  levelDefinition("PREAMP", "decibel", 0, 60, 1),
+  levelDefinition("NB", "ratio", 0, 1, 0.01),
+  levelDefinition("NR", "ratio", 0, 1, 0.01),
+];
+
+const FUNCTION_CONTROL_DEFINITIONS: readonly HamlibRigControlDefinition[] = [
+  functionDefinition("COMP", true),
+  functionDefinition("NB"),
+  functionDefinition("NR"),
+  functionDefinition("ANF"),
+];
+
+const PASSBAND_CONTROL: HamlibRigControlDefinition = {
+  id: "passband:CURRENT",
+  kind: "passband",
+  token: "CURRENT",
+  minimum: 100,
+  maximum: 12_000,
+  step: 50,
+  unit: "hertz",
+  transmitLocked: false,
+};
+
+const TRANSMIT_LOCKED_CONTROL_IDS = new Set(
+  [...LEVEL_CONTROL_DEFINITIONS, ...FUNCTION_CONTROL_DEFINITIONS]
+    .filter((control) => control.transmitLocked)
+    .map((control) => control.id),
+);
+
+export function isTransmitLockedRigControlId(id: string): boolean {
+  return TRANSMIT_LOCKED_CONTROL_IDS.has(id);
+}
+
 export class HamlibRig {
   readonly #transport: RigRequester;
   readonly #unavailablePttIsSafe: boolean;
   #lastCommandedPtt = false;
+  #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
 
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
     this.#transport = transport;
@@ -143,6 +203,54 @@ export class HamlibRig {
     return { mode: confirmedMode, passbandHz: confirmedPassband };
   }
 
+  async readControls(): Promise<HamlibRigControl[]> {
+    const definitions = await this.#discoverControlDefinitions();
+    const controls: HamlibRigControl[] = [];
+    for (const definition of definitions) {
+      try {
+        controls.push({
+          ...definition,
+          value: await this.#readControlValue(definition),
+        });
+      } catch (error) {
+        if (!(error instanceof RigReportError)) {
+          throw error;
+        }
+      }
+    }
+    return controls;
+  }
+
+  async setControl(id: string, value: number): Promise<HamlibRigControl> {
+    if (!Number.isFinite(value)) {
+      throw new Error("control value must be finite");
+    }
+    const definition = (await this.#discoverControlDefinitions())
+      .find((candidate) => candidate.id === id);
+    if (definition === undefined) {
+      throw new Error(`control ${id} is unavailable`);
+    }
+    validateControlValue(definition, value);
+
+    if (definition.kind === "level") {
+      await this.#transport.request(`\\set_level ${definition.token} ${formatRigNumber(value)}`);
+    } else if (definition.kind === "function") {
+      await this.#transport.request(`\\set_func ${definition.token} ${value}`);
+    } else {
+      const mode = await this.#transport.request("\\get_mode");
+      await this.setMode(tokenField(mode, "Mode"), value);
+    }
+
+    const confirmed = await this.#readControlValue(definition);
+    const tolerance = Math.max(definition.step / 2, 1e-6);
+    if (Math.abs(confirmed - value) > tolerance) {
+      throw new Error(
+        `control read-back mismatch: requested ${value}, received ${confirmed}`,
+      );
+    }
+    return { ...definition, value: confirmed };
+  }
+
   async setPtt(enabled: boolean): Promise<boolean> {
     if (typeof enabled !== "boolean") {
       throw new Error("PTT state must be boolean");
@@ -199,6 +307,168 @@ export class HamlibRig {
     }
     return confirmed;
   }
+
+  async #discoverControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
+    this.#controlDefinitions ??= this.#loadControlDefinitions().catch((error) => {
+      this.#controlDefinitions = null;
+      throw error;
+    });
+    return this.#controlDefinitions;
+  }
+
+  async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
+    const [readableLevels, writableLevels, readableFunctions, writableFunctions] =
+      await Promise.all([
+        this.#queryCapabilityTokens("\\get_level ?", "Level"),
+        this.#queryCapabilityTokens("\\set_level ?", "Level"),
+        this.#queryCapabilityTokens("\\get_func ?", "Func"),
+        this.#queryCapabilityTokens("\\set_func ?", "Func"),
+      ]);
+    const levelIntersection = intersection(readableLevels, writableLevels);
+    const functionIntersection = intersection(readableFunctions, writableFunctions);
+    const levels: HamlibRigControlDefinition[] = [];
+    for (const definition of LEVEL_CONTROL_DEFINITIONS) {
+      if (!levelIntersection.has(definition.token)) {
+        continue;
+      }
+      levels.push(await this.#levelDefinitionWithRigGranularity(definition));
+    }
+    return [
+      ...levels,
+      ...FUNCTION_CONTROL_DEFINITIONS.filter((definition) =>
+        functionIntersection.has(definition.token)),
+      PASSBAND_CONTROL,
+    ];
+  }
+
+  async #queryCapabilityTokens(command: string, field: string): Promise<ReadonlySet<string>> {
+    let response: RigResponse;
+    try {
+      response = await this.#transport.request(command);
+    } catch (error) {
+      if (error instanceof RigReportError) {
+        return new Set();
+      }
+      throw error;
+    }
+    const text = response.fields.get(field) ?? response.values.join(" ");
+    return new Set(
+      text.split(/\s+/u)
+        .map((token) => token.trim().toUpperCase())
+        .filter((token) => /^[A-Z][A-Z0-9_]{0,31}$/u.test(token)),
+    );
+  }
+
+  async #levelDefinitionWithRigGranularity(
+    fallback: HamlibRigControlDefinition,
+  ): Promise<HamlibRigControlDefinition> {
+    try {
+      const response = await this.#transport.request(`\\set_level ${fallback.token} ?`);
+      const raw = response.values[0] ?? response.fields.get("Level Value") ?? "";
+      const granularity = parseLevelGranularity(raw);
+      return granularity === null ? fallback : { ...fallback, ...granularity };
+    } catch (error) {
+      if (error instanceof RigReportError) {
+        return fallback;
+      }
+      throw error;
+    }
+  }
+
+  async #readControlValue(definition: HamlibRigControlDefinition): Promise<number> {
+    if (definition.kind === "passband") {
+      return integerField(await this.#transport.request("\\get_mode"), "Passband");
+    }
+    const command = definition.kind === "level" ? "get_level" : "get_func";
+    const response = await this.#transport.request(`\\${command} ${definition.token}`);
+    return numericResponseValue(response, definition.token);
+  }
+}
+
+function levelDefinition(
+  token: string,
+  unit: HamlibRigControlUnit,
+  minimum: number,
+  maximum: number,
+  step: number,
+  transmitLocked = false,
+): HamlibRigControlDefinition {
+  return {
+    id: `level:${token}`,
+    kind: "level",
+    token,
+    minimum,
+    maximum,
+    step,
+    unit,
+    transmitLocked,
+  };
+}
+
+function functionDefinition(token: string, transmitLocked = false): HamlibRigControlDefinition {
+  return {
+    id: `function:${token}`,
+    kind: "function",
+    token,
+    minimum: 0,
+    maximum: 1,
+    step: 1,
+    unit: "boolean",
+    transmitLocked,
+  };
+}
+
+function intersection(left: ReadonlySet<string>, right: ReadonlySet<string>): Set<string> {
+  return new Set([...left].filter((value) => right.has(value)));
+}
+
+function parseLevelGranularity(
+  value: string,
+): Pick<HamlibRigControlDefinition, "minimum" | "maximum" | "step"> | null {
+  const match = /^\(\s*([-+]?\d+(?:\.\d+)?)\.\.([-+]?\d+(?:\.\d+)?)\/([-+]?\d+(?:\.\d+)?)\s*\)$/u
+    .exec(value.trim());
+  if (match === null) {
+    return null;
+  }
+  const minimum = Number(match[1]);
+  const maximum = Number(match[2]);
+  const step = Number(match[3]);
+  if (![minimum, maximum, step].every(Number.isFinite) || minimum >= maximum || step <= 0) {
+    return null;
+  }
+  return { minimum, maximum, step };
+}
+
+function validateControlValue(definition: HamlibRigControlDefinition, value: number): void {
+  const epsilon = Math.max(Math.abs(definition.step) * 1e-6, 1e-9);
+  if (value < definition.minimum - epsilon || value > definition.maximum + epsilon) {
+    throw new Error(`control value is outside ${definition.minimum}..${definition.maximum}`);
+  }
+  const steps = (value - definition.minimum) / definition.step;
+  if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+    throw new Error(`control value must use step ${definition.step}`);
+  }
+  if (definition.kind === "function" && value !== 0 && value !== 1) {
+    throw new Error("function control value must be 0 or 1");
+  }
+  if (definition.kind === "passband" && !Number.isSafeInteger(value)) {
+    throw new Error("passband control value must be an integer");
+  }
+}
+
+function formatRigNumber(value: number): string {
+  return Number.isSafeInteger(value) ? String(value) : value.toString();
+}
+
+function numericResponseValue(response: RigResponse, fallbackField: string): number {
+  const raw = response.values[0]
+    ?? response.fields.get(fallbackField)
+    ?? response.fields.values().next().value;
+  const value = raw === undefined ? Number.NaN : Number(raw.trim());
+  if (!Number.isFinite(value)) {
+    throw new Error(`${response.command} response has invalid value`);
+  }
+  return value;
 }
 
 function integerField(response: RigResponse, field: string): number {

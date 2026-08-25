@@ -6,6 +6,7 @@ import { parseRadioProfile } from "../src/config/types.ts";
 import { ControlBusyError } from "../src/control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
+  RigControlTransmitLockedError,
   RadioRuntime,
   RadioRuntimeRegistry,
   TransmitPermissionError,
@@ -18,6 +19,10 @@ class FakeRig implements RigControl {
   passbandHz = 3_000;
   ptt = false;
   tuner = false;
+  controls = new Map<string, number>([
+    ["level:RFPOWER", 0.5],
+    ["level:AF", 0.4],
+  ]);
   readonly events: string[] = [];
 
   async readState() { return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
@@ -25,6 +30,43 @@ class FakeRig implements RigControl {
   async setMode(value: string, passband = 0) { this.mode = value; this.passbandHz = passband || 2_400; this.events.push(`mode:${value}`); return { mode: this.mode, passbandHz: this.passbandHz }; }
   async setPtt(value: boolean) { this.ptt = value; this.events.push(`ptt:${value}`); return value; }
   async setInternalTuner(value: boolean) { this.tuner = value; this.events.push(`tuner:${value}`); return value; }
+  async readControls() {
+    return [...this.controls].map(([id, value]) => ({
+      id,
+      kind: "level" as const,
+      token: id.split(":")[1]!,
+      value,
+      minimum: 0,
+      maximum: 1,
+      step: 0.01,
+      unit: "ratio" as const,
+      transmitLocked: id === "level:RFPOWER",
+    }));
+  }
+  async setControl(id: string, value: number) {
+    const control = (await this.readControls()).find((candidate) => candidate.id === id);
+    if (control === undefined) throw new Error("control unavailable");
+    this.controls.set(id, value);
+    this.events.push(`control:${id}:${value}`);
+    return { ...control, value };
+  }
+}
+
+class DeferredControlRig extends FakeRig {
+  readonly controlWriteStarted = deferred<void>();
+  readonly allowControlWrite = deferred<void>();
+  pttWhenControlWritten: boolean | null = null;
+
+  async setControl(id: string, value: number) {
+    const control = (await this.readControls()).find((candidate) => candidate.id === id);
+    if (control === undefined) throw new Error("control unavailable");
+    this.controlWriteStarted.resolve();
+    await this.allowControlWrite.promise;
+    this.pttWhenControlWritten = this.ptt;
+    this.controls.set(id, value);
+    this.events.push(`control:${id}:${value}`);
+    return { ...control, value };
+  }
 }
 
 test("runtime requires one control lease for writes and force takeover de-keys old owner", async (context) => {
@@ -82,6 +124,93 @@ test("tuner is mutually exclusive with voice and disconnect releases both TX and
   assert.equal(rig.tuner, false);
   assert.equal(rig.ptt, false);
   assert.equal(runtime.control.snapshot(), null);
+});
+
+test("runtime locks transmit-sensitive Hamlib adjustments only while transmitting", async (context) => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+
+  const tx = await runtime.startTransmit("device-a", operator, control.lease.token, "voice");
+  await assert.rejects(
+    runtime.setControl("device-a", control.lease.token, "level:RFPOWER", 0.25),
+    RigControlTransmitLockedError,
+  );
+  const audioGain = await runtime.setControl(
+    "device-a",
+    control.lease.token,
+    "level:AF",
+    0.65,
+  );
+  assert.equal(audioGain.value, 0.65);
+  await runtime.stopTransmit("device-a", tx.leaseToken);
+  const power = await runtime.setControl(
+    "device-a",
+    control.lease.token,
+    "level:RFPOWER",
+    0.25,
+  );
+  assert.equal(power.value, 0.25);
+});
+
+test("runtime does not key PTT while a transmit-sensitive control write is pending", async (context) => {
+  const rig = new DeferredControlRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+
+  const updating = runtime.setControl(
+    "device-a",
+    control.lease.token,
+    "level:RFPOWER",
+    0.25,
+  );
+  await rig.controlWriteStarted.promise;
+  const starting = runtime.startTransmit("device-a", operator, control.lease.token, "voice");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pttWhileControlWriteWasBlocked = rig.ptt;
+
+  rig.allowControlWrite.resolve();
+  await updating;
+  const tx = await starting;
+  try {
+    assert.equal(pttWhileControlWriteWasBlocked, false);
+    assert.equal(rig.pttWhenControlWritten, false);
+    assert.equal(rig.ptt, true);
+  } finally {
+    await runtime.stopTransmit("device-a", tx.leaseToken);
+  }
+});
+
+test("runtime de-keys immediately when an allowed control write is stalled", async (context) => {
+  const rig = new DeferredControlRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+  const tx = await runtime.startTransmit("device-a", operator, control.lease.token, "voice");
+
+  const updating = runtime.setControl(
+    "device-a",
+    control.lease.token,
+    "level:AF",
+    0.65,
+  );
+  await rig.controlWriteStarted.promise;
+  const stopping = runtime.stopTransmit("device-a", tx.leaseToken);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pttAfterStopRequested = rig.ptt;
+
+  rig.allowControlWrite.resolve();
+  await Promise.all([updating, stopping]);
+  assert.equal(pttAfterStopRequested, false);
+  assert.equal(rig.ptt, false);
 });
 
 test("runtime registry waits for invalidated resources to close before creating a replacement", async (context) => {

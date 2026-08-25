@@ -13,7 +13,7 @@ import type {
 import type { MediaFrame } from "./frame.ts";
 import { OggOpusPacketReader, OggOpusWriter } from "./ogg-opus.ts";
 import { int16ToPcm16Le, resampleInt16 } from "./pcm-resampler.ts";
-import { PcmSpectrumAnalyzer } from "./spectrum-analyzer.ts";
+import { PcmSpectrumAnalyzer, SPECTRUM_SPAN_HZ } from "./spectrum-analyzer.ts";
 
 export type MediaCommand = {
   file: string;
@@ -97,14 +97,14 @@ export class SystemMediaWorker implements MediaWorker {
     supportsWaterfall: true,
     maxBins: 512,
     maxFps: 5,
-    spanHz: SAMPLE_RATE / 2,
+    spanHz: SPECTRUM_SPAN_HZ,
   };
   readonly #profile: RadioProfile;
   readonly #output: MediaWorkerOutput;
   readonly #spawnProcess: typeof spawn;
   readonly #readCenterFrequencyHz: () => Promise<number>;
   readonly #now: () => number;
-  readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 1_024 });
+  readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 2_048 });
   readonly #uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
   readonly #expectedExit = new WeakSet<ChildProcessWithoutNullStreams>();
   readonly #diagnostics = new WeakMap<ChildProcessWithoutNullStreams, string[]>();
@@ -400,7 +400,7 @@ export class SystemMediaWorker implements MediaWorker {
       }
       this.#output.spectrum({
         centerFrequencyHz: this.#lastCenterFrequencyHz,
-        spanHz: SAMPLE_RATE / 2,
+        spanHz: SPECTRUM_SPAN_HZ,
         noiseFloorTenthsDbm: analysis.noiseFloorTenthsDbm,
         bins: analysis.bins,
       }, BigInt(Math.trunc(now)) * 1_000n);

@@ -7,21 +7,29 @@ import {
   type TransmitLease,
   type TransmitMode,
 } from "../safety/transmit-interlock.ts";
-import { HamlibRig, type HamlibRigState } from "./hamlib-rig.ts";
+import {
+  HamlibRig,
+  isTransmitLockedRigControlId,
+  type HamlibRigControl,
+  type HamlibRigState,
+} from "./hamlib-rig.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
 import { RigctldTransport } from "./transport.ts";
 
 export type RigControl = {
   readState(): Promise<HamlibRigState>;
+  readControls(): Promise<HamlibRigControl[]>;
   setFrequency(frequencyHz: number): Promise<number>;
   setMode(mode: string, passbandHz?: number): Promise<{ mode: string; passbandHz: number }>;
+  setControl(id: string, value: number): Promise<HamlibRigControl>;
   setPtt(enabled: boolean): Promise<boolean>;
   setInternalTuner(enabled: boolean): Promise<boolean>;
 };
 
 export class HardwareTransmitDisabledError extends Error {}
 export class TransmitPermissionError extends Error {}
+export class RigControlTransmitLockedError extends Error {}
 
 export class RadioRuntime {
   readonly profile: RadioProfile;
@@ -76,6 +84,10 @@ export class RadioRuntime {
     return this.#rig.readState();
   }
 
+  readControls(): Promise<HamlibRigControl[]> {
+    return this.#rig.readControls();
+  }
+
   async acquireControl(
     ownerId: string,
     user: PublicUser,
@@ -120,23 +132,45 @@ export class RadioRuntime {
     return this.#rig.setMode(mode, passbandHz);
   }
 
+  async setControl(
+    ownerId: string,
+    controlToken: string,
+    controlId: string,
+    value: number,
+  ): Promise<HamlibRigControl> {
+    return this.#serialize(async () => {
+      this.control.assertValid(ownerId, controlToken);
+      if (
+        this.interlock.snapshot().lease !== null &&
+        isTransmitLockedRigControlId(controlId)
+      ) {
+        throw new RigControlTransmitLockedError(
+          "transmit-sensitive radio controls are locked while transmitting",
+        );
+      }
+      return this.#rig.setControl(controlId, value);
+    });
+  }
+
   async startTransmit(
     ownerId: string,
     user: PublicUser,
     controlToken: string,
     mode: TransmitMode,
   ): Promise<TransmitLease> {
-    const controlLease = this.control.assertValid(ownerId, controlToken);
-    if (controlLease.userId !== user.id) {
-      throw new TransmitPermissionError("control lease belongs to a different account");
-    }
-    if (!user.canTransmit) {
-      throw new TransmitPermissionError("account is not permitted to transmit");
-    }
-    if (!this.profile.hardwareTxEnabled && this.profile.hamlibModelId !== 1) {
-      throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
-    }
-    return this.interlock.start(ownerId, mode);
+    return this.#serialize(async () => {
+      const controlLease = this.control.assertValid(ownerId, controlToken);
+      if (controlLease.userId !== user.id) {
+        throw new TransmitPermissionError("control lease belongs to a different account");
+      }
+      if (!user.canTransmit) {
+        throw new TransmitPermissionError("account is not permitted to transmit");
+      }
+      if (!this.profile.hardwareTxEnabled && this.profile.hamlibModelId !== 1) {
+        throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
+      }
+      return this.interlock.start(ownerId, mode);
+    });
   }
 
   async heartbeatTransmit(

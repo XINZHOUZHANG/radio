@@ -19,6 +19,7 @@ import { HardwareDiscovery } from "../config/hardware-discovery.ts";
 import { ControlBusyError, InvalidControlLeaseError } from "../control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
+  RigControlTransmitLockedError,
   RadioRuntimeRegistry,
   TransmitPermissionError,
   type RadioRuntimeFactory,
@@ -612,6 +613,17 @@ export class RadioLiteService {
         sendWebSocketJson(webSocket, { t: "rig.state", radioId, commandId, state });
         return;
       }
+      if (message.t === "rig.controls.get") {
+        exactMessageKeys(message, ["t", "radioId", "commandId"]);
+        const controls = await runtime.readControls();
+        sendWebSocketJson(webSocket, {
+          t: "rig.controls",
+          radioId,
+          commandId,
+          controls,
+        });
+        return;
+      }
 
       const controlToken = () => messageText(message.controlToken, "controlToken", 128);
       if (message.t === "rig.frequency.set") {
@@ -636,6 +648,29 @@ export class RadioLiteService {
           message.passbandHz === undefined ? 0 : safeInteger(message.passbandHz, "passbandHz"),
         );
         sendWebSocketJson(webSocket, { t: "rig.mode.confirmed", radioId, commandId, ...result });
+        return;
+      }
+      if (message.t === "rig.control.set") {
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "controlToken", "controlId", "value", "commandId"],
+        );
+        const value = optionalNumber(message.value, "value");
+        if (value === undefined) {
+          throw new Error("value must be a finite number");
+        }
+        const control = await runtime.setControl(
+          ownerId,
+          controlToken(),
+          messageText(message.controlId, "controlId", 64),
+          value,
+        );
+        sendWebSocketJson(webSocket, {
+          t: "rig.control.confirmed",
+          radioId,
+          commandId,
+          control,
+        });
         return;
       }
       if (message.t === "digital.snapshot.get") {
@@ -1535,6 +1570,9 @@ function mapControlError(error: unknown): { code: string; message: string } {
   }
   if (error instanceof HardwareTransmitDisabledError) {
     return { code: "hardware_tx_disabled", message: "hardware transmission is disabled" };
+  }
+  if (error instanceof RigControlTransmitLockedError) {
+    return { code: "rig_control_tx_locked", message: error.message };
   }
   if (error instanceof InterlockConflictError) {
     return { code: "transmit_interlocked", message: error.message };
