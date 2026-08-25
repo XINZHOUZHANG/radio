@@ -153,6 +153,13 @@ or `text/plain`.
 radio commands require the per-radio `controlToken` returned by
 `control.acquire`. `tx.start` returns a separate high-entropy `transmitToken`.
 
+`rig.mode.set` carries a Hamlib mode token. Operator-facing DATA-U/DATA-L labels
+map to `PKTUSB`/`PKTLSB` on the wire; the service also accepts the finite legacy
+aliases `DATA-U`, `USB-DATA`, `DIGU`, `DATA-L`, `LSB-DATA`, and `DIGL` and
+normalizes them before calling rigctld. A successful `rig.mode.confirmed` reply
+returns the actual Hamlib read-back token. Hamlib rejection and failed read-back
+use the stable error codes `rig_mode_rejected` and `rig_mode_unconfirmed`.
+
 Clients may use `tx.start` only for `voice` and `tuning`. FT8/FT4 transmission
 must go through the digital queue below; the server rejects a raw client
 `tx.start` with `mode: "digital"` so a client cannot create an unmodulated
@@ -168,6 +175,11 @@ Voice transmit startup is deliberately ordered as follows:
 5. Send one `tx.heartbeat` about every two seconds while transmitting.
 6. Send `tx.stop` when the PTT button is released, then immediately stop and
    release the iOS audio session.
+
+When a bound voice transmission ends, the media channel emits
+`{"t":"media.uplink.ended","radioId":"main","transmitToken":"...","reason":"transmit_ended"}`.
+The client must stop only the uplink with that exact token so a delayed event
+from the previous PTT cannot cancel a replacement transmission.
 
 The server refuses voice PTT without a ready same-principal media subscription.
 It de-keys automatically if binding does not arrive, the media socket closes,
@@ -228,17 +240,55 @@ events can arrive between a command and its reply.
 Text frames on `/ws/media` are:
 
 ```json
-{"t":"media.subscribe","radioId":"main","spectrumVisible":true}
-{"t":"media.network","rttMs":80,"packetLossPercent":0.2,"bufferedBytes":0,"spectrumVisible":true}
-{"t":"media.uplink.bind","radioId":"main","transmitToken":"..."}
-{"t":"media.unsubscribe"}
+{"t":"media.subscribe","radioId":"main","spectrumVisible":true,"requestId":"01J..."}
+{"t":"media.network","rttMs":80,"packetLossPercent":0.2,"bufferedBytes":0,"spectrumVisible":true,"requestId":"01J..."}
+{"t":"media.uplink.bind","radioId":"main","transmitToken":"...","requestId":"01J..."}
+{"t":"media.unsubscribe","requestId":"01J..."}
 {"t":"ping"}
 ```
 
 The server answers with `media.subscribed`, `media.policy`,
-`media.uplink.bound`, `media.unsubscribed`, or `media.error`. When the app goes
-into the background it should report `spectrumVisible: false`; this makes the
-server stop sending spectrum frames without interrupting receive audio.
+`media.uplink.bound`, `media.unsubscribed`, or `media.error`. A subscription
+reply explicitly describes the spectrum source instead of making the client
+guess whether an empty display is still loading:
+
+Each of the four `media.*` requests above carries an opaque, non-empty
+`requestId` of at most 64 characters. Its synchronous success or
+`invalid_media_control` reply echoes that exact ID plus `requestType`; clients
+must resolve only the pending request with both matching values. Asynchronous
+errors such as `media_worker_failed`, `media_configuration_changed`, and
+`ptt_stop_failed` deliberately omit both fields and are delivered only through
+the media event path. This prevents one worker fault from also failing an
+unrelated subscribe or uplink-bind request.
+
+```json
+{
+  "t":"media.subscribed",
+  "requestId":"01J...",
+  "requestType":"media.subscribe",
+  "radioId":"main",
+  "radioSlot":0,
+  "policy":{"tier":"normal","opusBitrate":20000,"opusFrameMs":20,"spectrumBins":512,"spectrumFps":5},
+  "spectrum":{"available":true,"source":"audio-fft","simulated":false,"supportsWaterfall":true,"maxBins":512,"maxFps":5,"spanHz":8000}
+}
+```
+
+`audio-fft` is a real FFT of the configured receive audio input, `synthetic` is
+used only by Hamlib Dummy, and `none` carries the reason
+`spectrum_source_unavailable`. With `none`, both spectrum policy fields remain
+zero even after later good-network reports. When the app goes into the
+background it should report `spectrumVisible: false`; this makes the server stop
+sending spectrum frames for that client without interrupting receive audio or
+another foreground subscriber's spectrum. A shared worker runs at the highest
+frequency requested by its foreground subscribers, but the server independently
+throttles and downsamples each client to its own 512x5, 256x3 or 128x1 policy.
+
+If the receive-audio worker fails while subscribed, `media.error` includes
+`reconnectRequired: true`, an unavailable `spectrum` capability, and the current
+policy with `spectrumBins`/`spectrumFps` set to zero. Clients must immediately
+discard the last frame and waterfall history before attempting a fresh
+subscription; frozen data must never retain a live badge. This asynchronous
+event has no `requestId` or `requestType`.
 
 ## Binary media frame
 
@@ -260,7 +310,10 @@ Audio payloads are one 20 ms Opus packet, mono at 16 kHz. An uplink packet is
 limited to 1,500 bytes. Duplicate and out-of-order uplink sequences are
 rejected. The server never enables WebSocket compression for binary media.
 
-The spectrum payload begins with another 16-byte header:
+The spectrum payload begins with another 16-byte header. For the `audio-fft`
+source, `center frequency` is the tuned radio reference and the FFT bins cover
+the one-sided receive-audio range from 0 Hz through `span`; it is not presented
+as a calibrated wideband SDR panadapter:
 
 ```text
 offset  size  field

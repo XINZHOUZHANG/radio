@@ -11,8 +11,31 @@ enum RadioLiteHTTPError: LocalizedError, Equatable {
             "服务器返回了无法识别的数据"
         case .missingSessionCookie:
             "登录成功，但服务器没有返回会话 Cookie"
-        case .http(_, _, let message):
-            message
+        case .http(_, let code, let message):
+            Self.localizedHTTPMessage(code: code, message: message)
+        }
+    }
+
+    private static func localizedHTTPMessage(code: String, message: String) -> String {
+        if code == "invalid_request",
+           message.localizedCaseInsensitiveContains("password") {
+            return "密码被服务器拒绝。新版 Radio Lite 仅要求密码非空，不限制位数或复杂度；请升级服务端后重试。服务器信息：\(message)"
+        }
+        switch code {
+        case "invalid_or_expired_code":
+            return "6 位验证码无效或已过期，请在服务器终端重新生成后再试"
+        case "code_rate_limited":
+            return "验证码尝试次数过多，请稍后再试或在服务器终端重新生成"
+        case "invalid_login":
+            return "用户名或密码不正确"
+        case "already_initialized":
+            return "服务器已经完成初始化，请返回账户登录"
+        case "admin_required":
+            return "此操作需要管理员权限"
+        case "authentication_required":
+            return "登录已失效，请重新登录"
+        default:
+            return message
         }
     }
 

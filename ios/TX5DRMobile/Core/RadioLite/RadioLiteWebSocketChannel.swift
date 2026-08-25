@@ -45,6 +45,7 @@ final class RadioLiteWebSocketChannel {
     private struct PendingResponse {
         let expectedTypes: Set<String>
         let commandId: String?
+        let requestId: String?
         let requestType: String?
         let continuation: CheckedContinuation<JSONValue, Error>
         var timeoutTask: Task<Void, Never>?
@@ -131,7 +132,8 @@ final class RadioLiteWebSocketChannel {
 
     func send(_ value: JSONValue) async throws {
         guard let socket, state == .ready else { throw RadioLiteSocketError.notConnected }
-        try await socket.send(.string(value.encodedText))
+        let outbound = value.addingMediaRequestCorrelation().value
+        try await socket.send(.string(outbound.encodedText))
     }
 
     func send(_ data: Data) async throws {
@@ -147,11 +149,14 @@ final class RadioLiteWebSocketChannel {
     ) async throws -> JSONValue {
         guard socket != nil, state == .ready else { throw RadioLiteSocketError.notConnected }
         let id = UUID()
+        let correlated = value.addingMediaRequestCorrelation()
+        let resolvedRequestType = requestType ?? correlated.requestType ?? value["t"]?.stringValue
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = PendingResponse(
                 expectedTypes: expectedTypes,
                 commandId: commandId,
-                requestType: requestType ?? value["t"]?.stringValue,
+                requestId: correlated.requestId,
+                requestType: resolvedRequestType,
                 continuation: continuation,
                 timeoutTask: nil
             )
@@ -164,7 +169,7 @@ final class RadioLiteWebSocketChannel {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.send(value)
+                    try await self.send(correlated.value)
                 } catch {
                     self.failPending(id, error: error)
                 }
@@ -202,21 +207,29 @@ final class RadioLiteWebSocketChannel {
     private func dispatch(_ value: JSONValue) {
         let type = value["t"]?.stringValue
         let commandId = value["commandId"]?.stringValue
+        let requestId = value["requestId"]?.stringValue
         let requestType = value["requestType"]?.stringValue
+        var resolvedPendingRequest = false
         if let match = pending.first(where: { _, item in
             let commandMatches = item.commandId == nil || item.commandId == commandId
+            let requestMatches = item.requestId == nil || (
+                item.requestId == requestId && item.requestType == requestType
+            )
             if type == "command.error" {
                 return commandMatches && (item.requestType == nil || item.requestType == requestType)
             }
             if type == "media.error" {
-                return commandMatches
+                return item.requestId != nil && requestMatches
             }
-            return commandMatches && type.map(item.expectedTypes.contains) == true
+            return commandMatches
+                && requestMatches
+                && type.map(item.expectedTypes.contains) == true
         }) {
             let id = match.key
             let item = match.value
             pending.removeValue(forKey: id)
             item.timeoutTask?.cancel()
+            resolvedPendingRequest = true
             if type == "command.error" || type == "media.error" {
                 item.continuation.resume(throwing: RadioLiteSocketError.command(
                     code: value["code"]?.stringValue ?? "command_error",
@@ -225,6 +238,12 @@ final class RadioLiteWebSocketChannel {
             } else {
                 item.continuation.resume(returning: value)
             }
+        }
+        // A matched command error is delivered through the request continuation.
+        // Broadcasting it again would present the same failure twice, and would
+        // make background polling recreate an alert the operator just closed.
+        if resolvedPendingRequest && (type == "command.error" || type == "media.error") {
+            return
         }
         onJSON?(value)
     }
@@ -246,6 +265,30 @@ final class RadioLiteWebSocketChannel {
 }
 
 private extension JSONValue {
+    static var correlatedMediaRequestTypes: Set<String> {
+        [
+            "media.subscribe",
+            "media.network",
+            "media.uplink.bind",
+            "media.unsubscribe",
+        ]
+    }
+
+    func addingMediaRequestCorrelation() -> (
+        value: JSONValue,
+        requestId: String?,
+        requestType: String?
+    ) {
+        guard case .object(var object) = self,
+              let requestType = object["t"]?.stringValue,
+              Self.correlatedMediaRequestTypes.contains(requestType) else {
+            return (self, nil, nil)
+        }
+        let requestId = object["requestId"]?.stringValue ?? UUID().uuidString
+        object["requestId"] = .string(requestId)
+        return (.object(object), requestId, requestType)
+    }
+
     var encodedText: String {
         guard let data = try? JSONEncoder().encode(self),
               let text = String(data: data, encoding: .utf8) else { return "{}" }

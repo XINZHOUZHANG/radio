@@ -25,6 +25,78 @@ struct RadioLiteSpectrumFrame: Equatable, Sendable {
     let bins: [UInt8]
 }
 
+struct RadioLiteSpectrumCapability: Codable, Equatable, Sendable {
+    let available: Bool
+    let source: String
+    let simulated: Bool
+    let supportsWaterfall: Bool
+    let maxBins: Int
+    let maxFps: Int
+    let spanHz: Int?
+    let reason: String?
+
+    static func unavailable(reason: String) -> Self {
+        Self(
+            available: false,
+            source: "none",
+            simulated: false,
+            supportsWaterfall: false,
+            maxBins: 0,
+            maxFps: 0,
+            spanHz: nil,
+            reason: reason
+        )
+    }
+}
+
+struct RadioLiteSpectrumHistory: Equatable, Sendable {
+    private struct Axis: Equatable, Sendable {
+        let centerFrequencyHz: UInt64
+        let spanHz: UInt32
+        let binCount: Int
+    }
+
+    let maxRows: Int
+    let maxColumns: Int
+    private(set) var rows: [[UInt8]] = []
+    private var axis: Axis?
+
+    init(maxRows: Int = 32, maxColumns: Int = 96) {
+        self.maxRows = max(1, maxRows)
+        self.maxColumns = max(1, maxColumns)
+    }
+
+    mutating func append(_ frame: RadioLiteSpectrumFrame) {
+        let nextAxis = Axis(
+            centerFrequencyHz: frame.centerFrequencyHz,
+            spanHz: frame.spanHz,
+            binCount: frame.bins.count
+        )
+        if axis != nextAxis {
+            rows.removeAll(keepingCapacity: true)
+            axis = nextAxis
+        }
+        rows.append(downsample(frame.bins))
+        if rows.count > maxRows {
+            rows.removeFirst(rows.count - maxRows)
+        }
+    }
+
+    mutating func reset() {
+        rows.removeAll(keepingCapacity: false)
+        axis = nil
+    }
+
+    private func downsample(_ bins: [UInt8]) -> [UInt8] {
+        guard bins.count > maxColumns else { return bins }
+        return (0..<maxColumns).map { column in
+            let start = column * bins.count / maxColumns
+            let end = max(start + 1, (column + 1) * bins.count / maxColumns)
+            return bins[start..<min(end, bins.count)].max() ?? 0
+        }
+    }
+}
+
 enum RadioLiteMediaFrameError: LocalizedError, Equatable {
     case invalidLength
     case unsupportedVersion

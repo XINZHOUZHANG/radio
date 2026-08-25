@@ -12,9 +12,14 @@ const service = read('radio-lite-server', 'src', 'server', 'radio-lite-service.t
 const protocol = read('radio-lite-server', 'PROTOCOL.md');
 const http = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteHTTPClient.swift');
 const session = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteSession.swift');
+const models = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteModels.swift');
+const radioView = read('ios', 'TX5DRMobile', 'Features', 'RadioLite', 'RadioLiteRadioView.swift');
 const media = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMediaClient.swift');
+const audio = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteAudioEngine.swift');
 const frame = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMediaFrame.swift');
 const socket = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
+const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
+const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
 
 const httpPaths = [
   '/healthz',
@@ -69,12 +74,60 @@ for (const type of ['media.subscribe', 'media.network', 'media.uplink.bind', 'me
 
 assert(socket.includes('"radio-lite.v1"'));
 assert(service.includes('"radio-lite.v1"'));
+for (const type of ['media.subscribe', 'media.network', 'media.uplink.bind', 'media.unsubscribe']) {
+  assert(socket.includes(`"${type}"`), `iOS socket correlation is missing ${type}`);
+}
+assert(socket.includes('object["requestId"] = .string(requestId)'));
+assert(socket.includes('item.requestId == requestId'));
+assert(socket.includes('item.requestType == requestType'));
+assert(socket.includes('resolvedPendingRequest && (type == "command.error" || type == "media.error")'));
+assert(service.includes('const correlation = mediaRequestCorrelation(value)'));
+assert(service.includes('...correlation'));
+assert(/Asynchronous\s+errors[\s\S]+deliberately omit both fields/u.test(protocol));
 assert(/The fixed header is 16\s+bytes:/u.test(protocol));
 assert(frame.includes('static let headerBytes = 16'));
 assert(frame.includes('case audioDownlink = 1'));
 assert(frame.includes('case audioUplink = 2'));
 assert(frame.includes('case spectrum = 3'));
 assert(frame.includes('case statistics = 4'));
+assert(frame.includes('struct RadioLiteSpectrumCapability'));
+assert(frame.includes('struct RadioLiteSpectrumHistory'));
+assert(frame.includes('static func unavailable(reason: String)'));
+assert(media.includes('spectrumCapability'));
+assert(media.includes('spectrumHistory'));
+assert(media.includes('spectrumCapability = RadioLiteSpectrumCapability.unavailable'));
+assert(session.includes('voicePTTStartupTask = Task'));
+assert(session.includes('voicePTTStartupTask?.cancel()'));
+assert(session.includes('transmitEpoch.owns(generation)'));
+assert(session.includes('stopUplink(transmitToken: uplink.transmitToken, epoch: uplink.epoch)'));
+assert(session.includes('receiveAudioStartupTask = task'));
+assert(session.includes('receiveAudioStartupTask?.cancel()'));
+assert(session.includes('receiveAudioEpoch.owns(generation)'));
+assert(session.includes('func stopReceiveAudio()'));
+assert(radioView.includes('session.stopReceiveAudio()'));
+assert(media.includes('struct RadioLiteUplinkOwnershipState'));
+assert(media.includes('RadioLiteMediaFailurePresentation.route'));
+assert(!media.includes('pendingRequestCount'));
+assert(!media.includes('requestOwner'));
+assert(mediaHub.includes('t: "media.uplink.ended"'));
+assert(mediaHub.includes('transmitToken,'));
+assert(media.includes('stopUplink(transmitToken: transmitToken)'));
+assert(protocol.includes('delayed event'));
+assert(audio.includes('struct RadioLiteCaptureEpochState'));
+assert(audio.includes('try Task.checkCancellation()'));
+assert(audio.includes('stopMicrophoneCapture(epoch:'));
+assert(audio.includes('ownership: ownership'));
+assert(audio.includes('captureEpochState.isActive(ownership)'));
+assert(audio.includes('microphoneTelemetryLimiter.shouldPublish'));
+assert(models.includes('case dataUpper = "DATA-U"'));
+assert(models.includes('case dataLower = "DATA-L"'));
+assert(models.includes('case .dataUpper: "PKTUSB"'));
+assert(models.includes('case .dataLower: "PKTLSB"'));
+assert(session.includes('"mode": .string(mode.hamlibMode)'));
+assert(radioView.includes('mode.matches(readback: session.rigState?.mode)'));
+assert(hamlibRig.includes('["DIGU", "PKTUSB"]'));
+assert(hamlibRig.includes('["DIGL", "PKTLSB"]'));
+assert(protocol.includes('DATA-U/DATA-L labels'));
 assert(protocol.includes('mono at 16 kHz'));
 assert(protocol.includes('five minutes'));
 

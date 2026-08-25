@@ -213,6 +213,53 @@ struct RadioLiteRigState: Codable, Equatable, Sendable {
     let ptt: Bool
 }
 
+enum RadioLiteRigMode: String, Codable, CaseIterable, Identifiable, Equatable, Hashable, Sendable {
+    case usb = "USB"
+    case dataUpper = "DATA-U"
+    case lsb = "LSB"
+    case dataLower = "DATA-L"
+    case cw = "CW"
+    case cwr = "CWR"
+    case am = "AM"
+    case fm = "FM"
+
+    var id: String { rawValue }
+    var label: String { rawValue }
+
+    var hamlibMode: String {
+        switch self {
+        case .dataUpper: "PKTUSB"
+        case .dataLower: "PKTLSB"
+        default: rawValue
+        }
+    }
+
+    func matches(readback: String?) -> Bool {
+        guard let readback else { return false }
+        let normalized = readback.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        switch self {
+        case .dataUpper:
+            return ["DATA-U", "PKTUSB", "USB-D", "USB-DATA", "DIGU"].contains(normalized)
+        case .dataLower:
+            return ["DATA-L", "PKTLSB", "LSB-D", "LSB-DATA", "DIGL"].contains(normalized)
+        default:
+            return normalized == rawValue
+        }
+    }
+
+    static func handlesFailure(code: String) -> Bool {
+        ["rig_mode_rejected", "rig_mode_unconfirmed", "hamlib_report"].contains(code)
+    }
+
+    static func failureNotice(code: String, requested: RadioLiteRigMode) -> String? {
+        guard handlesFailure(code: code) else { return nil }
+        let suffix = requested == .dataUpper
+            ? "FT8 通常使用 DATA-U（Hamlib PKTUSB）。"
+            : "请选择当前电台支持的其他模式。"
+        return "当前电台不支持 \(requested.label)；已保留原模式。\(suffix)"
+    }
+}
+
 struct RadioLiteMediaPolicy: Codable, Equatable, Sendable {
     let tier: String
     let opusBitrate: Int

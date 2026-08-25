@@ -17,6 +17,70 @@ export type HamlibRigOptions = {
   pttMethod?: PttMethod;
 };
 
+export type RigModeErrorReason = "rejected" | "unconfirmed";
+
+export class RigModeError extends Error {
+  readonly requestedMode: string;
+  readonly hamlibMode: string;
+  readonly reason: RigModeErrorReason;
+  readonly report: number | null;
+
+  constructor(
+    requestedMode: string,
+    hamlibMode: string,
+    reason: RigModeErrorReason,
+    report: number | null = null,
+    options: ErrorOptions = {},
+  ) {
+    const detail = report === null ? "" : `, RPRT ${report}`;
+    super(
+      reason === "rejected"
+        ? `radio rejected mode ${requestedMode} (Hamlib ${hamlibMode}${detail})`
+        : `radio did not confirm mode ${requestedMode} (Hamlib ${hamlibMode})`,
+      options,
+    );
+    this.name = "RigModeError";
+    this.requestedMode = requestedMode;
+    this.hamlibMode = hamlibMode;
+    this.reason = reason;
+    this.report = report;
+  }
+}
+
+const DIGITAL_MODE_ALIASES = new Map<string, string>([
+  ["DATAU", "PKTUSB"],
+  ["DATAUSB", "PKTUSB"],
+  ["USBD", "PKTUSB"],
+  ["USBDATA", "PKTUSB"],
+  ["DIGU", "PKTUSB"],
+  ["PKTUSB", "PKTUSB"],
+  ["DATAL", "PKTLSB"],
+  ["DATALSB", "PKTLSB"],
+  ["LSBD", "PKTLSB"],
+  ["LSBDATA", "PKTLSB"],
+  ["DIGL", "PKTLSB"],
+  ["PKTLSB", "PKTLSB"],
+  ["DATAFM", "PKTFM"],
+  ["FMD", "PKTFM"],
+  ["FMDATA", "PKTFM"],
+  ["DIGFM", "PKTFM"],
+  ["PKTFM", "PKTFM"],
+]);
+
+/**
+ * Convert operator-facing digital mode names to rigctld's canonical tokens.
+ * Hamlib calls the DATA-U/USB-D mode used by FT8 `PKTUSB`.
+ */
+export function normalizeHamlibMode(mode: string): string {
+  const normalized = mode.trim().toUpperCase();
+  const aliasKey = normalized.replace(/[\s_-]+/gu, "");
+  const canonical = DIGITAL_MODE_ALIASES.get(aliasKey) ?? normalized;
+  if (!/^[A-Z0-9_-]{1,16}$/u.test(canonical)) {
+    throw new Error("mode is invalid");
+  }
+  return canonical;
+}
+
 export class HamlibRig {
   readonly #transport: RigRequester;
   readonly #unavailablePttIsSafe: boolean;
@@ -54,19 +118,27 @@ export class HamlibRig {
   }
 
   async setMode(mode: string, passbandHz = 0): Promise<{ mode: string; passbandHz: number }> {
-    const normalized = mode.trim().toUpperCase();
-    if (!/^[A-Z0-9_-]{1,16}$/u.test(normalized)) {
-      throw new Error("mode is invalid");
-    }
+    const requestedMode = mode.trim().toUpperCase();
+    const normalized = normalizeHamlibMode(mode);
     if (!Number.isSafeInteger(passbandHz) || passbandHz < 0 || passbandHz > 100_000) {
       throw new Error("passbandHz is invalid");
     }
-    await this.#transport.request(`\\set_mode ${normalized} ${passbandHz}`);
+    try {
+      await this.#transport.request(`\\set_mode ${normalized} ${passbandHz}`);
+    } catch (error) {
+      if (error instanceof RigReportError) {
+        throw new RigModeError(requestedMode, normalized, "rejected", error.report, { cause: error });
+      }
+      throw error;
+    }
     const response = await this.#transport.request("\\get_mode");
     const confirmedMode = tokenField(response, "Mode");
     const confirmedPassband = integerField(response, "Passband");
-    if (confirmedMode !== normalized || (passbandHz !== 0 && confirmedPassband !== passbandHz)) {
-      throw new Error("mode read-back mismatch");
+    if (
+      normalizeHamlibMode(confirmedMode) !== normalized ||
+      (passbandHz !== 0 && confirmedPassband !== passbandHz)
+    ) {
+      throw new RigModeError(requestedMode, normalized, "unconfirmed");
     }
     return { mode: confirmedMode, passbandHz: confirmedPassband };
   }

@@ -15,7 +15,7 @@ import { decodeSpectrumPayload } from "../src/media/spectrum-payload.ts";
 test("voice transmit token binds only to the matching authenticated principal", async (context) => {
   const fixture = createFixture();
   context.after(() => fixture.hub.close());
-  fixture.connect("media-a", "device:a", "user-a");
+  const transport = fixture.connect("media-a", "device:a", "user-a");
   fixture.connect("media-b", "device:b", "user-a");
   await fixture.hub.subscribe("media-a", "main", true);
   await fixture.hub.subscribe("media-b", "main", true);
@@ -38,6 +38,13 @@ test("voice transmit token binds only to the matching authenticated principal", 
   const accepted = fixture.hub.receiveUplink("media-a", uplinkFrame(0, 1, [10, 11, 12]));
   assert.equal(accepted, true);
   assert.deepEqual(fixture.worker?.uplinkPayloads, [Buffer.from([10, 11, 12])]);
+  fixture.hub.endTransmit("tx-token");
+  assert.deepEqual(transport.json.at(-1), {
+    t: "media.uplink.ended",
+    radioId: "main",
+    transmitToken: "tx-token",
+    reason: "transmit_ended",
+  });
 });
 
 test("media disconnect immediately de-keys its bound voice transmission", async (context) => {
@@ -107,10 +114,29 @@ test("media worker failure revokes voice PTT and removes the failed pipeline", a
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(fixture.stops.at(-1)?.reason, "media_worker_failed");
   assert.equal(fixture.worker?.closed, true);
-  assert.equal(
-    (transport.json[0] as { code?: string }).code,
-    "media_worker_failed",
-  );
+  assert.deepEqual(transport.json[0], {
+    t: "media.error",
+    code: "media_worker_failed",
+    message: "capture device unplugged",
+    reconnectRequired: true,
+    spectrum: {
+      available: false,
+      source: "none",
+      simulated: false,
+      supportsWaterfall: false,
+      maxBins: 0,
+      maxFps: 0,
+      spanHz: null,
+      reason: "media_worker_failed",
+    },
+    policy: {
+      tier: "normal",
+      opusBitrate: 20_000,
+      opusFrameMs: 20,
+      spectrumBins: 0,
+      spectrumFps: 0,
+    },
+  });
 });
 
 test("radio configuration invalidation de-keys voice and permits a fresh media subscription", async (context) => {
@@ -255,6 +281,100 @@ test("client network reports update policy and hidden spectrum sends no spectrum
   assert.equal(fixture.worker?.policies.at(-1)?.tier, "severe");
 });
 
+test("media subscription advertises the worker spectrum source and limits", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  fixture.connect("media-a", "device:a", "user-a");
+
+  const subscribed = await fixture.hub.subscribe("media-a", "main", true);
+
+  assert.deepEqual(subscribed.spectrum, {
+    available: true,
+    source: "audio-fft",
+    simulated: false,
+    supportsWaterfall: true,
+    maxBins: 512,
+    maxFps: 5,
+    spanHz: 8_000,
+  });
+  assert.equal(subscribed.policy.spectrumBins, 512);
+  assert.equal(subscribed.policy.spectrumFps, 5);
+});
+
+test("unavailable spectrum source stays disabled across network policy changes", async (context) => {
+  const fixture = createFixture(() => 1_000, 3_000, {
+    available: false,
+    source: "none",
+    simulated: false,
+    supportsWaterfall: false,
+    maxBins: 0,
+    maxFps: 0,
+    spanHz: null,
+    reason: "spectrum_source_unavailable",
+  });
+  context.after(() => fixture.hub.close());
+  fixture.connect("media-a", "device:a", "user-a");
+
+  const subscribed = await fixture.hub.subscribe("media-a", "main", true);
+  assert.equal(subscribed.spectrum.available, false);
+  assert.equal(subscribed.policy.spectrumBins, 0);
+  assert.equal(subscribed.policy.spectrumFps, 0);
+
+  const policy = fixture.hub.updateNetwork("media-a", {
+    rttMs: 20,
+    packetLossPercent: 0,
+    bufferedBytes: 0,
+    spectrumVisible: true,
+  });
+  assert.equal(policy.spectrumBins, 0);
+  assert.equal(policy.spectrumFps, 0);
+  assert.equal(fixture.worker?.policies.at(-1)?.spectrumBins, 0);
+});
+
+test("one hidden subscriber does not disable spectrum for another visible subscriber", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  fixture.connect("hidden", "device:a", "user-a");
+  fixture.connect("visible", "device:b", "user-b");
+
+  await fixture.hub.subscribe("hidden", "main", false);
+  await fixture.hub.subscribe("visible", "main", true);
+
+  assert.equal(fixture.worker?.policies.at(-1)?.spectrumBins, 512);
+  assert.equal(fixture.worker?.policies.at(-1)?.spectrumFps, 5);
+});
+
+test("shared high-rate spectrum is independently throttled for a severe client", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  const normal = fixture.connect("normal", "device:a", "user-a");
+  const severe = fixture.connect("severe", "device:b", "user-b");
+  await fixture.hub.subscribe("normal", "main", true);
+  await fixture.hub.subscribe("severe", "main", true);
+  fixture.hub.updateNetwork("severe", {
+    rttMs: 2_500,
+    packetLossPercent: 10,
+    bufferedBytes: 600_000,
+    spectrumVisible: true,
+  });
+
+  for (let frame = 0; frame < 5; frame += 1) {
+    fixture.output?.spectrum({
+      centerFrequencyHz: 14_074_000,
+      spanHz: 8_000,
+      noiseFloorTenthsDbm: -1_100,
+      bins: new Uint8Array(512),
+    }, BigInt(frame * 200_000));
+  }
+
+  assert.equal(normal.binary.length, 5);
+  assert.equal(severe.binary.length, 1);
+  assert.equal(
+    decodeSpectrumPayload(decodeMediaFrame(severe.binary[0]).payload).bins.length,
+    128,
+  );
+});
+
 test("digital DSP opens the existing media worker for shared PCM capture and playback", async (context) => {
   const fixture = createFixture();
   context.after(() => fixture.hub.close());
@@ -284,12 +404,35 @@ test("digital DSP opens the existing media worker for shared PCM capture and pla
   );
 });
 
-function createFixture(now: () => number = () => 1_000, uplinkBindTimeoutMs = 3_000) {
+type FakeSpectrumCapability = {
+  available: boolean;
+  source: "audio-fft" | "synthetic" | "none";
+  simulated: boolean;
+  supportsWaterfall: boolean;
+  maxBins: 0 | 128 | 256 | 512;
+  maxFps: 0 | 1 | 3 | 5;
+  spanHz: number | null;
+  reason?: string;
+};
+
+function createFixture(
+  now: () => number = () => 1_000,
+  uplinkBindTimeoutMs = 3_000,
+  spectrumCapability: FakeSpectrumCapability = {
+    available: true,
+    source: "audio-fft",
+    simulated: false,
+    supportsWaterfall: true,
+    maxBins: 512,
+    maxFps: 5,
+    spanHz: 8_000,
+  },
+) {
   let worker: FakeMediaWorker | undefined;
   let output: MediaWorkerOutput | undefined;
   const factory: MediaWorkerFactory = async (_profile, _radioSlot, sink) => {
     output = sink;
-    worker = new FakeMediaWorker();
+    worker = new FakeMediaWorker(spectrumCapability);
     return worker;
   };
   const stops: Array<{
@@ -334,6 +477,7 @@ function createFixture(now: () => number = () => 1_000, uplinkBindTimeoutMs = 3_
 }
 
 class FakeMediaWorker implements MediaWorker {
+  readonly spectrumCapability: FakeSpectrumCapability;
   readonly uplinkPayloads: Buffer[] = [];
   readonly digitalPlayback: Int16Array[] = [];
   readonly policies = [new AdaptiveMediaPolicy().current()];
@@ -345,6 +489,10 @@ class FakeMediaWorker implements MediaWorker {
   digitalStopCount = 0;
   closed = false;
   failClose = false;
+
+  constructor(spectrumCapability: FakeSpectrumCapability) {
+    this.spectrumCapability = { ...spectrumCapability };
+  }
 
   updatePolicy(policy: ReturnType<AdaptiveMediaPolicy["current"]>): void {
     this.policies.push(policy);

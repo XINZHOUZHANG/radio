@@ -73,8 +73,14 @@ final class RadioLiteSession: ObservableObject {
     private var credentialRefreshTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var mediaRetryTask: Task<Void, Never>?
+    private var voicePTTStartupTask: Task<Void, Never>?
+    private var tuningStartupTask: Task<Void, Never>?
+    private var receiveAudioStartupTask: Task<Void, Never>?
     private var activeTransmitToken: String?
-    private var transmitGeneration = 0
+    private var activeCaptureOwnership: RadioLiteMicrophoneCaptureOwnership?
+    private var activeUplinkOwnership: RadioLiteUplinkOwnership?
+    private var transmitEpoch = RadioLiteOperationEpoch()
+    private var receiveAudioEpoch = RadioLiteOperationEpoch()
     private var noticeState = RadioLiteNoticeState()
 
     private static let addressDefaultsKey = "radio-lite.server-address"
@@ -91,11 +97,13 @@ final class RadioLiteSession: ObservableObject {
         control.onDisconnect = { [weak self] error in self?.handleConnectionLoss(error) }
         media.onDisconnect = { [weak self] error in self?.handleConnectionLoss(error) }
         media.onUplinkFailure = { [weak self] error in
-            self?.endVoicePTT()
-            self?.errorMessage = "麦克风上行已停止：\(error.localizedDescription)"
+            guard let self else { return }
+            self.endVoicePTT()
+            self.presentMediaNotice(error)
         }
         media.onReconnectRequired = { [weak self] error in
             guard let self, !self.intentionalDisconnect, self.phase == .ready else { return }
+            if self.isVoicePTTHeld { self.endVoicePTT() }
             self.presentMediaNotice(error)
             self.scheduleMediaRetry()
         }
@@ -295,6 +303,7 @@ final class RadioLiteSession: ObservableObject {
         defer { isWorking = false }
         endVoicePTT()
         endTuning()
+        stopReceiveAudio()
         await releaseControl()
         await media.unsubscribe()
         selectedRadioId = radioId
@@ -354,15 +363,21 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
-    func setMode(_ mode: String, passbandHz: Int = 0) async {
-        await performControlCommand { radioId, token in
+    func setMode(_ mode: RadioLiteRigMode, passbandHz: Int = 0) async {
+        guard let radioId = selectedRadioId, let token = controlToken else {
+            errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
             let commandId = UUID().uuidString
             let reply = try await self.control.request(
                 .object([
                     "t": .string("rig.mode.set"),
                     "radioId": .string(radioId),
                     "controlToken": .string(token),
-                    "mode": .string(mode),
+                    "mode": .string(mode.hamlibMode),
                     "passbandHz": .number(Double(passbandHz)),
                     "commandId": .string(commandId),
                 ]),
@@ -370,9 +385,22 @@ final class RadioLiteSession: ObservableObject {
                 commandId: commandId
             )
             self.replaceRigState(
-                mode: reply["mode"]?.stringValue ?? mode,
+                mode: reply["mode"]?.stringValue ?? mode.hamlibMode,
                 passbandHz: reply["passbandHz"]?.intValue ?? passbandHz
             )
+            resolveModeNotices()
+        } catch {
+            if let socketError = error as? RadioLiteSocketError,
+               case .command(let code, _) = socketError,
+               let notice = RadioLiteRigMode.failureNotice(code: code, requested: mode) {
+                presentNotice(
+                    notice,
+                    deduplicationKey: "rig.mode.\(mode.rawValue).\(code)"
+                )
+                try? await refreshRigState()
+                return
+            }
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -394,6 +422,56 @@ final class RadioLiteSession: ObservableObject {
         rigState = state
     }
 
+    func startReceiveAudio() async {
+        guard let radioId = selectedRadioId else {
+            errorMessage = RadioLiteSessionError.radioUnavailable.localizedDescription
+            return
+        }
+        if let pending = receiveAudioStartupTask {
+            await pending.value
+            return
+        }
+
+        let generation = receiveAudioEpoch.begin()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard self.media.state == .ready else { throw RadioLiteSocketError.notConnected }
+                if self.media.subscribedRadioId != radioId {
+                    try await self.media.subscribe(radioId: radioId)
+                    try Task.checkCancellation()
+                    guard self.receiveAudioEpoch.owns(generation) else { return }
+                    self.resolveMediaNotices()
+                }
+                try Task.checkCancellation()
+                guard self.receiveAudioEpoch.owns(generation) else { return }
+                try self.audio.startMonitoring()
+                guard !Task.isCancelled, self.receiveAudioEpoch.owns(generation) else {
+                    self.audio.stopMonitoring()
+                    return
+                }
+            } catch {
+                guard !Task.isCancelled, self.receiveAudioEpoch.owns(generation) else { return }
+                if self.media.subscribedRadioId != radioId {
+                    self.scheduleMediaRetry()
+                }
+                self.errorMessage = "接收音频启动失败：\(error.localizedDescription)"
+            }
+        }
+        receiveAudioStartupTask = task
+        await task.value
+        if receiveAudioEpoch.owns(generation) {
+            receiveAudioStartupTask = nil
+        }
+    }
+
+    func stopReceiveAudio() {
+        receiveAudioEpoch.invalidate()
+        receiveAudioStartupTask?.cancel()
+        receiveAudioStartupTask = nil
+        audio.stopMonitoring()
+    }
+
     func beginVoicePTT() {
         guard !isVoicePTTHeld, !isTuning else { return }
         guard canTransmit else {
@@ -404,17 +482,42 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
             return
         }
-        guard media.state == .ready, media.subscribedRadioId == radioId else {
-            errorMessage = "音频通道尚未就绪"
-            return
-        }
-        transmitGeneration += 1
-        let generation = transmitGeneration
+        voicePTTStartupTask?.cancel()
+        let generation = transmitEpoch.begin()
         isVoicePTTHeld = true
-        Task { [weak self] in
+        voicePTTStartupTask = Task { [weak self] in
             guard let self else { return }
             var startedToken: String?
+            var capture: RadioLiteMicrophoneCaptureOwnership?
+            var uplink: RadioLiteUplinkOwnership?
             do {
+                guard self.media.state == .ready else {
+                    throw RadioLiteSocketError.notConnected
+                }
+                if self.media.subscribedRadioId != radioId {
+                    try await self.media.subscribe(radioId: radioId)
+                    try Task.checkCancellation()
+                    guard self.isVoicePTTHeld, self.transmitEpoch.owns(generation) else { return }
+                    self.resolveMediaNotices()
+                }
+                try Task.checkCancellation()
+                guard self.isVoicePTTHeld, self.transmitEpoch.owns(generation) else { return }
+
+                // Prove that iOS can open and encode the microphone before
+                // keying the physical radio. Packets are intentionally dropped
+                // until the server returns and binds a transmit token.
+                let captureOwnership = try await self.audio.beginMicrophoneCapture { [weak self] packet in
+                    self?.media.enqueueMicrophonePacket(packet)
+                }
+                capture = captureOwnership
+                guard !Task.isCancelled,
+                      self.isVoicePTTHeld,
+                      self.transmitEpoch.owns(generation) else {
+                    self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
+                    return
+                }
+                self.activeCaptureOwnership = captureOwnership
+
                 let commandId = UUID().uuidString
                 let reply = try await self.control.request(
                     .object([
@@ -431,41 +534,69 @@ final class RadioLiteSession: ObservableObject {
                     throw RadioLiteHTTPError.invalidResponse
                 }
                 startedToken = transmitToken
-                guard self.isVoicePTTHeld, generation == self.transmitGeneration else {
+                guard !Task.isCancelled,
+                      self.isVoicePTTHeld,
+                      self.transmitEpoch.owns(generation) else {
+                    self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     return
                 }
                 self.activeTransmitToken = transmitToken
-                try await self.media.bindUplink(radioId: radioId, transmitToken: transmitToken)
-                guard self.isVoicePTTHeld, generation == self.transmitGeneration else {
+                let uplinkOwnership = try await self.media.bindUplink(
+                    radioId: radioId,
+                    transmitToken: transmitToken
+                )
+                uplink = uplinkOwnership
+                guard !Task.isCancelled,
+                      self.isVoicePTTHeld,
+                      self.transmitEpoch.owns(generation) else {
+                    self.media.stopUplink(
+                        transmitToken: uplinkOwnership.transmitToken,
+                        epoch: uplinkOwnership.epoch
+                    )
+                    self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     return
                 }
-                try await self.audio.beginMicrophoneCapture { [weak self] packet in
-                    self?.media.enqueueMicrophonePacket(packet)
+                self.activeUplinkOwnership = uplinkOwnership
+                self.startTransmitHeartbeat(
+                    radioId: radioId,
+                    controlToken: token,
+                    transmitToken: transmitToken,
+                    generation: generation
+                )
+                if self.transmitEpoch.owns(generation) {
+                    self.voicePTTStartupTask = nil
                 }
-                self.startTransmitHeartbeat(radioId: radioId, controlToken: token, transmitToken: transmitToken)
             } catch {
-                self.stopLocalTransmit()
+                if let uplink {
+                    self.media.stopUplink(transmitToken: uplink.transmitToken, epoch: uplink.epoch)
+                    if self.activeUplinkOwnership == uplink { self.activeUplinkOwnership = nil }
+                }
+                if let capture {
+                    self.audio.stopMicrophoneCapture(epoch: capture.epoch)
+                    if self.activeCaptureOwnership == capture { self.activeCaptureOwnership = nil }
+                }
+                if !Task.isCancelled,
+                   self.isVoicePTTHeld,
+                   self.transmitEpoch.owns(generation) {
+                    _ = self.stopLocalTransmit(expectedEpoch: generation)
+                    if self.media.subscribedRadioId != radioId { self.scheduleMediaRetry() }
+                    self.errorMessage = "PTT 启动失败：\(error.localizedDescription)"
+                }
                 if let startedToken {
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: startedToken)
                 }
-                self.errorMessage = "PTT 启动失败：\(error.localizedDescription)"
             }
         }
     }
 
     func endVoicePTT() {
-        guard isVoicePTTHeld || audio.isCapturingMicrophone || activeTransmitToken != nil else { return }
-        transmitGeneration += 1
-        isVoicePTTHeld = false
-        audio.stopMicrophoneCapture()
-        media.stopUplink()
-        transmitHeartbeatTask?.cancel()
-        transmitHeartbeatTask = nil
+        guard isVoicePTTHeld || voicePTTStartupTask != nil ||
+                activeCaptureOwnership != nil || activeUplinkOwnership != nil else { return }
         let transmitToken = activeTransmitToken
         let radioId = selectedRadioId
-        activeTransmitToken = nil
+        _ = stopLocalTransmit()
         guard let transmitToken, let radioId else { return }
         Task { [weak self] in await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken) }
     }
@@ -480,11 +611,12 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
             return
         }
-        transmitGeneration += 1
-        let generation = transmitGeneration
+        tuningStartupTask?.cancel()
+        let generation = transmitEpoch.begin()
         isTuning = true
-        Task { [weak self] in
+        tuningStartupTask = Task { [weak self] in
             guard let self else { return }
+            var startedToken: String?
             do {
                 let commandId = UUID().uuidString
                 let reply = try await self.control.request(
@@ -501,28 +633,42 @@ final class RadioLiteSession: ObservableObject {
                 guard let transmitToken = reply["transmitToken"]?.stringValue else {
                     throw RadioLiteHTTPError.invalidResponse
                 }
-                guard self.isTuning, generation == self.transmitGeneration else {
+                startedToken = transmitToken
+                guard !Task.isCancelled,
+                      self.isTuning,
+                      self.transmitEpoch.owns(generation) else {
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     return
                 }
                 self.activeTransmitToken = transmitToken
-                self.startTransmitHeartbeat(radioId: radioId, controlToken: token, transmitToken: transmitToken)
+                self.startTransmitHeartbeat(
+                    radioId: radioId,
+                    controlToken: token,
+                    transmitToken: transmitToken,
+                    generation: generation
+                )
+                if self.transmitEpoch.owns(generation) {
+                    self.tuningStartupTask = nil
+                }
             } catch {
-                self.stopLocalTransmit()
-                self.errorMessage = "机内天调启动失败：\(error.localizedDescription)"
+                if !Task.isCancelled,
+                   self.isTuning,
+                   self.transmitEpoch.owns(generation) {
+                    _ = self.stopLocalTransmit(expectedEpoch: generation)
+                    self.errorMessage = "机内天调启动失败：\(error.localizedDescription)"
+                }
+                if let startedToken {
+                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: startedToken)
+                }
             }
         }
     }
 
     func endTuning() {
-        guard isTuning || activeTransmitToken != nil else { return }
-        transmitGeneration += 1
-        isTuning = false
-        transmitHeartbeatTask?.cancel()
-        transmitHeartbeatTask = nil
+        guard isTuning || tuningStartupTask != nil else { return }
         let transmitToken = activeTransmitToken
         let radioId = selectedRadioId
-        activeTransmitToken = nil
+        _ = stopLocalTransmit()
         guard let transmitToken, let radioId else { return }
         Task { [weak self] in await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken) }
     }
@@ -982,12 +1128,20 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
-    private func startTransmitHeartbeat(radioId: String, controlToken: String, transmitToken: String) {
+    private func startTransmitHeartbeat(
+        radioId: String,
+        controlToken: String,
+        transmitToken: String,
+        generation: UInt64
+    ) {
         transmitHeartbeatTask?.cancel()
         transmitHeartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, let self, self.activeTransmitToken == transmitToken else { return }
+                guard !Task.isCancelled,
+                      let self,
+                      self.transmitEpoch.owns(generation),
+                      self.activeTransmitToken == transmitToken else { return }
                 do {
                     _ = try await self.control.request(
                         .object([
@@ -999,9 +1153,12 @@ final class RadioLiteSession: ObservableObject {
                         expecting: ["tx.alive"]
                     )
                 } catch {
-                    self.stopLocalTransmit()
-                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
+                    guard !Task.isCancelled,
+                          self.transmitEpoch.owns(generation),
+                          self.activeTransmitToken == transmitToken else { return }
+                    guard self.stopLocalTransmit(expectedEpoch: generation) else { return }
                     self.errorMessage = "发射心跳中断：\(error.localizedDescription)"
+                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     return
                 }
             }
@@ -1022,19 +1179,37 @@ final class RadioLiteSession: ObservableObject {
         )
     }
 
-    private func stopLocalTransmit() {
-        transmitGeneration += 1
+    @discardableResult
+    private func stopLocalTransmit(expectedEpoch: UInt64? = nil) -> Bool {
+        if let expectedEpoch, !transmitEpoch.owns(expectedEpoch) { return false }
+        transmitEpoch.invalidate()
+        voicePTTStartupTask?.cancel()
+        tuningStartupTask?.cancel()
+        voicePTTStartupTask = nil
+        tuningStartupTask = nil
         isVoicePTTHeld = false
         isTuning = false
-        audio.stopMicrophoneCapture()
-        media.stopUplink()
+        if let capture = activeCaptureOwnership {
+            audio.stopMicrophoneCapture(epoch: capture.epoch)
+        } else {
+            audio.stopMicrophoneCapture()
+        }
+        if let uplink = activeUplinkOwnership {
+            media.stopUplink(transmitToken: uplink.transmitToken, epoch: uplink.epoch)
+        } else {
+            media.stopUplink()
+        }
         transmitHeartbeatTask?.cancel()
         transmitHeartbeatTask = nil
+        activeCaptureOwnership = nil
+        activeUplinkOwnership = nil
         activeTransmitToken = nil
+        return true
     }
 
     private func handleConnectionLoss(_ error: Error) {
         stopLocalTransmit()
+        stopReceiveAudio()
         controlToken = nil
         controlExpiresAtMs = nil
         guard !intentionalDisconnect, phase == .ready else { return }
@@ -1193,12 +1368,20 @@ final class RadioLiteSession: ObservableObject {
         credentialRefreshTask?.cancel()
         reconnectTask?.cancel()
         mediaRetryTask?.cancel()
+        voicePTTStartupTask?.cancel()
+        tuningStartupTask?.cancel()
+        receiveAudioStartupTask?.cancel()
+        transmitEpoch.invalidate()
+        receiveAudioEpoch.invalidate()
         controlHeartbeatTask = nil
         pollingTask = nil
         transmitHeartbeatTask = nil
         credentialRefreshTask = nil
         reconnectTask = nil
         mediaRetryTask = nil
+        voicePTTStartupTask = nil
+        tuningStartupTask = nil
+        receiveAudioStartupTask = nil
     }
 
     private func clearRadioState() {
@@ -1227,6 +1410,11 @@ final class RadioLiteSession: ObservableObject {
         mediaRetryTask?.cancel()
         mediaRetryTask = nil
         noticeState.resolve(keysWithPrefix: "media.")
+        noticeMessage = noticeState.message
+    }
+
+    private func resolveModeNotices() {
+        noticeState.resolve(keysWithPrefix: "rig.mode.")
         noticeMessage = noticeState.message
     }
 

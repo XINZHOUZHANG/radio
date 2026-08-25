@@ -3,7 +3,11 @@ import { createServer, type Server, type Socket } from "node:net";
 import { test } from "node:test";
 
 import { encodeRigCommand, ExtendedResponseParser } from "../src/rig/extended-protocol.ts";
-import { HamlibRig } from "../src/rig/hamlib-rig.ts";
+import {
+  HamlibRig,
+  normalizeHamlibMode,
+  RigModeError,
+} from "../src/rig/hamlib-rig.ts";
 import { RigctldTransport, RigReportError } from "../src/rig/transport.ts";
 
 test("extended protocol parser handles fragmented fields and report framing", () => {
@@ -39,6 +43,64 @@ test("persistent rigctld transport serializes commands and HamlibRig confirms re
   });
   assert.equal(fake.connectionCount(), 1);
   assert.deepEqual(fake.commands.slice(0, 2), ["\\set_freq 7074000", "\\get_freq"]);
+});
+
+test("DATA-U and common digital aliases use Hamlib PKTUSB", async () => {
+  assert.equal(normalizeHamlibMode("DATA-U"), "PKTUSB");
+  assert.equal(normalizeHamlibMode("USB-DATA"), "PKTUSB");
+  assert.equal(normalizeHamlibMode("DIGU"), "PKTUSB");
+  assert.equal(normalizeHamlibMode("DATA-L"), "PKTLSB");
+  assert.equal(normalizeHamlibMode("DIGL"), "PKTLSB");
+
+  const commands: string[] = [];
+  let activeMode = "PKTUSB";
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command.startsWith("\\set_mode ")) {
+        activeMode = command.split(" ")[1] ?? activeMode;
+      }
+      if (command === "\\get_mode") {
+        return response("get_mode", { Mode: activeMode, Passband: "3000" });
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  assert.deepEqual(await rig.setMode("DATA-U"), { mode: "PKTUSB", passbandHz: 3_000 });
+  assert.deepEqual(await rig.setMode("DATA-L"), { mode: "PKTLSB", passbandHz: 3_000 });
+  assert.deepEqual(commands, [
+    "\\set_mode PKTUSB 0",
+    "\\get_mode",
+    "\\set_mode PKTLSB 0",
+    "\\get_mode",
+  ]);
+});
+
+test("equivalent digital-mode readback aliases confirm the requested mode", async () => {
+  const rig = new HamlibRig({
+    request: async (command: string) => command === "\\get_mode"
+      ? response("get_mode", { Mode: "USB-DATA", Passband: "3000" })
+      : response(command.slice(1).split(" ")[0], {}),
+  });
+
+  assert.deepEqual(await rig.setMode("DATA-U"), { mode: "USB-DATA", passbandHz: 3_000 });
+});
+
+test("a Hamlib mode rejection becomes a mode-specific error", async () => {
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      throw new RigReportError(command.slice(1).split(" ")[0], -1);
+    },
+  });
+
+  await assert.rejects(rig.setMode("DATA-U"), (error: unknown) =>
+    error instanceof RigModeError &&
+      error.reason === "rejected" &&
+      error.requestedMode === "DATA-U" &&
+      error.hamlibMode === "PKTUSB" &&
+      error.report === -1,
+  );
 });
 
 test("PTT None caches commanded state when Hamlib rejects get_ptt and set_ptt", async () => {

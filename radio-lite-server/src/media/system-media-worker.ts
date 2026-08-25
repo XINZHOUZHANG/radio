@@ -8,6 +8,7 @@ import type {
   MediaWorker,
   MediaWorkerFactory,
   MediaWorkerOutput,
+  SpectrumCapability,
 } from "./media-hub.ts";
 import type { MediaFrame } from "./frame.ts";
 import { OggOpusPacketReader, OggOpusWriter } from "./ogg-opus.ts";
@@ -89,6 +90,15 @@ export const createSystemMediaWorker: MediaWorkerFactory = async (
 
 export class SystemMediaWorker implements MediaWorker {
   readonly digitalAudio: DigitalAudioPlayback;
+  readonly spectrumCapability: SpectrumCapability = {
+    available: true,
+    source: "audio-fft",
+    simulated: false,
+    supportsWaterfall: true,
+    maxBins: 512,
+    maxFps: 5,
+    spanHz: SAMPLE_RATE / 2,
+  };
   readonly #profile: RadioProfile;
   readonly #output: MediaWorkerOutput;
   readonly #spawnProcess: typeof spawn;

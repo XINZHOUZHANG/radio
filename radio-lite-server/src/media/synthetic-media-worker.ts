@@ -1,6 +1,11 @@
 import type { MediaPolicy } from "./adaptive-policy.ts";
 import type { MediaFrame } from "./frame.ts";
-import type { MediaWorker, MediaWorkerFactory, MediaWorkerOutput } from "./media-hub.ts";
+import type {
+  MediaWorker,
+  MediaWorkerFactory,
+  MediaWorkerOutput,
+  SpectrumCapability,
+} from "./media-hub.ts";
 
 export const createSyntheticMediaWorker: MediaWorkerFactory = async (
   _profile,
@@ -9,6 +14,15 @@ export const createSyntheticMediaWorker: MediaWorkerFactory = async (
 ) => new SyntheticMediaWorker(output);
 
 export class SyntheticMediaWorker implements MediaWorker {
+  readonly spectrumCapability: SpectrumCapability = {
+    available: true,
+    source: "synthetic",
+    simulated: true,
+    supportsWaterfall: true,
+    maxBins: 512,
+    maxFps: 5,
+    spanHz: 3_000,
+  };
   readonly #output: MediaWorkerOutput;
   #policy: MediaPolicy = {
     tier: "normal",

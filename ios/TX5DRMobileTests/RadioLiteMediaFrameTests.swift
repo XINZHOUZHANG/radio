@@ -46,4 +46,81 @@ final class RadioLiteMediaFrameTests: XCTestCase {
         payload[15] = 17
         XCTAssertThrowsError(try RadioLiteMediaFrameCodec.decodeSpectrum(payload))
     }
+
+    func testDecodesSpectrumSourceCapability() throws {
+        let data = Data(#"{
+          "available": true,
+          "source": "audio-fft",
+          "simulated": false,
+          "supportsWaterfall": true,
+          "maxBins": 512,
+          "maxFps": 5,
+          "spanHz": 8000
+        }"#.utf8)
+
+        let capability = try JSONDecoder().decode(RadioLiteSpectrumCapability.self, from: data)
+
+        XCTAssertTrue(capability.available)
+        XCTAssertEqual(capability.source, "audio-fft")
+        XCTAssertFalse(capability.simulated)
+        XCTAssertTrue(capability.supportsWaterfall)
+        XCTAssertEqual(capability.maxBins, 512)
+        XCTAssertEqual(capability.spanHz, 8_000)
+    }
+
+    func testSpectrumHistoryIsBoundedAndResetsWhenFrequencyAxisChanges() {
+        var history = RadioLiteSpectrumHistory(maxRows: 2)
+        let first = RadioLiteSpectrumFrame(
+            centerFrequencyHz: 14_074_000,
+            spanHz: 8_000,
+            noiseFloorTenthsDBm: -1_000,
+            bins: [1, 2, 3]
+        )
+        history.append(first)
+        history.append(RadioLiteSpectrumFrame(
+            centerFrequencyHz: first.centerFrequencyHz,
+            spanHz: first.spanHz,
+            noiseFloorTenthsDBm: -990,
+            bins: [4, 5, 6]
+        ))
+        history.append(RadioLiteSpectrumFrame(
+            centerFrequencyHz: first.centerFrequencyHz,
+            spanHz: first.spanHz,
+            noiseFloorTenthsDBm: -980,
+            bins: [7, 8, 9]
+        ))
+        XCTAssertEqual(history.rows, [[4, 5, 6], [7, 8, 9]])
+
+        history.append(RadioLiteSpectrumFrame(
+            centerFrequencyHz: 7_074_000,
+            spanHz: first.spanHz,
+            noiseFloorTenthsDBm: -970,
+            bins: [10, 11, 12]
+        ))
+        XCTAssertEqual(history.rows, [[10, 11, 12]])
+    }
+
+    func testUnavailableSpectrumCapabilityDoesNotClaimARealSource() {
+        let capability = RadioLiteSpectrumCapability.unavailable(reason: "media_worker_failed")
+
+        XCTAssertFalse(capability.available)
+        XCTAssertEqual(capability.source, "none")
+        XCTAssertFalse(capability.simulated)
+        XCTAssertFalse(capability.supportsWaterfall)
+        XCTAssertEqual(capability.maxBins, 0)
+        XCTAssertEqual(capability.maxFps, 0)
+        XCTAssertEqual(capability.reason, "media_worker_failed")
+    }
+
+    func testSpectrumHistoryDownsamplesEachWaterfallRowWithPeakPreservation() {
+        var history = RadioLiteSpectrumHistory(maxRows: 4, maxColumns: 2)
+        history.append(RadioLiteSpectrumFrame(
+            centerFrequencyHz: 14_074_000,
+            spanHz: 8_000,
+            noiseFloorTenthsDBm: -1_000,
+            bins: [1, 9, 3, 7]
+        ))
+
+        XCTAssertEqual(history.rows, [[9, 7]])
+    }
 }

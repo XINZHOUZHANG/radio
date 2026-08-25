@@ -11,6 +11,28 @@ export type MediaWorkerOutput = {
   fault(error: unknown): void;
 };
 
+export type SpectrumCapability = {
+  available: boolean;
+  source: "audio-fft" | "synthetic" | "none";
+  simulated: boolean;
+  supportsWaterfall: boolean;
+  maxBins: 0 | 128 | 256 | 512;
+  maxFps: 0 | 1 | 3 | 5;
+  spanHz: number | null;
+  reason?: string;
+};
+
+const unavailableSpectrumCapability: SpectrumCapability = {
+  available: false,
+  source: "none",
+  simulated: false,
+  supportsWaterfall: false,
+  maxBins: 0,
+  maxFps: 0,
+  spanHz: null,
+  reason: "spectrum_source_unavailable",
+};
+
 export type PcmCaptureChunk = {
   /** Signed 16-bit little-endian mono PCM. */
   pcm: Buffer;
@@ -26,6 +48,7 @@ export type DigitalAudioPlayback = {
 
 export type MediaWorker = {
   readonly digitalAudio?: DigitalAudioPlayback;
+  readonly spectrumCapability?: SpectrumCapability;
   updatePolicy(policy: MediaPolicy): void | Promise<void>;
   writeAudioUplink(frame: MediaFrame): boolean;
   close(): Promise<void>;
@@ -83,6 +106,7 @@ export type MediaHubOptions = {
 };
 
 export const createIdleMediaWorker: MediaWorkerFactory = async () => ({
+  spectrumCapability: { ...unavailableSpectrumCapability },
   updatePolicy: () => undefined,
   writeAudioUplink: () => true,
   close: async () => undefined,
@@ -97,6 +121,8 @@ type MediaClient = {
   radioId: string | null;
   radioSlot: number | null;
   policy: MediaPolicy;
+  spectrumCapability: SpectrumCapability;
+  lastSpectrumSentAtUs: bigint | null;
   boundTransmitToken: string | null;
   lastUplinkSequence: number | null;
   droppedFrames: number;
@@ -175,6 +201,8 @@ export class MediaHub {
       radioId: null,
       radioSlot: null,
       policy: adaptive.current(),
+      spectrumCapability: { ...unavailableSpectrumCapability },
+      lastSpectrumSentAtUs: null,
       boundTransmitToken: null,
       lastUplinkSequence: null,
       droppedFrames: 0,
@@ -185,7 +213,12 @@ export class MediaHub {
     clientId: string,
     radioId: string,
     spectrumVisible: boolean,
-  ): Promise<{ radioId: string; radioSlot: number; policy: MediaPolicy }> {
+  ): Promise<{
+    radioId: string;
+    radioSlot: number;
+    policy: MediaPolicy;
+    spectrum: SpectrumCapability;
+  }> {
     const client = this.#client(clientId);
     if (client.boundTransmitToken !== null && client.radioId !== radioId) {
       throw new Error("cannot change radio while microphone uplink is bound");
@@ -195,17 +228,20 @@ export class MediaHub {
     if (radioSlot < 0 || radioSlot > 255) {
       throw new Error("radio does not exist or has no media slot");
     }
-    await this.#worker(config.radios[radioSlot], radioSlot);
+    const worker = await this.#worker(config.radios[radioSlot], radioSlot);
+    const spectrum = normalizeSpectrumCapability(worker.worker.spectrumCapability);
     const previousRadioId = client.radioId;
     client.radioId = radioId;
     client.radioSlot = radioSlot;
-    client.policy = client.adaptive.current(spectrumVisible);
+    client.spectrumCapability = spectrum;
+    client.policy = applySpectrumCapability(client.adaptive.current(spectrumVisible), spectrum);
+    client.lastSpectrumSentAtUs = null;
     client.lastUplinkSequence = null;
     if (previousRadioId !== null && previousRadioId !== radioId) {
       this.#updateWorkerPolicy(previousRadioId);
     }
     this.#updateWorkerPolicy(radioId);
-    return { radioId, radioSlot, policy: client.policy };
+    return { radioId, radioSlot, policy: client.policy, spectrum };
   }
 
   updateNetwork(clientId: string, report: NetworkReport): MediaPolicy {
@@ -213,7 +249,14 @@ export class MediaHub {
     if (client.radioId === null) {
       throw new Error("media subscription is required");
     }
-    client.policy = client.adaptive.update(report);
+    const previousSpectrumFps = client.policy.spectrumFps;
+    client.policy = applySpectrumCapability(
+      client.adaptive.update(report),
+      client.spectrumCapability,
+    );
+    if (client.policy.spectrumFps > previousSpectrumFps) {
+      client.lastSpectrumSentAtUs = null;
+    }
     this.#updateWorkerPolicy(client.radioId);
     return client.policy;
   }
@@ -227,6 +270,8 @@ export class MediaHub {
     client.radioId = null;
     client.radioSlot = null;
     client.lastUplinkSequence = null;
+    client.spectrumCapability = { ...unavailableSpectrumCapability };
+    client.lastSpectrumSentAtUs = null;
     if (radioId !== null) {
       this.#updateWorkerPolicy(radioId);
     }
@@ -456,6 +501,7 @@ export class MediaHub {
         client.transport.sendJson({
           t: "media.uplink.ended",
           radioId: transmit.radioId,
+          transmitToken,
           reason: "transmit_ended",
         });
       }
@@ -530,6 +576,8 @@ export class MediaHub {
       client.radioSlot = null;
       client.boundTransmitToken = null;
       client.lastUplinkSequence = null;
+      client.spectrumCapability = { ...unavailableSpectrumCapability };
+      client.lastSpectrumSentAtUs = null;
       try {
         client.transport.sendJson({
           t: "media.error",
@@ -641,6 +689,10 @@ export class MediaHub {
       if (client.policy.spectrumBins === 0) {
         continue;
       }
+      if (!spectrumFrameIsDue(client, timestampUs)) {
+        continue;
+      }
+      client.lastSpectrumSentAtUs = timestampUs;
       const bins = resampleBins(value.bins, client.policy.spectrumBins);
       const payload = encodeSpectrumPayload({ ...value, bins });
       const frame = encodeMediaFrame({
@@ -698,9 +750,20 @@ export class MediaHub {
     if (clients.length === 0) {
       return;
     }
-    const policy = clients.reduce((selected, client) =>
+    const audioPolicy = clients.reduce((selected, client) =>
       tierRank(client.policy.tier) > tierRank(selected.tier) ? client.policy : selected,
     clients[0].policy);
+    const policy: MediaPolicy = {
+      ...audioPolicy,
+      spectrumBins: clients.reduce<number>(
+        (maximum, client) => Math.max(maximum, client.policy.spectrumBins),
+        0,
+      ) as MediaPolicy["spectrumBins"],
+      spectrumFps: clients.reduce<number>(
+        (maximum, client) => Math.max(maximum, client.policy.spectrumFps),
+        0,
+      ) as MediaPolicy["spectrumFps"],
+    };
     try {
       const result = worker.updatePolicy(policy);
       if (result !== undefined) {
@@ -730,10 +793,20 @@ export class MediaHub {
       }
     }
     for (const client of this.#subscribers(radioId)) {
+      const spectrum: SpectrumCapability = {
+        ...unavailableSpectrumCapability,
+        reason: "media_worker_failed",
+      };
+      client.spectrumCapability = spectrum;
+      client.policy = { ...client.policy, spectrumBins: 0, spectrumFps: 0 };
+      client.lastSpectrumSentAtUs = null;
       client.transport.sendJson({
         t: "media.error",
         code: "media_worker_failed",
         message: error instanceof Error ? error.message : "media worker failed",
+        reconnectRequired: true,
+        spectrum,
+        policy: client.policy,
       });
     }
     const active = [...this.#transmits.values()].filter(
@@ -831,6 +904,45 @@ function nextSequence(value: number): number {
 
 function tierRank(tier: MediaPolicy["tier"]): number {
   return tier === "normal" ? 0 : tier === "constrained" ? 1 : 2;
+}
+
+function normalizeSpectrumCapability(
+  value: SpectrumCapability | undefined,
+): SpectrumCapability {
+  if (value === undefined || !value.available) {
+    return {
+      ...unavailableSpectrumCapability,
+      reason: value?.reason ?? unavailableSpectrumCapability.reason,
+    };
+  }
+  return { ...value };
+}
+
+function applySpectrumCapability(
+  policy: MediaPolicy,
+  capability: SpectrumCapability,
+): MediaPolicy {
+  if (!capability.available || policy.spectrumBins === 0 || policy.spectrumFps === 0) {
+    return { ...policy, spectrumBins: 0, spectrumFps: 0 };
+  }
+  return {
+    ...policy,
+    spectrumBins: Math.min(policy.spectrumBins, capability.maxBins) as MediaPolicy["spectrumBins"],
+    spectrumFps: Math.min(policy.spectrumFps, capability.maxFps) as MediaPolicy["spectrumFps"],
+  };
+}
+
+function spectrumFrameIsDue(client: MediaClient, timestampUs: bigint): boolean {
+  const fps = client.policy.spectrumFps;
+  if (fps === 0) {
+    return false;
+  }
+  const previous = client.lastSpectrumSentAtUs;
+  if (previous === null || timestampUs < previous) {
+    return true;
+  }
+  const minimumIntervalUs = 1_000_000n / BigInt(fps);
+  return timestampUs - previous >= minimumIntervalUs;
 }
 
 function resampleBins(source: Uint8Array, targetLength: number): Uint8Array {

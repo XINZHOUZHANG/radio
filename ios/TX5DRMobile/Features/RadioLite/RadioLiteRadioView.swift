@@ -7,14 +7,19 @@ struct RadioLiteRadioView: View {
     @State private var frequencyMHz = "14.074000"
     @FocusState private var frequencyFocused: Bool
 
-    private let modes = ["USB", "LSB", "CW", "CWR", "AM", "FM", "DIGU", "DIGL"]
+    private let modes = RadioLiteRigMode.allCases
 
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
                 statusStrip
                 frequencyPanel
-                RadioLiteSpectrumView(spectrum: media.spectrum)
+                RadioLiteSpectrumView(
+                    spectrum: media.spectrum,
+                    capability: media.spectrumCapability,
+                    history: media.spectrumHistory,
+                    policy: media.policy
+                )
                 audioPanel
                 transmitPanel
             }
@@ -97,9 +102,11 @@ struct RadioLiteRadioView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 7) {
-                        ForEach(modes, id: \.self) { mode in
-                            Button(mode) { Task { await session.setMode(mode) } }
-                                .buttonStyle(RadioLiteModeButtonStyle(selected: session.rigState?.mode == mode))
+                        ForEach(modes) { mode in
+                            Button(mode.label) { Task { await session.setMode(mode) } }
+                                .buttonStyle(RadioLiteModeButtonStyle(
+                                    selected: mode.matches(readback: session.rigState?.mode)
+                                ))
                         }
                     }
                 }
@@ -160,14 +167,10 @@ struct RadioLiteRadioView: View {
 
     private func toggleMonitoring() {
         if audio.isMonitoring {
-            audio.stopMonitoring()
+            session.stopReceiveAudio()
             return
         }
-        do {
-            try audio.startMonitoring()
-        } catch {
-            session.errorMessage = error.localizedDescription
-        }
+        Task { await session.startReceiveAudio() }
     }
 
     private var transmitPanel: some View {
@@ -231,21 +234,33 @@ struct RadioLiteRadioView: View {
 
 private struct RadioLiteSpectrumView: View {
     let spectrum: RadioLiteSpectrumFrame?
+    let capability: RadioLiteSpectrumCapability?
+    let history: [[UInt8]]
+    let policy: RadioLiteMediaPolicy?
 
     var body: some View {
         RadioPanel {
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 11) {
                 HStack {
                     Label("实时频谱", systemImage: "waveform.path")
                         .font(.headline)
                     Spacer()
-                    if let spectrum {
-                        Text("±\(spectrum.spanHz / 2) Hz · \(spectrum.bins.count) 点")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(RadioPalette.muted)
-                    }
+                    sourceBadge
                 }
+                Text(axisDescription)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(RadioPalette.muted)
                 Canvas { context, size in
+                    var grid = Path()
+                    for division in 1..<4 {
+                        let x = size.width * CGFloat(division) / 4
+                        grid.move(to: CGPoint(x: x, y: 0))
+                        grid.addLine(to: CGPoint(x: x, y: size.height))
+                        let y = size.height * CGFloat(division) / 4
+                        grid.move(to: CGPoint(x: 0, y: y))
+                        grid.addLine(to: CGPoint(x: size.width, y: y))
+                    }
+                    context.stroke(grid, with: .color(Color.white.opacity(0.07)), lineWidth: 0.5)
                     guard let bins = spectrum?.bins, bins.count > 1 else { return }
                     let step = size.width / CGFloat(bins.count - 1)
                     var line = Path()
@@ -270,21 +285,122 @@ private struct RadioLiteSpectrumView: View {
                         endPoint: CGPoint(x: 0, y: size.height)
                     ))
                     context.stroke(line, with: .color(RadioPalette.cyan), lineWidth: 1.4)
-                    context.stroke(Path { path in
-                        path.move(to: CGPoint(x: size.width / 2, y: 0))
-                        path.addLine(to: CGPoint(x: size.width / 2, y: size.height))
-                    }, with: .color(RadioPalette.accent.opacity(0.65)), lineWidth: 1)
                 }
-                .frame(height: 170)
+                .frame(height: 145)
                 .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                if spectrum == nil {
-                    Text("等待媒体通道频谱数据…")
+
+                if let statusMessage {
+                    Label(statusMessage, systemImage: statusIcon)
                         .font(.caption)
                         .foregroundStyle(RadioPalette.muted)
                         .frame(maxWidth: .infinity)
                 }
+
+                if capability?.supportsWaterfall == true {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("瀑布图")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(RadioPalette.muted)
+                        Canvas { context, size in
+                            let rows = Array(history.reversed())
+                            guard !rows.isEmpty else { return }
+                            let rowHeight = size.height / CGFloat(rows.count)
+                            for (rowIndex, bins) in rows.enumerated() where !bins.isEmpty {
+                                let columnCount = bins.count
+                                let columnWidth = size.width / CGFloat(columnCount)
+                                for (column, level) in bins.enumerated() {
+                                    let rectangle = CGRect(
+                                        x: CGFloat(column) * columnWidth,
+                                        y: CGFloat(rowIndex) * rowHeight,
+                                        width: columnWidth + 0.5,
+                                        height: rowHeight + 0.5
+                                    )
+                                    context.fill(Path(rectangle), with: .color(waterfallColor(level)))
+                                }
+                            }
+                        }
+                        .frame(height: 112)
+                        .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        HStack {
+                            Text("0 Hz")
+                            Spacer()
+                            Text("\(displaySpanHz / 2) Hz")
+                            Spacer()
+                            Text("\(displaySpanHz) Hz")
+                        }
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(RadioPalette.muted)
+                    }
+                }
             }
         }
+    }
+
+    private var sourceBadge: some View {
+        let text: String
+        let color: Color
+        if capability?.available == false {
+            text = "不可用"
+            color = RadioPalette.warning
+        } else if capability?.simulated == true {
+            text = "模拟数据"
+            color = RadioPalette.warning
+        } else if capability?.available == true {
+            text = "真实声卡 FFT"
+            color = RadioPalette.accent
+        } else {
+            text = "协商中"
+            color = RadioPalette.muted
+        }
+        return Text(text)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    private var displaySpanHz: UInt32 {
+        spectrum?.spanHz ?? UInt32(max(0, capability?.spanHz ?? 0))
+    }
+
+    private var axisDescription: String {
+        let points = spectrum?.bins.count ?? policy?.spectrumBins ?? 0
+        guard let spectrum, spectrum.centerFrequencyHz > 0 else {
+            return "接收音频 0–\(displaySpanHz) Hz · \(points) 点"
+        }
+        return String(
+            format: "RX %.6f MHz · 音频 0–%.1f kHz · %d 点",
+            Double(spectrum.centerFrequencyHz) / 1_000_000,
+            Double(displaySpanHz) / 1_000,
+            points
+        )
+    }
+
+    private var statusMessage: String? {
+        if capability?.available == false {
+            return "服务端没有可用的频谱源，请检查接收音频输入设备"
+        }
+        if policy?.spectrumBins == 0 {
+            return "弱网或后台策略已暂停频谱传输"
+        }
+        if spectrum == nil {
+            return "等待接收声卡 FFT 数据…"
+        }
+        return nil
+    }
+
+    private var statusIcon: String {
+        capability?.available == false ? "exclamationmark.triangle" : "hourglass"
+    }
+
+    private func waterfallColor(_ value: UInt8) -> Color {
+        let level = Double(value) / 255
+        return Color(
+            hue: max(0, 0.68 - 0.68 * level),
+            saturation: 0.92,
+            brightness: max(0.06, level)
+        )
     }
 }
 

@@ -23,6 +23,7 @@ import {
   TransmitPermissionError,
   type RadioRuntimeFactory,
 } from "../rig/radio-runtime.ts";
+import { RigModeError } from "../rig/hamlib-rig.ts";
 import { RigReportError, RigTransportError } from "../rig/transport.ts";
 import { InvalidLeaseError, InterlockConflictError } from "../safety/transmit-interlock.ts";
 import { decodeMediaFrame, MediaFrameError, MediaKind } from "../media/frame.ts";
@@ -456,6 +457,7 @@ export class RadioLiteService {
     clientId: string,
     value: unknown,
   ): Promise<void> {
+    const correlation = mediaRequestCorrelation(value);
     try {
       const message = controlMessage(value);
       if (message.t === "ping") {
@@ -464,7 +466,12 @@ export class RadioLiteService {
         return;
       }
       if (message.t === "media.subscribe") {
-        exactMessageKeys(message, ["t", "radioId", "spectrumVisible"]);
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "spectrumVisible", "requestId"],
+          ["requestId"],
+        );
+        optionalMessageText(message.requestId, "requestId", 64);
         if (typeof message.spectrumVisible !== "boolean") {
           throw new Error("spectrumVisible must be boolean");
         }
@@ -473,13 +480,14 @@ export class RadioLiteService {
           messageText(message.radioId, "radioId", 32),
           message.spectrumVisible,
         );
-        sendWebSocketJson(webSocket, { t: "media.subscribed", ...subscribed });
+        sendWebSocketJson(webSocket, { t: "media.subscribed", ...subscribed, ...correlation });
         return;
       }
       if (message.t === "media.network") {
         exactMessageKeys(message, [
-          "t", "rttMs", "packetLossPercent", "bufferedBytes", "spectrumVisible",
-        ]);
+          "t", "rttMs", "packetLossPercent", "bufferedBytes", "spectrumVisible", "requestId",
+        ], ["requestId"]);
+        optionalMessageText(message.requestId, "requestId", 64);
         if (typeof message.spectrumVisible !== "boolean") {
           throw new Error("spectrumVisible must be boolean");
         }
@@ -489,23 +497,29 @@ export class RadioLiteService {
           bufferedBytes: nonNegativeNumber(message.bufferedBytes, "bufferedBytes"),
           spectrumVisible: message.spectrumVisible,
         });
-        sendWebSocketJson(webSocket, { t: "media.policy", policy });
+        sendWebSocketJson(webSocket, { t: "media.policy", policy, ...correlation });
         return;
       }
       if (message.t === "media.uplink.bind") {
-        exactMessageKeys(message, ["t", "radioId", "transmitToken"]);
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "transmitToken", "requestId"],
+          ["requestId"],
+        );
+        optionalMessageText(message.requestId, "requestId", 64);
         const bound = await this.#media.bindUplink(
           clientId,
           messageText(message.radioId, "radioId", 32),
           messageText(message.transmitToken, "transmitToken", 128),
         );
-        sendWebSocketJson(webSocket, { t: "media.uplink.bound", ...bound });
+        sendWebSocketJson(webSocket, { t: "media.uplink.bound", ...bound, ...correlation });
         return;
       }
       if (message.t === "media.unsubscribe") {
-        exactMessageKeys(message, ["t"]);
+        exactMessageKeys(message, ["t", "requestId"], ["requestId"]);
+        optionalMessageText(message.requestId, "requestId", 64);
         const radioId = await this.#media.unsubscribe(clientId);
-        sendWebSocketJson(webSocket, { t: "media.unsubscribed", radioId });
+        sendWebSocketJson(webSocket, { t: "media.unsubscribed", radioId, ...correlation });
         return;
       }
       throw new Error("unsupported media message");
@@ -514,6 +528,7 @@ export class RadioLiteService {
         t: "media.error",
         code: "invalid_media_control",
         message: error instanceof Error ? error.message : "invalid media control",
+        ...correlation,
       });
     }
   }
@@ -1412,6 +1427,34 @@ function controlMessage(value: unknown): Record<string, unknown> & { t: string }
   return message as Record<string, unknown> & { t: string };
 }
 
+const CORRELATED_MEDIA_REQUEST_TYPES = new Set([
+  "media.subscribe",
+  "media.network",
+  "media.uplink.bind",
+  "media.unsubscribe",
+]);
+
+function mediaRequestCorrelation(value: unknown): {
+  requestId?: string;
+  requestType?: string;
+} {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const message = value as Record<string, unknown>;
+  if (
+    typeof message.t !== "string" ||
+    !CORRELATED_MEDIA_REQUEST_TYPES.has(message.t) ||
+    typeof message.requestId !== "string" ||
+    message.requestId.length < 1 ||
+    message.requestId.length > 64 ||
+    /[\0\r\n]/u.test(message.requestId)
+  ) {
+    return {};
+  }
+  return { requestId: message.requestId, requestType: message.t };
+}
+
 function exactMessageKeys(
   message: Record<string, unknown>,
   allowed: readonly string[],
@@ -1469,6 +1512,12 @@ function nonNegativeNumber(value: unknown, field: string): number {
 }
 
 function mapControlError(error: unknown): { code: string; message: string } {
+  if (error instanceof RigModeError) {
+    return {
+      code: error.reason === "rejected" ? "rig_mode_rejected" : "rig_mode_unconfirmed",
+      message: error.message,
+    };
+  }
   if (error instanceof DigitalWorkerUnavailableError) {
     return { code: "digital_worker_unavailable", message: error.message };
   }

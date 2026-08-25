@@ -25,9 +25,13 @@ The media milestone now also includes:
 
 - a 16-byte binary media envelope and compact UInt8 spectrum payload;
 - adaptive 20/16/12 kbit/s Opus and 512/256/128-bin spectrum policies;
+- request-correlated media control replies kept separate from asynchronous worker faults;
 - Ogg/Opus packet framing with CRC validation and bounded process pipes;
 - ALSA or PulseAudio capture/playback through Debian `opus-tools`;
-- a synthetic waterfall for Hamlib Dummy profiles;
+- a real receive-audio FFT waterfall for hardware profiles and a clearly
+  labelled synthetic waterfall for Hamlib Dummy;
+- explicit spectrum capability and unavailable-source responses, so clients
+  never confuse missing hardware data with an endlessly loading graph;
 - microphone uplink binding to a voice transmit token;
 - immediate PTT release on media disconnect, worker failure or token expiry;
 - a three-second uplink-bind deadline so an unbound carrier cannot remain on; and

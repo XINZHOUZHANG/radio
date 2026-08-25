@@ -13,6 +13,7 @@ import { parseAdif } from "../src/log/adif.ts";
 import { decodeMediaFrame, encodeMediaFrame, MediaKind } from "../src/media/frame.ts";
 import type { MediaPolicy } from "../src/media/adaptive-policy.ts";
 import type { MediaWorkerOutput } from "../src/media/media-hub.ts";
+import { RigModeError } from "../src/rig/hamlib-rig.ts";
 import { RadioRuntime, type RigControl } from "../src/rig/radio-runtime.ts";
 import { RadioLiteService } from "../src/server/radio-lite-service.ts";
 
@@ -236,6 +237,21 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.t, "control.acquired");
   const controlToken = reply.controlToken;
 
+  rig.rejectedMode = "DATA-U";
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.mode.set",
+    radioId: "main",
+    controlToken,
+    mode: "DATA-U",
+    passbandHz: 0,
+    commandId: "mode-data-u-rejected",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.requestType, "rig.mode.set");
+  assert.equal(reply.code, "rig_mode_rejected");
+  assert.match(reply.message, /DATA-U.*PKTUSB/u);
+  rig.rejectedMode = null;
+
   reply = await sendJsonAndReceive(webSocket, {
     t: "rig.frequency.set",
     radioId: "main",
@@ -325,10 +341,26 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     t: "media.subscribe",
     radioId: "main",
     spectrumVisible: true,
+    requestId: "media-subscribe-1",
   });
   assert.equal(reply.t, "media.subscribed");
+  assert.equal(reply.requestId, "media-subscribe-1");
+  assert.equal(reply.requestType, "media.subscribe");
   assert.equal(reply.radioSlot, 0);
   assert.equal(reply.policy.opusBitrate, 20_000);
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.network",
+    rttMs: -1,
+    packetLossPercent: 0,
+    bufferedBytes: 0,
+    spectrumVisible: true,
+    requestId: "media-network-invalid",
+  });
+  assert.equal(reply.t, "media.error");
+  assert.equal(reply.code, "invalid_media_control");
+  assert.equal(reply.requestId, "media-network-invalid");
+  assert.equal(reply.requestType, "media.network");
 
   reply = await sendJsonAndReceive(mediaSocket, {
     t: "media.network",
@@ -336,11 +368,32 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     packetLossPercent: 10,
     bufferedBytes: 600_000,
     spectrumVisible: false,
+    requestId: "media-network-1",
   });
   assert.equal(reply.t, "media.policy");
+  assert.equal(reply.requestId, "media-network-1");
+  assert.equal(reply.requestType, "media.network");
   assert.equal(reply.policy.tier, "severe");
   assert.equal(reply.policy.spectrumBins, 0);
   assert.equal(mediaPolicies.at(-1)?.tier, "severe");
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.unsubscribe",
+    requestId: "media-unsubscribe-1",
+  });
+  assert.equal(reply.t, "media.unsubscribed");
+  assert.equal(reply.requestId, "media-unsubscribe-1");
+  assert.equal(reply.requestType, "media.unsubscribe");
+
+  reply = await sendJsonAndReceive(mediaSocket, {
+    t: "media.subscribe",
+    radioId: "main",
+    spectrumVisible: true,
+    requestId: "media-subscribe-2",
+  });
+  assert.equal(reply.t, "media.subscribed");
+  assert.equal(reply.requestId, "media-subscribe-2");
+  assert.equal(reply.requestType, "media.subscribe");
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "tx.start",
@@ -357,8 +410,11 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     t: "media.uplink.bind",
     radioId: "main",
     transmitToken,
+    requestId: "media-bind-1",
   });
   assert.equal(reply.t, "media.uplink.bound");
+  assert.equal(reply.requestId, "media-bind-1");
+  assert.equal(reply.requestType, "media.uplink.bind");
 
   mediaSocket.send(encodeMediaFrame({
     kind: MediaKind.audioUplink,
@@ -411,8 +467,11 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     t: "media.uplink.bind",
     radioId: "main",
     transmitToken: secondTransmitToken,
+    requestId: "media-bind-2",
   });
   assert.equal(reply.t, "media.uplink.bound");
+  assert.equal(reply.requestId, "media-bind-2");
+  assert.equal(reply.requestType, "media.uplink.bind");
 
   mediaSocket.close();
   await new Promise<void>((resolve) => mediaSocket.once("close", () => resolve()));
@@ -531,6 +590,7 @@ class ApiFakeRig implements RigControl {
   passbandHz = 3_000;
   ptt = false;
   tuner = false;
+  rejectedMode: string | null = null;
 
   async readState() {
     return {
@@ -542,6 +602,9 @@ class ApiFakeRig implements RigControl {
   }
   async setFrequency(value: number) { this.frequencyHz = value; return value; }
   async setMode(value: string, passband = 0) {
+    if (value === this.rejectedMode) {
+      throw new RigModeError(value, "PKTUSB", "rejected", -1);
+    }
     this.mode = value;
     this.passbandHz = passband || 2_400;
     return { mode: this.mode, passbandHz: this.passbandHz };

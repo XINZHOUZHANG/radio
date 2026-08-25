@@ -1,11 +1,77 @@
 import Combine
 import Foundation
 
+struct RadioLiteUplinkOwnership: Equatable, Sendable {
+    let transmitToken: String
+    let epoch: UInt64
+}
+
+struct RadioLiteUplinkOwnershipState: Equatable, Sendable {
+    private var epoch = RadioLiteOperationEpoch()
+    private var current: RadioLiteUplinkOwnership?
+    private var bound = false
+
+    mutating func begin(transmitToken: String) -> RadioLiteUplinkOwnership {
+        let ownership = RadioLiteUplinkOwnership(
+            transmitToken: transmitToken,
+            epoch: epoch.begin()
+        )
+        current = ownership
+        bound = false
+        return ownership
+    }
+
+    mutating func complete(_ ownership: RadioLiteUplinkOwnership) -> Bool {
+        guard current == ownership, epoch.owns(ownership.epoch) else { return false }
+        bound = true
+        return true
+    }
+
+    @discardableResult
+    mutating func stop(transmitToken: String? = nil, epoch expectedEpoch: UInt64? = nil) -> Bool {
+        if let transmitToken, current?.transmitToken != transmitToken { return false }
+        if let expectedEpoch, current?.epoch != expectedEpoch { return false }
+        let hadOwner = current != nil
+        epoch.invalidate()
+        current = nil
+        bound = false
+        return hadOwner
+    }
+
+    func isCurrent(_ ownership: RadioLiteUplinkOwnership) -> Bool {
+        current == ownership && epoch.owns(ownership.epoch)
+    }
+
+    func isBound(_ ownership: RadioLiteUplinkOwnership) -> Bool {
+        bound && isCurrent(ownership)
+    }
+
+    var currentOwnership: RadioLiteUplinkOwnership? { current }
+    var isBound: Bool { bound && current != nil }
+}
+
+enum RadioLiteMediaFailurePresentation: Equatable, Sendable {
+    case reconnectBanner
+    case uplinkBanner
+    case none
+
+    static func route(
+        wasUplinkBound: Bool,
+        reconnectRequired: Bool
+    ) -> Self {
+        if reconnectRequired { return .reconnectBanner }
+        if wasUplinkBound { return .uplinkBanner }
+        return .none
+    }
+}
+
 @MainActor
 final class RadioLiteMediaClient: ObservableObject {
     @Published private(set) var state: RadioLiteSocketState = .disconnected
     @Published private(set) var policy: RadioLiteMediaPolicy?
     @Published private(set) var spectrum: RadioLiteSpectrumFrame?
+    @Published private(set) var spectrumCapability: RadioLiteSpectrumCapability?
+    @Published private(set) var spectrumHistory: [[UInt8]] = []
     @Published private(set) var radioSlot: UInt8?
     @Published private(set) var subscribedRadioId: String?
     @Published private(set) var isUplinkBound = false
@@ -25,7 +91,8 @@ final class RadioLiteMediaClient: ObservableObject {
     private var uplinkSendTask: Task<Void, Never>?
     private var uplinkContinuation: AsyncStream<Data>.Continuation?
     private var uplinkSequence: UInt32 = 0
-    private var boundTransmitToken: String?
+    private var uplinkOwnershipState = RadioLiteUplinkOwnershipState()
+    private var spectrumHistoryBuffer = RadioLiteSpectrumHistory()
 
     init(audio: RadioLiteAudioEngine? = nil) {
         self.audio = audio ?? RadioLiteAudioEngine()
@@ -35,6 +102,7 @@ final class RadioLiteMediaClient: ObservableObject {
             guard let self else { return }
             self.stopUplink()
             self.audio.stopMicrophoneCapture()
+            self.clearSpectrum(keepingCapability: false)
             self.state = .failed(error.localizedDescription)
             self.lastError = error.localizedDescription
             self.networkTask?.cancel()
@@ -74,12 +142,15 @@ final class RadioLiteMediaClient: ObservableObject {
         )
         guard let slot = response["radioSlot"]?.intValue,
               let policy: RadioLiteMediaPolicy = response["policy"]?.decoded(),
+              let spectrumCapability: RadioLiteSpectrumCapability = response["spectrum"]?.decoded(),
               (0...255).contains(slot) else {
             throw RadioLiteSocketError.invalidWelcome
         }
         radioSlot = UInt8(slot)
         subscribedRadioId = radioId
         self.policy = policy
+        self.spectrumCapability = spectrumCapability
+        clearSpectrum(keepingCapability: true)
         audio.setOpusBitrate(policy.opusBitrate)
         if AudioRuntimePolicy.startsMonitoringOnMediaSubscription {
             try audio.startMonitoring()
@@ -98,7 +169,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
         subscribedRadioId = nil
         radioSlot = nil
-        spectrum = nil
+        clearSpectrum(keepingCapability: false)
     }
 
     func disconnect() {
@@ -111,22 +182,36 @@ final class RadioLiteMediaClient: ObservableObject {
         subscribedRadioId = nil
         radioSlot = nil
         policy = nil
-        spectrum = nil
+        clearSpectrum(keepingCapability: false)
     }
 
-    func bindUplink(radioId: String, transmitToken: String) async throws {
-        _ = try await channel.request(
-            .object([
-                "t": .string("media.uplink.bind"),
-                "radioId": .string(radioId),
-                "transmitToken": .string(transmitToken),
-            ]),
-            expecting: ["media.uplink.bound"],
-            requestType: "media.uplink.bind"
-        )
-        boundTransmitToken = transmitToken
-        isUplinkBound = true
-        startUplinkSendLoop()
+    func bindUplink(
+        radioId: String,
+        transmitToken: String
+    ) async throws -> RadioLiteUplinkOwnership {
+        stopUplink()
+        let ownership = uplinkOwnershipState.begin(transmitToken: transmitToken)
+        do {
+            _ = try await channel.request(
+                .object([
+                    "t": .string("media.uplink.bind"),
+                    "radioId": .string(radioId),
+                    "transmitToken": .string(transmitToken),
+                ]),
+                expecting: ["media.uplink.bound"],
+                requestType: "media.uplink.bind"
+            )
+            try Task.checkCancellation()
+            guard uplinkOwnershipState.complete(ownership) else {
+                throw CancellationError()
+            }
+            isUplinkBound = true
+            startUplinkSendLoop(ownership: ownership)
+            return ownership
+        } catch {
+            stopUplink(transmitToken: ownership.transmitToken, epoch: ownership.epoch)
+            throw error
+        }
     }
 
     func enqueueMicrophonePacket(_ opus: Data) {
@@ -147,20 +232,24 @@ final class RadioLiteMediaClient: ObservableObject {
         _ = uplinkContinuation?.yield(encoded)
     }
 
-    func stopUplink() {
+    @discardableResult
+    func stopUplink(transmitToken: String? = nil, epoch: UInt64? = nil) -> Bool {
+        let unconditional = transmitToken == nil && epoch == nil
+        let stopped = uplinkOwnershipState.stop(transmitToken: transmitToken, epoch: epoch)
+        guard stopped || unconditional else { return false }
         isUplinkBound = false
-        boundTransmitToken = nil
         uplinkSequence = 0
         uplinkContinuation?.finish()
         uplinkContinuation = nil
         uplinkSendTask?.cancel()
         uplinkSendTask = nil
+        return stopped
     }
 
     func setSpectrumVisible(_ visible: Bool) {
         guard spectrumVisible != visible else { return }
         spectrumVisible = visible
-        if !visible { spectrum = nil }
+        if !visible { clearSpectrum(keepingCapability: true) }
         Task { [weak self] in await self?.reportNetwork() }
     }
 
@@ -173,7 +262,10 @@ final class RadioLiteMediaClient: ObservableObject {
                 audio.receiveOpusPacket(frame.payload)
             case .spectrum:
                 guard spectrumVisible else { return }
-                spectrum = try RadioLiteMediaFrameCodec.decodeSpectrum(frame.payload)
+                let decoded = try RadioLiteMediaFrameCodec.decodeSpectrum(frame.payload)
+                spectrum = decoded
+                spectrumHistoryBuffer.append(decoded)
+                spectrumHistory = spectrumHistoryBuffer.rows
             case .audioUplink, .statistics:
                 break
             }
@@ -190,21 +282,60 @@ final class RadioLiteMediaClient: ObservableObject {
                 audio.setOpusBitrate(policy.opusBitrate)
             }
         case "media.uplink.ended":
-            stopUplink()
-            audio.stopMicrophoneCapture()
+            let stopped: Bool
+            if let transmitToken = value["transmitToken"]?.stringValue {
+                stopped = stopUplink(transmitToken: transmitToken)
+            } else if isUplinkBound {
+                // Compatibility with an older server. Never let its
+                // uncorrelated event cancel a replacement that is still binding.
+                stopped = stopUplink()
+            } else {
+                stopped = false
+            }
+            if stopped { audio.stopMicrophoneCapture() }
         case "media.error":
+            let code = value["code"]?.stringValue ?? "media_error"
+            let reconnectRequired = value["reconnectRequired"]?.boolValue == true
+                || code == "media_worker_failed"
+            if let advertised: RadioLiteSpectrumCapability = value["spectrum"]?.decoded() {
+                spectrumCapability = advertised
+            } else if reconnectRequired {
+                spectrumCapability = RadioLiteSpectrumCapability.unavailable(reason: code)
+            }
+            if reconnectRequired {
+                if let advertised: RadioLiteMediaPolicy = value["policy"]?.decoded() {
+                    policy = advertised
+                } else if let current = policy {
+                    policy = RadioLiteMediaPolicy(
+                        tier: current.tier,
+                        opusBitrate: current.opusBitrate,
+                        opusFrameMs: current.opusFrameMs,
+                        spectrumBins: 0,
+                        spectrumFps: 0
+                    )
+                }
+                clearSpectrum(keepingCapability: true)
+            }
             let error = RadioLiteSocketError.command(
-                code: value["code"]?.stringValue ?? "media_error",
+                code: code,
                 message: value["message"]?.stringValue ?? "媒体通道故障"
             )
             lastError = error.localizedDescription
+            let presentation = RadioLiteMediaFailurePresentation.route(
+                wasUplinkBound: isUplinkBound,
+                reconnectRequired: reconnectRequired
+            )
             if isUplinkBound {
                 stopUplink()
                 audio.stopMicrophoneCapture()
-                onUplinkFailure?(error)
             }
-            if value["reconnectRequired"]?.boolValue == true {
+            switch presentation {
+            case .none:
+                break
+            case .reconnectBanner:
                 onReconnectRequired?(error)
+            case .uplinkBanner:
+                onUplinkFailure?(error)
             }
         case "pong":
             if let started = pingStartedAt {
@@ -216,7 +347,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
     }
 
-    private func startUplinkSendLoop() {
+    private func startUplinkSendLoop(ownership: RadioLiteUplinkOwnership) {
         uplinkContinuation?.finish()
         uplinkSendTask?.cancel()
         let stream = AsyncStream<Data>(bufferingPolicy: .bufferingNewest(12)) { continuation in
@@ -226,12 +357,15 @@ final class RadioLiteMediaClient: ObservableObject {
             do {
                 for await data in stream {
                     try Task.checkCancellation()
-                    guard let self, self.isUplinkBound else { return }
+                    guard let self, self.uplinkOwnershipState.isBound(ownership) else { return }
                     try await self.channel.send(data)
                 }
             } catch {
                 guard let self, !Task.isCancelled else { return }
-                self.stopUplink()
+                guard self.stopUplink(
+                    transmitToken: ownership.transmitToken,
+                    epoch: ownership.epoch
+                ) else { return }
                 self.audio.stopMicrophoneCapture()
                 self.lastError = error.localizedDescription
                 self.onUplinkFailure?(error)
@@ -263,5 +397,14 @@ final class RadioLiteMediaClient: ObservableObject {
             ("spectrumVisible", .bool(spectrumVisible))
         )
         try? await channel.send(report)
+    }
+
+    private func clearSpectrum(keepingCapability: Bool) {
+        spectrum = nil
+        spectrumHistoryBuffer.reset()
+        spectrumHistory = []
+        if !keepingCapability {
+            spectrumCapability = nil
+        }
     }
 }

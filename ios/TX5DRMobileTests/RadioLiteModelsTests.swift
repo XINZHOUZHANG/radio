@@ -2,6 +2,29 @@ import XCTest
 @testable import TX5DRMobile
 
 final class RadioLiteModelsTests: XCTestCase {
+    func testDataModesUseFriendlyLabelsAndCanonicalHamlibWireValues() {
+        XCTAssertEqual(RadioLiteRigMode.dataUpper.rawValue, "DATA-U")
+        XCTAssertEqual(RadioLiteRigMode.dataUpper.hamlibMode, "PKTUSB")
+        XCTAssertTrue(RadioLiteRigMode.dataUpper.matches(readback: "PKTUSB"))
+        XCTAssertTrue(RadioLiteRigMode.dataUpper.matches(readback: "DIGU"))
+        XCTAssertFalse(RadioLiteRigMode.dataUpper.matches(readback: "PKTLSB"))
+        XCTAssertEqual(RadioLiteRigMode.dataLower.rawValue, "DATA-L")
+        XCTAssertEqual(RadioLiteRigMode.dataLower.hamlibMode, "PKTLSB")
+        XCTAssertTrue(RadioLiteRigMode.dataLower.matches(readback: "PKTLSB"))
+    }
+
+    func testModeRejectionUsesANonModalLocalizedExplanation() {
+        XCTAssertEqual(
+            RadioLiteRigMode.failureNotice(
+                code: "rig_mode_rejected",
+                requested: .dataUpper
+            ),
+            "当前电台不支持 DATA-U；已保留原模式。FT8 通常使用 DATA-U（Hamlib PKTUSB）。"
+        )
+        XCTAssertNotNil(RadioLiteRigMode.failureNotice(code: "hamlib_report", requested: .usb))
+        XCTAssertNil(RadioLiteRigMode.failureNotice(code: "invalid_control_lease", requested: .usb))
+    }
+
     func testDeviceAndBrowserCredentialsRoundTripWithoutLosingSecrets() throws {
         let credentials: [RadioLiteCredential] = [
             .device(.init(
