@@ -26,8 +26,8 @@ final class RadioLiteMediaClient: ObservableObject {
     private var uplinkSequence: UInt32 = 0
     private var boundTransmitToken: String?
 
-    init(audio: RadioLiteAudioEngine = RadioLiteAudioEngine()) {
-        self.audio = audio
+    init(audio: RadioLiteAudioEngine? = nil) {
+        self.audio = audio ?? RadioLiteAudioEngine()
         channel.onJSON = { [weak self] value in self?.handle(value) }
         channel.onBinary = { [weak self] data in self?.handle(data) }
         channel.onDisconnect = { [weak self] error in
