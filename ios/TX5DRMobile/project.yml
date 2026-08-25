@@ -9,8 +9,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: 5.9
-    CURRENT_PROJECT_VERSION: 5
-    MARKETING_VERSION: 0.1.4
+    CURRENT_PROJECT_VERSION: 6
+    MARKETING_VERSION: 0.2.0
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
 
@@ -25,14 +25,14 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: TX-5DR Remote
+        CFBundleDisplayName: Radio Lite
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSMicrophoneUsageDescription: TX-5DR Remote uses the microphone for held voice PTT and voice-keyer recordings.
-        NSLocalNetworkUsageDescription: TX-5DR Remote connects to your radio server on the local network.
+        NSMicrophoneUsageDescription: Radio Lite uses the microphone only while you hold voice PTT.
+        NSLocalNetworkUsageDescription: Radio Lite connects to your remote-radio server on the local network or Tailscale.
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:

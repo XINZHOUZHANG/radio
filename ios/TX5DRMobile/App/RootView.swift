@@ -1,8 +1,7 @@
 import SwiftUI
 
 struct RootView: View {
-    @EnvironmentObject private var session: TX5DRSession
-    @EnvironmentObject private var radio: RadioWebSocket
+    @EnvironmentObject private var session: RadioLiteSession
 
     var body: some View {
         Group {
@@ -10,15 +9,11 @@ struct RootView: View {
             case .launching:
                 launchView
             case .signedOut, .authenticating:
-                LoginView()
+                RadioLiteLoginView()
             case .ready:
-                RadioShellView()
+                RadioLiteShellView()
             case .failed(let message):
-                ContentUnavailableView(
-                    "连接失败",
-                    systemImage: "antenna.radiowaves.left.and.right.slash",
-                    description: Text(message)
-                )
+                failedView(message)
             }
         }
         .task {
@@ -36,25 +31,15 @@ struct RootView: View {
             message: { Text(session.errorMessage ?? "未知错误") }
         )
         .overlay(alignment: .top) {
-            if let notice = session.noticeMessage ?? radio.lastNotice {
+            if let notice = session.noticeMessage {
                 NoticeBanner(text: notice) {
-                    if session.noticeMessage != nil {
-                        session.noticeMessage = nil
-                    } else {
-                        radio.dismissLastNotice()
-                    }
+                    session.noticeMessage = nil
                 }
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.snappy, value: session.noticeMessage ?? radio.lastNotice)
-        .sheet(item: Binding(
-            get: { radio.openWebRXProfileRequest },
-            set: { if $0 == nil { radio.dismissOpenWebRXProfileRequest() } }
-        )) { request in
-            OpenWebRXProfileSelectionView(request: request)
-        }
+        .animation(.snappy, value: session.noticeMessage)
     }
 
     private var launchView: some View {
@@ -64,10 +49,24 @@ struct RootView: View {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 48, weight: .semibold))
                     .foregroundStyle(RadioPalette.accent)
-                Text("TX-5DR Remote")
+                Text("Radio Lite")
                     .font(.title2.weight(.semibold))
                 ProgressView()
                     .tint(RadioPalette.accent)
+            }
+        }
+    }
+
+    private func failedView(_ message: String) -> some View {
+        ZStack {
+            RadioPalette.background.ignoresSafeArea()
+            ContentUnavailableView {
+                Label("连接失败", systemImage: "antenna.radiowaves.left.and.right.slash")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("返回登录") { session.logout() }
+                    .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
             }
         }
     }

@@ -1,52 +1,41 @@
-# TX-5DR Remote for iOS
+# Radio Lite for iOS
 
-This is a native SwiftUI client for the TX-5DR HTTP, WebSocket, spectrum, FT8,
-voice, CW, logbook, tuner, and capability protocols. It does not embed the
-TX-5DR React application. Third-party plugin pages are the only planned area
-where a constrained `WKWebView` may be used because plugin-defined user
-interfaces cannot be modeled ahead of time.
+This directory contains the native SwiftUI client for the repository's Radio
+Lite protocol v1. The active application no longer wraps or depends on the
+TX-5DR web UI. The legacy TX-5DR client sources remain temporarily in the tree
+as visual/reference components while migration tests are retired.
 
-The first audio transport is TX-5DR `ws-compat` with PCM S16LE frames. This is
-implemented with `URLSessionWebSocketTask` and `AVAudioEngine`, so the initial
-app has no third-party runtime dependency. TX-5DR's lower-latency
-`rtc-data-audio` transport remains a later optional optimization.
+## Implemented native features
 
-## Open on macOS
+- HTTP, HTTPS and Tailscale server addresses, including trusted plain HTTP;
+- five-minute request and initial-authentication tolerance for very slow links;
+- username/password sessions, first-server setup and one-time six-digit device
+  pairing with Keychain persistence and rotating device credentials;
+- multi-radio selection, exclusive control lease, Hamlib frequency/mode, held
+  voice PTT and held internal tuner operation;
+- one-port `/ws/control` and `/ws/media` clients using `radio-lite.v1`;
+- native system Opus at 16 kHz mono, compact spectrum decoding and adaptive
+  low-bandwidth policy reporting;
+- FT8/FT4 immutable slot batches, selectable decodes, call queue and automatic
+  QSO state;
+- server-owned ADIF log list, manual voice records, import/export and worked-grid
+  map;
+- administrator account creation and six-digit pairing-code generation.
+
+Voice PTT deliberately removes the microphone input tap and switches the audio
+session back to playback synchronously when the button is released, before it
+waits for a network response. Connection loss and app backgrounding run the same
+local shutdown path; the server independently de-keys on socket/heartbeat loss.
+
+## Build on macOS
 
 1. Install Xcode 16 or newer and XcodeGen.
 2. Run `xcodegen generate --spec ios/TX5DRMobile/project.yml` from the repository root.
 3. Open `ios/TX5DRMobile/TX5DRMobile.xcodeproj`.
 4. Select a signing team and run on an iOS 17+ device.
 
-The client permits HTTP for direct LAN and encrypted Tailscale operation,
-including `100.x` addresses that iOS does not classify as local-network hosts.
-Do not send account credentials over untrusted plain HTTP; use HTTPS outside a
-trusted LAN or Tailscale tunnel. REST, WebSocket, audio, and plugin-page startup
-use a five-minute timeout for high-latency remote stations.
+GitHub Actions also builds and tests the simulator target and publishes an
+unsigned device IPA on branch pushes. Unsigned IPAs still require a supported
+sideload/signing workflow before iOS will launch them.
 
-The app intentionally exposes only administrator and operator login flows. It
-does not offer TX-5DR public-viewer mode.
-
-## Authentication and first use
-
-- Administrators can create username/password accounts from **Settings →
-  Accounts and 6-digit pairing**.
-- Six-digit pairing codes expire after two minutes and can be exchanged once.
-- The app stores only the resulting JWT in the iOS Keychain; it does not retain
-  a password or pairing code.
-- Create or select an operator under **Settings → Operators and FT8 identity**
-  before using FT8, voice PTT, or CW transmit controls.
-
-The native client uses TX-5DR's REST and control WebSocket protocols, its
-base64-wrapped Int16 little-endian spectrum frames, and the `TX5D` v1/v2 PCM
-compatibility audio framing. It also keeps a filtered `/api/ws/logbook`
-connection open for live QSO, health, and write-failure refreshes. Run the
-protocol guard whenever the pinned server revision or iOS client changes:
-
-```sh
-node scripts/check-ios-tx5dr-contract.mjs
-```
-
-Swift unit tests cover server URL normalization, WebSocket envelopes, and TX5D
-audio frame encoding/decoding. They must be run on macOS with Xcode because this
-Windows development host cannot compile or sign an iOS application.
+The wire contract is documented in `radio-lite-server/PROTOCOL.md`.
