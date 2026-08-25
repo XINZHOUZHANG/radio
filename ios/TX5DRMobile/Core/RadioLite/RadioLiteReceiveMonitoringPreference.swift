@@ -32,6 +32,7 @@ struct RadioLiteReceiveMonitoringPreference: Equatable, Sendable {
 struct RadioLiteReceiveMonitoringIntent: Equatable, Sendable {
     private(set) var isDesired = false
     private(set) var isSuspended = false
+    private(set) var generation: UInt64 = 0
 
     var shouldMonitor: Bool {
         isDesired && !isSuspended
@@ -41,11 +42,51 @@ struct RadioLiteReceiveMonitoringIntent: Equatable, Sendable {
         isDesired = enabled
     }
 
-    mutating func suspend() {
-        isSuspended = true
+    @discardableResult
+    mutating func activate() -> UInt64 {
+        advanceGeneration()
+        isSuspended = false
+        return generation
     }
 
-    mutating func resume() {
+    @discardableResult
+    mutating func suspend() -> UInt64 {
+        advanceGeneration()
+        isSuspended = true
+        return generation
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        candidate != 0 && candidate == generation
+    }
+
+    @discardableResult
+    mutating func resume(
+        generation candidate: UInt64,
+        expectedRadioId: String,
+        selectedRadioId: String?,
+        subscribedRadioId: String?
+    ) -> Bool {
+        guard isCurrent(candidate),
+              selectedRadioId == expectedRadioId,
+              subscribedRadioId == expectedRadioId else {
+            return false
+        }
         isSuspended = false
+        return true
+    }
+
+    private mutating func advanceGeneration() {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+    }
+}
+
+struct RadioLiteReceiveMonitoringOwnership: Equatable, Sendable {
+    let radioId: String
+    let generation: UInt64
+
+    func isCurrent(selectedRadioId: String?, generation currentGeneration: UInt64) -> Bool {
+        selectedRadioId == radioId && currentGeneration == generation
     }
 }

@@ -80,9 +80,11 @@ final class RadioLiteSession: ObservableObject {
     private var credentialRefreshTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var mediaRetryTask: Task<Void, Never>?
+    private var mediaRetryOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTStartupTask: Task<Void, Never>?
     private var tuningStartupTask: Task<Void, Never>?
     private var receiveAudioStartupTask: Task<Void, Never>?
+    private var receiveAudioStartupOwnership: RadioLiteReceiveMonitoringOwnership?
     private var activeTransmitToken: String?
     private var activeCaptureOwnership: RadioLiteMicrophoneCaptureOwnership?
     private var activeUplinkOwnership: RadioLiteUplinkOwnership?
@@ -113,7 +115,6 @@ final class RadioLiteSession: ObservableObject {
         media.onReconnectRequired = { [weak self] error in
             guard let self, !self.intentionalDisconnect, self.phase == .ready else { return }
             if self.isVoicePTTHeld { self.endVoicePTT() }
-            self.suspendReceiveAudio()
             self.presentMediaNotice(error)
             self.scheduleMediaRetry()
         }
@@ -315,7 +316,7 @@ final class RadioLiteSession: ObservableObject {
         defer { isWorking = false }
         endVoicePTT()
         endTuning()
-        suspendReceiveAudio()
+        let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         await releaseControl()
         await media.unsubscribe()
@@ -326,8 +327,18 @@ final class RadioLiteSession: ObservableObject {
         do {
             do {
                 try await media.subscribe(radioId: radioId)
+                guard selectedRadioId == radioId,
+                      receiveMonitoringIntent.isCurrent(receiveGeneration),
+                      media.subscribedRadioId == radioId else {
+                    return
+                }
                 resolveMediaNotices()
-                await restoreReceiveAudioAfterSubscription()
+                await restoreReceiveAudioAfterSubscription(
+                    expectedRadioId: radioId,
+                    generation: receiveGeneration
+                )
+            } catch is CancellationError {
+                return
             } catch {
                 mediaReady = false
                 presentMediaNotice(error)
@@ -493,7 +504,10 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.rigControlUnavailable.localizedDescription
             return nil
         }
-        let catalogueGeneration = rigControlCatalogue.generation
+        let operationOwnership = RadioLiteRigControlOperationOwnership(
+            radioId: radioId,
+            catalogueGeneration: rigControlCatalogue.generation
+        )
 
         let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
         let display = current.displayState(isTransmitting: transmitting)
@@ -530,8 +544,10 @@ final class RadioLiteSession: ObservableObject {
                   confirmation.control.id == controlId else {
                 throw RadioLiteHTTPError.invalidResponse
             }
-            guard selectedRadioId == radioId,
-                  rigControlCatalogue.isCurrent(catalogueGeneration) else {
+            guard operationOwnership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                catalogueGeneration: rigControlCatalogue.generation
+            ) else {
                 return nil
             }
             let updatedControls = RadioLiteRigControlProtocol.applying(
@@ -540,7 +556,7 @@ final class RadioLiteSession: ObservableObject {
             )
             guard rigControlCatalogue.publish(
                 updatedControls,
-                generation: catalogueGeneration
+                generation: operationOwnership.catalogueGeneration
             ) else {
                 return nil
             }
@@ -553,6 +569,12 @@ final class RadioLiteSession: ObservableObject {
             }
             return confirmation.control
         } catch {
+            guard operationOwnership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                catalogueGeneration: rigControlCatalogue.generation
+            ) else {
+                return nil
+            }
             errorMessage = error.localizedDescription
             return nil
         }
@@ -560,78 +582,141 @@ final class RadioLiteSession: ObservableObject {
 
     func startReceiveAudio() async {
         receiveMonitoringIntent.setDesired(true)
-        receiveMonitoringIntent.resume()
-        await startReceiveAudioIfDesired()
-    }
-
-    private func startReceiveAudioIfDesired() async {
-        guard receiveMonitoringIntent.shouldMonitor else { return }
-        guard let radioId = selectedRadioId else {
+        let ownership = RadioLiteReceiveMonitoringOwnership(
+            radioId: selectedRadioId ?? "",
+            generation: receiveMonitoringIntent.activate()
+        )
+        guard !ownership.radioId.isEmpty else {
             errorMessage = RadioLiteSessionError.radioUnavailable.localizedDescription
             return
         }
-        if let pending = receiveAudioStartupTask {
+        await startReceiveAudioIfDesired(ownership: ownership, subscribeIfNeeded: true)
+    }
+
+    private func startReceiveAudioIfDesired(
+        ownership: RadioLiteReceiveMonitoringOwnership,
+        subscribeIfNeeded: Bool
+    ) async {
+        guard receiveMonitoringIntent.shouldMonitor,
+              ownership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                generation: receiveMonitoringIntent.generation
+              ) else {
+            return
+        }
+        if let pending = receiveAudioStartupTask,
+           receiveAudioStartupOwnership == ownership {
             await pending.value
             return
         }
 
+        receiveAudioStartupTask?.cancel()
         let generation = receiveAudioEpoch.begin()
+        receiveAudioStartupOwnership = ownership
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 guard self.media.state == .ready else { throw RadioLiteSocketError.notConnected }
-                if self.media.subscribedRadioId != radioId {
-                    try await self.media.subscribe(radioId: radioId)
+                if self.media.subscribedRadioId != ownership.radioId {
+                    guard subscribeIfNeeded else { return }
+                    try await self.media.subscribe(radioId: ownership.radioId)
                     try Task.checkCancellation()
-                    guard self.receiveAudioEpoch.owns(generation) else { return }
+                    guard self.receiveAudioEpoch.owns(generation),
+                          ownership.isCurrent(
+                            selectedRadioId: self.selectedRadioId,
+                            generation: self.receiveMonitoringIntent.generation
+                          ),
+                          self.media.subscribedRadioId == ownership.radioId else {
+                        return
+                    }
                     self.resolveMediaNotices()
                 }
                 try Task.checkCancellation()
                 guard self.receiveAudioEpoch.owns(generation),
-                      self.receiveMonitoringIntent.shouldMonitor else {
+                      self.receiveMonitoringIntent.shouldMonitor,
+                      ownership.isCurrent(
+                        selectedRadioId: self.selectedRadioId,
+                        generation: self.receiveMonitoringIntent.generation
+                      ),
+                      self.media.subscribedRadioId == ownership.radioId else {
                     return
                 }
                 try self.audio.startMonitoring()
                 guard !Task.isCancelled,
                       self.receiveAudioEpoch.owns(generation),
-                      self.receiveMonitoringIntent.shouldMonitor else {
+                      self.receiveMonitoringIntent.shouldMonitor,
+                      ownership.isCurrent(
+                        selectedRadioId: self.selectedRadioId,
+                        generation: self.receiveMonitoringIntent.generation
+                      ),
+                      self.media.subscribedRadioId == ownership.radioId else {
                     self.audio.stopMonitoring()
                     return
                 }
+            } catch is CancellationError {
+                return
             } catch {
-                guard !Task.isCancelled, self.receiveAudioEpoch.owns(generation) else { return }
-                if self.media.subscribedRadioId != radioId {
-                    self.scheduleMediaRetry()
+                guard !Task.isCancelled,
+                      self.receiveAudioEpoch.owns(generation),
+                      ownership.isCurrent(
+                        selectedRadioId: self.selectedRadioId,
+                        generation: self.receiveMonitoringIntent.generation
+                      ) else {
+                    return
                 }
                 self.errorMessage = "接收音频启动失败：\(error.localizedDescription)"
+                if self.media.subscribedRadioId != ownership.radioId {
+                    self.scheduleMediaRetry()
+                }
             }
         }
         receiveAudioStartupTask = task
         await task.value
-        if receiveAudioEpoch.owns(generation) {
+        if receiveAudioEpoch.owns(generation),
+           receiveAudioStartupOwnership == ownership {
             receiveAudioStartupTask = nil
+            receiveAudioStartupOwnership = nil
         }
     }
 
     func stopReceiveAudio() {
         receiveMonitoringIntent.setDesired(false)
-        stopReceiveAudioLocally()
+        _ = suspendReceiveAudio()
     }
 
-    private func suspendReceiveAudio() {
-        receiveMonitoringIntent.suspend()
+    @discardableResult
+    private func suspendReceiveAudio() -> UInt64 {
+        let generation = receiveMonitoringIntent.suspend()
         stopReceiveAudioLocally()
+        return generation
     }
 
-    private func restoreReceiveAudioAfterSubscription() async {
-        receiveMonitoringIntent.resume()
-        await startReceiveAudioIfDesired()
+    private func restoreReceiveAudioAfterSubscription(
+        expectedRadioId: String,
+        generation: UInt64
+    ) async {
+        guard receiveMonitoringIntent.resume(
+            generation: generation,
+            expectedRadioId: expectedRadioId,
+            selectedRadioId: selectedRadioId,
+            subscribedRadioId: media.subscribedRadioId
+        ) else {
+            return
+        }
+        await startReceiveAudioIfDesired(
+            ownership: RadioLiteReceiveMonitoringOwnership(
+                radioId: expectedRadioId,
+                generation: generation
+            ),
+            subscribeIfNeeded: false
+        )
     }
 
     private func stopReceiveAudioLocally() {
         receiveAudioEpoch.invalidate()
         receiveAudioStartupTask?.cancel()
         receiveAudioStartupTask = nil
+        receiveAudioStartupOwnership = nil
         audio.stopMonitoring()
     }
 
@@ -1002,7 +1087,11 @@ final class RadioLiteSession: ObservableObject {
             presentNotice("设备配置已保存")
             return true
         }
-        suspendReceiveAudio()
+        guard selectedRadioId == response.radio.id else {
+            presentNotice("设备配置已保存")
+            return true
+        }
+        let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         controlHeartbeatTask?.cancel()
         controlHeartbeatTask = nil
@@ -1017,8 +1106,16 @@ final class RadioLiteSession: ObservableObject {
         do {
             if selectedRadioId == response.radio.id {
                 try await media.subscribe(radioId: response.radio.id)
+                guard selectedRadioId == response.radio.id,
+                      receiveMonitoringIntent.isCurrent(receiveGeneration),
+                      media.subscribedRadioId == response.radio.id else {
+                    return false
+                }
                 resolveMediaNotices()
-                await restoreReceiveAudioAfterSubscription()
+                await restoreReceiveAudioAfterSubscription(
+                    expectedRadioId: response.radio.id,
+                    generation: receiveGeneration
+                )
                 try await refreshRigState()
                 await refreshRigControlsAutomatically()
             }
@@ -1028,6 +1125,8 @@ final class RadioLiteSession: ObservableObject {
                     : "设备配置和媒体已生效，但当前未取得电台控制权"
             )
             return true
+        } catch is CancellationError {
+            return false
         } catch {
             presentNotice(
                 "设备配置已保存，后台正在重连：\(error.localizedDescription)",
@@ -1120,7 +1219,7 @@ final class RadioLiteSession: ObservableObject {
         username: String?
     ) async throws {
         phase = .authenticating
-        suspendReceiveAudio()
+        let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         intentionalDisconnect = true
         cancelRuntimeTasks()
@@ -1148,8 +1247,18 @@ final class RadioLiteSession: ObservableObject {
         var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
+            guard selectedRadioId == radioId,
+                  receiveMonitoringIntent.isCurrent(receiveGeneration),
+                  media.subscribedRadioId == radioId else {
+                throw CancellationError()
+            }
             resolveMediaNotices()
-            await restoreReceiveAudioAfterSubscription()
+            await restoreReceiveAudioAfterSubscription(
+                expectedRadioId: radioId,
+                generation: receiveGeneration
+            )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             mediaReady = false
             presentMediaNotice(error)
@@ -1434,7 +1543,7 @@ final class RadioLiteSession: ObservableObject {
     }
 
     private func reconnectChannels(server: RadioLiteServer, credential: RadioLiteCredential) async throws -> Bool {
-        suspendReceiveAudio()
+        let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         intentionalDisconnect = true
         control.disconnect()
@@ -1450,8 +1559,18 @@ final class RadioLiteSession: ObservableObject {
         var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
+            guard selectedRadioId == radioId,
+                  receiveMonitoringIntent.isCurrent(receiveGeneration),
+                  media.subscribedRadioId == radioId else {
+                throw CancellationError()
+            }
             resolveMediaNotices()
-            await restoreReceiveAudioAfterSubscription()
+            await restoreReceiveAudioAfterSubscription(
+                expectedRadioId: radioId,
+                generation: receiveGeneration
+            )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             mediaReady = false
             presentMediaNotice(error)
@@ -1477,35 +1596,70 @@ final class RadioLiteSession: ObservableObject {
     }
 
     private func scheduleMediaRetry() {
-        guard mediaRetryTask == nil, phase == .ready else { return }
+        guard phase == .ready, let radioId = selectedRadioId else { return }
+        let ownership = RadioLiteReceiveMonitoringOwnership(
+            radioId: radioId,
+            generation: suspendReceiveAudio()
+        )
+        mediaRetryTask?.cancel()
+        mediaRetryOwnership = ownership
         mediaRetryTask = Task { [weak self] in
             guard let self else { return }
             var delay = 2.0
             while !Task.isCancelled, self.phase == .ready {
                 try? await Task.sleep(for: .seconds(delay))
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      self.isCurrentMediaRetry(ownership) else {
+                    self.clearMediaRetry(ownership)
+                    return
+                }
                 guard self.media.state == .ready else {
-                    self.mediaRetryTask = nil
+                    self.clearMediaRetry(ownership)
                     self.scheduleReconnect()
                     return
                 }
-                guard let radioId = self.selectedRadioId else {
-                    self.mediaRetryTask = nil
-                    return
-                }
                 do {
-                    try await self.media.subscribe(radioId: radioId)
-                    self.resolveMediaNotices()
-                    await self.restoreReceiveAudioAfterSubscription()
-                    self.mediaRetryTask = nil
+                    try await self.media.subscribe(radioId: ownership.radioId)
+                    guard self.isCurrentMediaRetry(ownership),
+                          self.media.subscribedRadioId == ownership.radioId else {
+                        self.clearMediaRetry(ownership)
+                        return
+                    }
+                    self.resolveMediaNotices(cancelRetry: false)
+                    await self.restoreReceiveAudioAfterSubscription(
+                        expectedRadioId: ownership.radioId,
+                        generation: ownership.generation
+                    )
+                    self.clearMediaRetry(ownership)
+                    return
+                } catch is CancellationError {
+                    self.clearMediaRetry(ownership)
                     return
                 } catch {
+                    guard self.isCurrentMediaRetry(ownership) else {
+                        self.clearMediaRetry(ownership)
+                        return
+                    }
                     self.presentMediaNotice(error)
                     delay = min(30, delay * 1.8)
                 }
             }
-            self.mediaRetryTask = nil
+            self.clearMediaRetry(ownership)
         }
+    }
+
+    private func isCurrentMediaRetry(_ ownership: RadioLiteReceiveMonitoringOwnership) -> Bool {
+        mediaRetryOwnership == ownership
+            && ownership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                generation: receiveMonitoringIntent.generation
+            )
+    }
+
+    private func clearMediaRetry(_ ownership: RadioLiteReceiveMonitoringOwnership) {
+        guard mediaRetryOwnership == ownership else { return }
+        mediaRetryTask = nil
+        mediaRetryOwnership = nil
     }
 
     private func refreshCredentialAndReconnect() async {
@@ -1556,9 +1710,11 @@ final class RadioLiteSession: ObservableObject {
         credentialRefreshTask = nil
         reconnectTask = nil
         mediaRetryTask = nil
+        mediaRetryOwnership = nil
         voicePTTStartupTask = nil
         tuningStartupTask = nil
         receiveAudioStartupTask = nil
+        receiveAudioStartupOwnership = nil
     }
 
     private func clearRadioState() {
@@ -1596,9 +1752,12 @@ final class RadioLiteSession: ObservableObject {
         )
     }
 
-    private func resolveMediaNotices() {
-        mediaRetryTask?.cancel()
-        mediaRetryTask = nil
+    private func resolveMediaNotices(cancelRetry: Bool = true) {
+        if cancelRetry {
+            mediaRetryTask?.cancel()
+            mediaRetryTask = nil
+            mediaRetryOwnership = nil
+        }
         noticeState.resolve(keysWithPrefix: "media.")
         noticeMessage = noticeState.message
     }

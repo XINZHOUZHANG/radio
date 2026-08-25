@@ -232,6 +232,15 @@ struct RadioLiteRigControlCatalogue: Equatable, Sendable {
     }
 }
 
+struct RadioLiteRigControlOperationOwnership: Equatable, Sendable {
+    let radioId: String
+    let catalogueGeneration: UInt64
+
+    func isCurrent(selectedRadioId: String?, catalogueGeneration currentGeneration: UInt64) -> Bool {
+        selectedRadioId == radioId && currentGeneration == catalogueGeneration
+    }
+}
+
 enum RadioLiteRigControlProtocol {
     static func getRequest(radioId: String, commandId: String) -> JSONValue {
         .object([

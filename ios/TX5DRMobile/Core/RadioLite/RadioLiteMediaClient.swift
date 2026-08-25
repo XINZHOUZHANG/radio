@@ -6,6 +6,38 @@ struct RadioLiteUplinkOwnership: Equatable, Sendable {
     let epoch: UInt64
 }
 
+struct RadioLiteMediaSubscriptionOwnership: Equatable, Sendable {
+    let radioId: String
+    let epoch: UInt64
+}
+
+struct RadioLiteMediaSubscriptionOwnershipState: Equatable, Sendable {
+    private var epoch = RadioLiteOperationEpoch()
+    private var current: RadioLiteMediaSubscriptionOwnership?
+
+    mutating func begin(radioId: String) -> RadioLiteMediaSubscriptionOwnership {
+        let ownership = RadioLiteMediaSubscriptionOwnership(
+            radioId: radioId,
+            epoch: epoch.begin()
+        )
+        current = ownership
+        return ownership
+    }
+
+    func complete(_ ownership: RadioLiteMediaSubscriptionOwnership) -> Bool {
+        current == ownership && epoch.owns(ownership.epoch)
+    }
+
+    mutating func invalidate() {
+        epoch.invalidate()
+        current = nil
+    }
+
+    func isCurrent(_ ownership: RadioLiteMediaSubscriptionOwnership) -> Bool {
+        current == ownership && epoch.owns(ownership.epoch)
+    }
+}
+
 struct RadioLiteUplinkOwnershipState: Equatable, Sendable {
     private var epoch = RadioLiteOperationEpoch()
     private var current: RadioLiteUplinkOwnership?
@@ -92,6 +124,7 @@ final class RadioLiteMediaClient: ObservableObject {
     private var uplinkContinuation: AsyncStream<Data>.Continuation?
     private var uplinkSequence: UInt32 = 0
     private var uplinkOwnershipState = RadioLiteUplinkOwnershipState()
+    private var subscriptionOwnershipState = RadioLiteMediaSubscriptionOwnershipState()
     private var spectrumHistoryBuffer = RadioLiteSpectrumHistory()
     private var spectrumAGC = RadioLiteSpectrumAGC()
 
@@ -102,7 +135,10 @@ final class RadioLiteMediaClient: ObservableObject {
         channel.onDisconnect = { [weak self] error in
             guard let self else { return }
             self.stopUplink()
+            self.subscriptionOwnershipState.invalidate()
             self.audio.stopMicrophoneCapture()
+            self.subscribedRadioId = nil
+            self.radioSlot = nil
             self.clearSpectrum(keepingCapability: false)
             self.state = .failed(error.localizedDescription)
             self.lastError = error.localizedDescription
@@ -112,6 +148,9 @@ final class RadioLiteMediaClient: ObservableObject {
     }
 
     func connect(server: RadioLiteServer, credential: RadioLiteCredential) async throws -> RadioLiteAuthWelcome {
+        subscriptionOwnershipState.invalidate()
+        subscribedRadioId = nil
+        radioSlot = nil
         state = .connecting
         do {
             let welcome = try await channel.connect(
@@ -131,21 +170,36 @@ final class RadioLiteMediaClient: ObservableObject {
     }
 
     func subscribe(radioId: String, spectrumVisible: Bool = true) async throws {
+        let ownership = subscriptionOwnershipState.begin(radioId: radioId)
         self.spectrumVisible = spectrumVisible
-        let response = try await channel.request(
-            .object([
-                "t": .string("media.subscribe"),
-                "radioId": .string(radioId),
-                "spectrumVisible": .bool(spectrumVisible),
-            ]),
-            expecting: ["media.subscribed"],
-            requestType: "media.subscribe"
-        )
+        let response: JSONValue
+        do {
+            response = try await channel.request(
+                .object([
+                    "t": .string("media.subscribe"),
+                    "radioId": .string(radioId),
+                    "spectrumVisible": .bool(spectrumVisible),
+                ]),
+                expecting: ["media.subscribed"],
+                requestType: "media.subscribe"
+            )
+        } catch {
+            guard subscriptionOwnershipState.isCurrent(ownership) else {
+                throw CancellationError()
+            }
+            throw error
+        }
+        guard subscriptionOwnershipState.isCurrent(ownership) else {
+            throw CancellationError()
+        }
         guard let slot = response["radioSlot"]?.intValue,
               let policy: RadioLiteMediaPolicy = response["policy"]?.decoded(),
               let spectrumCapability: RadioLiteSpectrumCapability = response["spectrum"]?.decoded(),
               (0...255).contains(slot) else {
             throw RadioLiteSocketError.invalidWelcome
+        }
+        guard subscriptionOwnershipState.complete(ownership) else {
+            throw CancellationError()
         }
         radioSlot = UInt8(slot)
         subscribedRadioId = radioId
@@ -159,6 +213,7 @@ final class RadioLiteMediaClient: ObservableObject {
     }
 
     func unsubscribe() async {
+        subscriptionOwnershipState.invalidate()
         stopUplink()
         audio.stopAll()
         if state == .ready {
@@ -174,6 +229,7 @@ final class RadioLiteMediaClient: ObservableObject {
     }
 
     func disconnect() {
+        subscriptionOwnershipState.invalidate()
         networkTask?.cancel()
         networkTask = nil
         stopUplink()

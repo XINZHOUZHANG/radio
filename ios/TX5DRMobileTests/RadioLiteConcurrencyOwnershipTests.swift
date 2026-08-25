@@ -39,6 +39,20 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
         XCTAssertTrue(state.isBound(replacement), "old cleanup must not clear the replacement")
     }
 
+    func testOldMediaSubscriptionCompletionCannotPublishOverItsReplacement() {
+        var state = RadioLiteMediaSubscriptionOwnershipState()
+        let main = state.begin(radioId: "main")
+        let backup = state.begin(radioId: "backup")
+
+        XCTAssertFalse(
+            state.complete(main),
+            "a delayed subscription response must be surfaced as cancellation, not success"
+        )
+        XCTAssertTrue(state.complete(backup))
+        XCTAssertFalse(state.isCurrent(main))
+        XCTAssertTrue(state.isCurrent(backup))
+    }
+
     func testPermissionResultCannotActivateCaptureAfterStop() {
         var state = RadioLiteCaptureEpochState()
         let pending = state.begin()

@@ -163,6 +163,23 @@ final class RadioLiteRigControlsTests: XCTestCase {
         XCTAssertEqual(catalogue.controls.map(\.id), response.controls.map(\.id))
     }
 
+    func testControlOperationOwnershipRejectsErrorsFromOldRadioOrCatalogueGeneration() {
+        let ownership = RadioLiteRigControlOperationOwnership(
+            radioId: "main",
+            catalogueGeneration: 7
+        )
+
+        XCTAssertTrue(ownership.isCurrent(selectedRadioId: "main", catalogueGeneration: 7))
+        XCTAssertFalse(
+            ownership.isCurrent(selectedRadioId: "backup", catalogueGeneration: 7),
+            "an error from the previous radio must not replace the current radio's UI state"
+        )
+        XCTAssertFalse(
+            ownership.isCurrent(selectedRadioId: "main", catalogueGeneration: 8),
+            "an error from an invalidated controls catalogue must be ignored"
+        )
+    }
+
     private var controlsPayload: Data {
         Data(#"""
         {
