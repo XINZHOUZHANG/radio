@@ -34,6 +34,8 @@ import { SyntheticMediaWorker } from "../media/synthetic-media-worker.ts";
 import { SystemMediaWorker } from "../media/system-media-worker.ts";
 import { AdifLogStore } from "../log/adif-log-store.ts";
 import { DigitalRadioHub, DigitalWorkerUnavailableError } from "../digital/hub.ts";
+import { DummyDigitalWorker } from "../digital/dummy-worker.ts";
+import { SystemDigitalWorker } from "../digital/system-digital-worker.ts";
 import { isDigitalMode } from "../digital/types.ts";
 import type { DigitalWorkerFactory } from "../digital/worker.ts";
 
@@ -147,7 +149,15 @@ export class RadioLiteService {
       radios: () => this.#radios.snapshot(),
       runtimes: this.#runtimes,
       logStore: this.#log,
-      workerFactory: options.digitalWorkerFactory,
+      workerFactory: options.digitalWorkerFactory ?? ((profile) => {
+        if (profile.connection.kind === "hamlib-dummy") {
+          return new DummyDigitalWorker();
+        }
+        return new SystemDigitalWorker(profile, {
+          openAudio: (consumer) => this.#media.openDigitalAudio(profile.id, consumer),
+          now: this.#now,
+        });
+      }),
       now: this.#now,
       onEvent: (event) => this.#broadcastControl(event),
     });

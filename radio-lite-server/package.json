@@ -14,7 +14,8 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "ws": "8.21.3"
+    "ws": "8.21.3",
+    "wsjtx-lib": "2.1.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

@@ -196,6 +196,35 @@ test("client network reports update policy and hidden spectrum sends no spectrum
   assert.equal(fixture.worker?.policies.at(-1)?.tier, "severe");
 });
 
+test("digital DSP opens the existing media worker for shared PCM capture and playback", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  const captured: Buffer[] = [];
+  const faults: string[] = [];
+  const port = await fixture.hub.openDigitalAudio("main", {
+    pcm: (value) => captured.push(Buffer.from(value.pcm)),
+    fault: (error) => faults.push(error instanceof Error ? error.message : String(error)),
+  });
+  context.after(() => port.close());
+  fixture.output!.pcmCapture?.({
+    pcm: Buffer.from([1, 0, 2, 0]),
+    sampleRate: 16_000,
+    startedAtMs: 1_000,
+  });
+  assert.deepEqual(captured, [Buffer.from([1, 0, 2, 0])]);
+  await port.play(new Int16Array([1, 2]), 12_000, new AbortController().signal);
+  assert.deepEqual(fixture.worker!.digitalPlayback, [new Int16Array([1, 2])]);
+  await port.stop();
+  assert.equal(fixture.worker!.digitalStopCount, 0, "completed playback already released ownership");
+  fixture.output!.fault(new Error("capture failed"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(faults, ["capture failed"]);
+  await assert.rejects(
+    port.play(new Int16Array([1]), 12_000, new AbortController().signal),
+    /unavailable/u,
+  );
+});
+
 function createFixture(now: () => number = () => 1_000, uplinkBindTimeoutMs = 3_000) {
   let worker: FakeMediaWorker | undefined;
   let output: MediaWorkerOutput | undefined;
@@ -246,7 +275,14 @@ function createFixture(now: () => number = () => 1_000, uplinkBindTimeoutMs = 3_
 
 class FakeMediaWorker implements MediaWorker {
   readonly uplinkPayloads: Buffer[] = [];
+  readonly digitalPlayback: Int16Array[] = [];
   readonly policies = [new AdaptiveMediaPolicy().current()];
+  readonly digitalAudio = {
+    sampleRate: 16_000,
+    play: async (pcm: Int16Array) => { this.digitalPlayback.push(pcm.slice()); },
+    stop: async () => { this.digitalStopCount += 1; },
+  };
+  digitalStopCount = 0;
   closed = false;
 
   updatePolicy(policy: ReturnType<AdaptiveMediaPolicy["current"]>): void {

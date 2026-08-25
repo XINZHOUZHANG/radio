@@ -104,6 +104,14 @@ and audio frequency. Duplicate native decode passes are collapsed before the
 batch is broadcast as `digital.decode.batch`; clients therefore do not reorder
 the visible list for every individual decoder result.
 
+For a real radio, the server shares the existing mono sound-device capture with
+the spectrum/Opus pipeline, continuously resamples it to 12 kHz, and assembles
+exact UTC FT8 and FT4 PCM windows. Native WSJT-X encode/decode runs in a separate
+process with one native thread and a bounded pending-slot queue. Digital transmit
+PCM returns through the same radio playback device in real-time 20 ms chunks;
+voice decoder residue is suppressed while it plays. A DSP exit, timeout or audio
+failure follows the same server-owned PTT OFF path as a disconnected controller.
+
 Read the current digital state with:
 
 ```json

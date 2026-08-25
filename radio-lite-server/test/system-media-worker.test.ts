@@ -60,6 +60,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
     return child;
   }) as unknown as typeof spawn;
   const downlink: Buffer[] = [];
+  const capturedPcm: Array<{ pcm: Buffer; sampleRate: number; startedAtMs: number }> = [];
   const faults: unknown[] = [];
   const worker = await SystemMediaWorker.create({
     id: "main",
@@ -73,6 +74,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   }, {
     audioDownlink: (payload) => downlink.push(Buffer.from(payload)),
     spectrum: () => undefined,
+    pcmCapture: (value) => capturedPcm.push({ ...value, pcm: Buffer.from(value.pcm) }),
     fault: (error) => faults.push(error),
   }, {
     spawnProcess,
@@ -89,6 +91,10 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   capture.stdout.write(pcm);
   await immediate();
   assert.equal(Buffer.concat(encoder.stdinChunks).length, pcm.length);
+  assert.equal(capturedPcm.length, 1);
+  assert.equal(capturedPcm[0].sampleRate, 16_000);
+  assert.equal(capturedPcm[0].startedAtMs, 4_936);
+  assert.deepEqual(capturedPcm[0].pcm, pcm);
 
   const encoded = new OggOpusWriter({ serialNumber: 11 });
   encoder.stdout.write(Buffer.concat([
@@ -114,6 +120,18 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   decoder.stdout.write(Buffer.from([4, 5, 6, 7]));
   await immediate();
   assert.deepEqual(Buffer.concat(playback.stdinChunks), Buffer.from([4, 5, 6, 7]));
+
+  const playbackBytesBeforeDigital = Buffer.concat(playback.stdinChunks).length;
+  const playing = worker.digitalAudio.play(
+    new Int16Array(1_200).fill(1_000),
+    12_000,
+    new AbortController().signal,
+  );
+  decoder.stdout.write(Buffer.from([9, 9, 9, 9]));
+  await playing;
+  const afterDigital = Buffer.concat(playback.stdinChunks);
+  assert.equal(afterDigital.length - playbackBytesBeforeDigital, 3_200);
+  assert.notDeepEqual(afterDigital.subarray(-4), Buffer.from([9, 9, 9, 9]));
 
   await worker.updatePolicy({
     tier: "severe",

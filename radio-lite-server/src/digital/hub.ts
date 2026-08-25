@@ -73,7 +73,12 @@ export class DigitalRadioHub {
       }
     }).catch((error) => {
       this.#controllers.delete(radioId);
-      throw error;
+      if (error instanceof DigitalWorkerUnavailableError) {
+        throw error;
+      }
+      throw new DigitalWorkerUnavailableError(
+        error instanceof Error ? error.message : "native digital worker could not start",
+      );
     });
     this.#controllers.set(radioId, creating);
     return creating;

@@ -4,10 +4,10 @@ Low-bandwidth, multi-radio control service for Debian 13. This directory is a
 new implementation and does not depend on TX-5DR or the historical Python
 prototype in `../server`.
 
-The initial core intentionally uses only Node.js built-ins. Hamlib, audio,
-Opus and WSJT-X DSP are system services/workers, so they do not inflate the
-application package. The only JavaScript runtime dependency is the small `ws`
-WebSocket framing library; compression is disabled.
+The control and storage core uses Node.js built-ins. Hamlib, ALSA/PulseAudio
+and Opus remain Debian services/tools. Runtime dependencies are the small `ws`
+WebSocket library and the pinned `wsjtx-lib` native FT8/FT4 DSP package;
+WebSocket compression is disabled.
 
 Implemented in the first milestone:
 
@@ -57,14 +57,20 @@ The digital-control milestone now includes:
 - per-radio call queues with manual/selected-decode add, skip, remove and stop;
 - a bounded automatic caller QSO state machine with retry failure states;
 - server-timed encode/playback through an injectable native-worker contract;
+- real `wsjtx-lib` FT8/FT4 encode/decode in an isolated Node child process;
+- one shared sound-device capture/playback pipeline for voice, spectrum and
+  digital modes, with continuous 16 kHz to 12 kHz PCM resampling;
+- bounded UTC-slot PCM assembly and a capped decode backlog so DSP load cannot
+  grow without limit;
 - digital/voice/internal-tuner mutual exclusion and automatic PTT OFF on worker,
   control or playback failure; and
 - automatic FT8/FT4 ADIF append after the final 73, with duplicate protection.
 
 Hamlib Dummy profiles use the deterministic dummy digital worker for end-to-end
-tests. A real profile currently requires a native digital worker supplied via
-`digitalWorkerFactory`; the Debian `wsjtx-lib` process adapter and shared audio
-bridge are the next server slice. The native SwiftUI adapter follows that slice.
+tests. Real profiles automatically use the isolated WSJT-X worker. A native DSP
+crash, timeout, shared-audio failure or playback cancellation is reported to the
+main controller, which cancels queued playback and de-keys through the existing
+Hamlib transmit interlock. The native SwiftUI adapter is the next client slice.
 
 On Debian 13, real audio currently requires `alsa-utils` or
 `pulseaudio-utils`, plus `opus-tools`. These remain operating-system packages

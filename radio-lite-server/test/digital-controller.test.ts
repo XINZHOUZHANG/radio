@@ -155,6 +155,59 @@ test("controller skip, remove and stop cancel prepared slots without keying the 
   assert.equal(rig.pttEvents.includes(true), false);
 });
 
+test("digital worker failure during playback immediately de-keys and requeues the call", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-fault-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000]);
+  const worker = new DummyDigitalWorker({ playbackDelayMs: 60_000 });
+  const errors: string[] = [];
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker,
+    logStore: log,
+    scheduler,
+    now: () => now,
+    onEvent: (event) => {
+      if (event.t === "digital.error") errors.push(event.code);
+    },
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+
+  now = 45_000;
+  const firing = scheduler.fire();
+  await waitFor(() => rig.ptt);
+  worker.injectFault(new Error("native DSP exited"));
+  await firing;
+  await waitFor(() => !rig.ptt);
+  await waitFor(() => controller.qsoSnapshot() === null);
+
+  assert.equal(rig.ptt, false);
+  assert.equal(controller.qsoSnapshot(), null);
+  assert.equal(controller.queueSnapshot().entries[0]?.status, "queued");
+  assert.ok(errors.includes("digital_worker_failed"));
+});
+
 class ManualSlotScheduler implements DigitalSlotScheduler {
   readonly #slots: number[];
   #callback: ((slotStartMs: number) => void | Promise<void>) | null = null;
@@ -250,4 +303,12 @@ function user(): PublicUser {
     updatedAtMs: 0,
     lastLoginAtMs: null,
   };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("condition did not become true");
 }

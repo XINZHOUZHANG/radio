@@ -7,12 +7,39 @@ import { encodeSpectrumPayload, type SpectrumPayload } from "./spectrum-payload.
 export type MediaWorkerOutput = {
   audioDownlink(payload: Uint8Array, timestampUs?: bigint, flags?: number): void;
   spectrum(value: SpectrumPayload, timestampUs?: bigint, flags?: number): void;
+  pcmCapture?(value: PcmCaptureChunk): void;
   fault(error: unknown): void;
 };
 
+export type PcmCaptureChunk = {
+  /** Signed 16-bit little-endian mono PCM. */
+  pcm: Buffer;
+  sampleRate: number;
+  startedAtMs: number;
+};
+
+export type DigitalAudioPlayback = {
+  readonly sampleRate: number;
+  play(pcm: Int16Array, sampleRate: number, signal: AbortSignal): Promise<void>;
+  stop(): Promise<void>;
+};
+
 export type MediaWorker = {
+  readonly digitalAudio?: DigitalAudioPlayback;
   updatePolicy(policy: MediaPolicy): void | Promise<void>;
   writeAudioUplink(frame: MediaFrame): boolean;
+  close(): Promise<void>;
+};
+
+export type DigitalAudioConsumer = {
+  pcm(value: PcmCaptureChunk): void;
+  fault(error: unknown): void;
+};
+
+export type DigitalAudioPort = {
+  readonly sampleRate: number;
+  play(pcm: Int16Array, sampleRate: number, signal: AbortSignal): Promise<void>;
+  stop(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -88,6 +115,13 @@ type WorkerEntry = {
   spectrumSequence: number;
 };
 
+type DigitalAudioSubscription = {
+  id: number;
+  consumer: DigitalAudioConsumer;
+  faulted: boolean;
+  closed: boolean;
+};
+
 const MAX_OPUS_PACKET_BYTES = 1_500;
 
 export class MediaHub {
@@ -101,6 +135,9 @@ export class MediaHub {
   readonly #transmits = new Map<string, TransmitBinding>();
   readonly #workers = new Map<string, WorkerEntry>();
   readonly #startingWorkers = new Map<string, Promise<WorkerEntry>>();
+  readonly #digitalAudioSubscriptions = new Map<string, Map<number, DigitalAudioSubscription>>();
+  readonly #digitalPlaybackOwners = new Map<string, number>();
+  #nextDigitalAudioSubscriptionId = 1;
   #closed = false;
 
   constructor(options: MediaHubOptions) {
@@ -221,6 +258,83 @@ export class MediaHub {
       client.userId === userId &&
       client.radioId === radioId,
     );
+  }
+
+  async openDigitalAudio(
+    radioId: string,
+    consumer: DigitalAudioConsumer,
+  ): Promise<DigitalAudioPort> {
+    this.#assertOpen();
+    const config = this.#radios();
+    const radioSlot = config.radios.findIndex((radio) => radio.id === radioId);
+    if (radioSlot < 0 || radioSlot > 255) {
+      throw new Error("radio does not exist or has no media slot");
+    }
+    const entry = await this.#worker(config.radios[radioSlot], radioSlot);
+    const playback = entry.worker.digitalAudio;
+    if (playback === undefined) {
+      throw new Error("shared PCM audio is unavailable for this radio");
+    }
+    const id = this.#nextDigitalAudioSubscriptionId++;
+    const subscription: DigitalAudioSubscription = {
+      id,
+      consumer,
+      faulted: false,
+      closed: false,
+    };
+    let subscriptions = this.#digitalAudioSubscriptions.get(radioId);
+    if (subscriptions === undefined) {
+      subscriptions = new Map();
+      this.#digitalAudioSubscriptions.set(radioId, subscriptions);
+    }
+    subscriptions.set(id, subscription);
+
+    const assertUsable = (): void => {
+      if (subscription.closed) {
+        throw new Error("digital audio port is closed");
+      }
+      if (subscription.faulted || this.#workers.get(radioId)?.worker !== entry.worker) {
+        throw new Error("digital audio port is unavailable");
+      }
+    };
+    const stop = async (): Promise<void> => {
+      if (this.#digitalPlaybackOwners.get(radioId) !== id) {
+        return;
+      }
+      this.#digitalPlaybackOwners.delete(radioId);
+      await playback.stop();
+    };
+    return {
+      sampleRate: playback.sampleRate,
+      play: async (pcm, sampleRate, signal) => {
+        assertUsable();
+        const owner = this.#digitalPlaybackOwners.get(radioId);
+        if (owner !== undefined && owner !== id) {
+          throw new Error("digital audio playback is already active");
+        }
+        this.#digitalPlaybackOwners.set(radioId, id);
+        try {
+          await playback.play(pcm, sampleRate, signal);
+        } finally {
+          if (this.#digitalPlaybackOwners.get(radioId) === id) {
+            this.#digitalPlaybackOwners.delete(radioId);
+          }
+        }
+      },
+      stop,
+      close: async () => {
+        if (subscription.closed) {
+          return;
+        }
+        subscription.closed = true;
+        await stop().catch(() => undefined);
+        const active = this.#digitalAudioSubscriptions.get(radioId);
+        active?.delete(id);
+        if (active?.size === 0) {
+          this.#digitalAudioSubscriptions.delete(radioId);
+        }
+      },
+    };
   }
 
   refreshTransmit(
@@ -402,6 +516,9 @@ export class MediaHub {
       spectrum: (value, timestampUs, flags) => {
         this.#broadcastSpectrum(profile.id, radioSlot, value, timestampUs, flags);
       },
+      pcmCapture: (value) => {
+        this.#broadcastPcmCapture(profile.id, value);
+      },
       fault: (error) => { void this.#workerFault(profile.id, error); },
     };
     const promise = this.#workerFactory(profile, radioSlot, output).then((worker) => {
@@ -479,6 +596,28 @@ export class MediaHub {
     }
   }
 
+  #broadcastPcmCapture(radioId: string, value: PcmCaptureChunk): void {
+    const subscriptions = this.#digitalAudioSubscriptions.get(radioId);
+    if (subscriptions === undefined || value.pcm.length === 0) {
+      return;
+    }
+    for (const subscription of subscriptions.values()) {
+      if (subscription.closed || subscription.faulted) {
+        continue;
+      }
+      try {
+        subscription.consumer.pcm(value);
+      } catch (error) {
+        subscription.faulted = true;
+        try {
+          subscription.consumer.fault(error);
+        } catch {
+          // A digital consumer failure must not interrupt radio audio capture.
+        }
+      }
+    }
+  }
+
   #sendOrDrop(client: MediaClient, frame: Buffer): void {
     if (client.transport.bufferedAmount > this.#maxBufferedBytes) {
       client.droppedFrames += 1;
@@ -516,6 +655,21 @@ export class MediaHub {
   async #workerFault(radioId: string, error: unknown): Promise<void> {
     const worker = this.#workers.get(radioId);
     this.#workers.delete(radioId);
+    this.#digitalPlaybackOwners.delete(radioId);
+    const digitalSubscriptions = this.#digitalAudioSubscriptions.get(radioId);
+    if (digitalSubscriptions !== undefined) {
+      for (const subscription of digitalSubscriptions.values()) {
+        if (subscription.closed || subscription.faulted) {
+          continue;
+        }
+        subscription.faulted = true;
+        try {
+          subscription.consumer.fault(error);
+        } catch {
+          // The media fault remains authoritative even if a consumer also fails.
+        }
+      }
+    }
     for (const client of this.#subscribers(radioId)) {
       client.transport.sendJson({
         t: "media.error",

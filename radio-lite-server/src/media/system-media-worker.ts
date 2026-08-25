@@ -1,14 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { Writable } from "node:stream";
 
 import type { AudioEndpoint, RadioProfile } from "../config/types.ts";
 import type { MediaPolicy } from "./adaptive-policy.ts";
 import type {
+  DigitalAudioPlayback,
   MediaWorker,
   MediaWorkerFactory,
   MediaWorkerOutput,
 } from "./media-hub.ts";
 import type { MediaFrame } from "./frame.ts";
 import { OggOpusPacketReader, OggOpusWriter } from "./ogg-opus.ts";
+import { int16ToPcm16Le, resampleInt16 } from "./pcm-resampler.ts";
 import { PcmSpectrumAnalyzer } from "./spectrum-analyzer.ts";
 
 export type MediaCommand = {
@@ -25,6 +28,7 @@ export type SystemMediaWorkerOptions = {
 const SAMPLE_RATE = 16_000;
 const CHANNELS = 1;
 const MAX_PROCESS_INPUT_BYTES = 64 * 1_024;
+const DIGITAL_PLAYBACK_TAIL_MS = 80;
 
 export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
   return endpoint.backend === "alsa"
@@ -84,6 +88,7 @@ export const createSystemMediaWorker: MediaWorkerFactory = async (
 ) => SystemMediaWorker.create(profile, output);
 
 export class SystemMediaWorker implements MediaWorker {
+  readonly digitalAudio: DigitalAudioPlayback;
   readonly #profile: RadioProfile;
   readonly #output: MediaWorkerOutput;
   readonly #spawnProcess: typeof spawn;
@@ -110,6 +115,10 @@ export class SystemMediaWorker implements MediaWorker {
   #lastCenterFrequencyHz = 0;
   #lastCenterReadAtMs = Number.NEGATIVE_INFINITY;
   #pcmRemainder = Buffer.alloc(0);
+  #captureTimelineEndMs: number | null = null;
+  #digitalPlaybackActive = false;
+  #digitalPlaybackAbort: AbortController | null = null;
+  #suppressVoicePlaybackUntilMs = Number.NEGATIVE_INFINITY;
   #closed = false;
   #faulted = false;
   #encoderTail: Promise<void> = Promise.resolve();
@@ -124,6 +133,11 @@ export class SystemMediaWorker implements MediaWorker {
     this.#spawnProcess = options.spawnProcess ?? spawn;
     this.#readCenterFrequencyHz = options.readCenterFrequencyHz ?? (async () => 0);
     this.#now = options.now ?? Date.now;
+    this.digitalAudio = {
+      sampleRate: SAMPLE_RATE,
+      play: (pcm, sampleRate, signal) => this.#playDigitalPcm(pcm, sampleRate, signal),
+      stop: () => this.#stopDigitalPlayback(),
+    };
   }
 
   static async create(
@@ -178,6 +192,7 @@ export class SystemMediaWorker implements MediaWorker {
       return;
     }
     this.#closed = true;
+    await this.#stopDigitalPlayback();
     if (this.#spectrumTimer !== null) {
       clearInterval(this.#spectrumTimer);
       this.#spectrumTimer = null;
@@ -222,6 +237,18 @@ export class SystemMediaWorker implements MediaWorker {
       }
       if (analysis.length > 0) {
         this.#analyzer.push(analysis);
+        const durationMs = (analysis.length / 2) * 1_000 / SAMPLE_RATE;
+        const observedStartMs = this.#now() - durationMs;
+        const startedAtMs = this.#captureTimelineEndMs === null ||
+            Math.abs(observedStartMs - this.#captureTimelineEndMs) > 250
+          ? observedStartMs
+          : this.#captureTimelineEndMs;
+        this.#captureTimelineEndMs = startedAtMs + durationMs;
+        this.#output.pcmCapture?.({
+          pcm: analysis,
+          sampleRate: SAMPLE_RATE,
+          startedAtMs,
+        });
       }
     });
   }
@@ -243,6 +270,8 @@ export class SystemMediaWorker implements MediaWorker {
     this.#decoder?.stdout.on("data", (chunk: Buffer) => {
       const playback = this.#playback;
       if (
+        !this.#digitalPlaybackActive &&
+        this.#now() >= this.#suppressVoicePlaybackUntilMs &&
         playback !== null &&
         playback.stdin.writable &&
         !playback.stdin.destroyed &&
@@ -251,6 +280,60 @@ export class SystemMediaWorker implements MediaWorker {
         playback.stdin.write(chunk);
       }
     });
+  }
+
+  async #playDigitalPcm(
+    pcm: Int16Array,
+    sampleRate: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.#closed) {
+      throw new Error("media worker is closed");
+    }
+    if (this.#digitalPlaybackActive) {
+      throw new Error("digital PCM playback is already active");
+    }
+    if (!(pcm instanceof Int16Array) || pcm.length === 0) {
+      throw new Error("digital PCM must be a non-empty Int16Array");
+    }
+    if (signal.aborted) {
+      throw abortError();
+    }
+    const playback = this.#playback;
+    if (playback === null || playback.stdin.destroyed || !playback.stdin.writable) {
+      throw new Error("radio audio playback is unavailable");
+    }
+    const localAbort = new AbortController();
+    this.#digitalPlaybackAbort = localAbort;
+    this.#digitalPlaybackActive = true;
+    try {
+      const output = resampleInt16(pcm, sampleRate, SAMPLE_RATE);
+      const frameSamples = SAMPLE_RATE / 50;
+      for (let offset = 0; offset < output.length; offset += frameSamples) {
+        assertNotAborted(signal, localAbort.signal);
+        const end = Math.min(output.length, offset + frameSamples);
+        const chunk = int16ToPcm16Le(output.subarray(offset, end));
+        if (!playback.stdin.write(chunk)) {
+          await waitForDrain(playback.stdin, signal, localAbort.signal);
+        }
+        await abortableDelay(
+          (end - offset) * 1_000 / SAMPLE_RATE,
+          signal,
+          localAbort.signal,
+        );
+      }
+      await abortableDelay(DIGITAL_PLAYBACK_TAIL_MS, signal, localAbort.signal);
+    } finally {
+      if (this.#digitalPlaybackAbort === localAbort) {
+        this.#digitalPlaybackAbort = null;
+      }
+      this.#digitalPlaybackActive = false;
+      this.#suppressVoicePlaybackUntilMs = this.#now() + 100;
+    }
+  }
+
+  async #stopDigitalPlayback(): Promise<void> {
+    this.#digitalPlaybackAbort?.abort();
   }
 
   async #replaceEncoder(bitrate: number): Promise<void> {
@@ -389,6 +472,81 @@ function shortDelay(milliseconds: number): Promise<void> {
     const timer = setTimeout(resolve, milliseconds);
     timer.unref();
   });
+}
+
+function waitForDrain(
+  writable: Writable,
+  firstSignal: AbortSignal,
+  secondSignal: AbortSignal,
+): Promise<void> {
+  assertNotAborted(firstSignal, secondSignal);
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      writable.off("drain", onDrain);
+      writable.off("error", onError);
+      writable.off("close", onClose);
+      firstSignal.removeEventListener("abort", onAbort);
+      secondSignal.removeEventListener("abort", onAbort);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("radio audio playback closed"));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    writable.once("drain", onDrain);
+    writable.once("error", onError);
+    writable.once("close", onClose);
+    firstSignal.addEventListener("abort", onAbort, { once: true });
+    secondSignal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortableDelay(
+  milliseconds: number,
+  firstSignal: AbortSignal,
+  secondSignal: AbortSignal,
+): Promise<void> {
+  assertNotAborted(firstSignal, secondSignal);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, Math.max(0, milliseconds));
+    const cleanup = () => {
+      clearTimeout(timer);
+      firstSignal.removeEventListener("abort", onAbort);
+      secondSignal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    firstSignal.addEventListener("abort", onAbort, { once: true });
+    secondSignal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function assertNotAborted(firstSignal: AbortSignal, secondSignal: AbortSignal): void {
+  if (firstSignal.aborted || secondSignal.aborted) {
+    throw abortError();
+  }
+}
+
+function abortError(): Error {
+  const error = new Error("digital audio playback was aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 function errorMessage(error: unknown): string {

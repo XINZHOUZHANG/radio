@@ -19,6 +19,16 @@ The dummy deployment installs the Debian `libhamlib-utils` package and runs the
 Hamlib model 1 rigctld simulator. Hamlib license and copyright information is
 provided by the Debian package in the resulting container image.
 
+## wsjtx-lib
+
+- Package: `wsjtx-lib` version `2.1.3`
+- Source: https://github.com/boybook/wsjtx-lib-nodejs
+- License: GNU General Public License version 3 (`GPL-3.0`)
+
+The Radio Lite server pins this package exactly and uses its bundled platform
+prebuilds only inside an isolated child process for FT8/FT4 encoding and
+decoding. The installed package retains its complete `LICENSE` file.
+
 ## PulseAudio
 
 The dummy audio image installs Debian's PulseAudio packages and uses a null sink
