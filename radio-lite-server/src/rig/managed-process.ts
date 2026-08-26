@@ -57,9 +57,14 @@ export class ManagedRigctldProcess {
         spawnError,
       ]);
     } catch (error) {
-      this.#child = null;
       if (child.pid !== undefined) {
         child.kill("SIGKILL");
+        if (!(await waitForExit(child, this.#stopTimeoutMs))) {
+          throw new Error("rigctld did not exit after startup failure", { cause: error });
+        }
+      }
+      if (this.#child === child) {
+        this.#child = null;
       }
       throw error;
     } finally {
@@ -69,17 +74,25 @@ export class ManagedRigctldProcess {
 
   async close(): Promise<void> {
     const child = this.#child;
-    this.#child = null;
     if (child === null || child.exitCode !== null || child.signalCode !== null) {
+      if (this.#child === child) {
+        this.#child = null;
+      }
       return;
     }
     child.kill("SIGTERM");
     if (await waitForExit(child, this.#stopTimeoutMs)) {
+      if (this.#child === child) {
+        this.#child = null;
+      }
       return;
     }
     child.kill("SIGKILL");
     if (!(await waitForExit(child, this.#stopTimeoutMs))) {
       throw new Error("rigctld did not exit after SIGKILL");
+    }
+    if (this.#child === child) {
+      this.#child = null;
     }
   }
 }

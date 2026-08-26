@@ -2,6 +2,108 @@ import XCTest
 @testable import TX5DRMobile
 
 final class RadioLiteDeviceConfigurationTests: XCTestCase {
+    func testHardwarePreflightResponseDecodesOrderedReadOnlyChecks() throws {
+        let data = Data(#"""
+        {
+          "profileId":"main",
+          "testedAtMs":1787700000000,
+          "readOnly":true,
+          "overallStatus":"warning",
+          "checks":[
+            {"id":"cat","status":"passed","message":"CAT 读取成功","details":{"frequencyHz":"14074000","mode":"PKTUSB"}},
+            {"id":"capabilities","status":"passed","message":"能力读取成功","details":{"pttReadback":"true"}},
+            {"id":"audioInput","status":"warning","message":"未发现输入端点","details":{"backend":"alsa","id":"hw:1,0"}},
+            {"id":"audioOutput","status":"passed","message":"输出端点可用","details":{"backend":"alsa","id":"hw:2,0"}}
+          ]
+        }
+        """#.utf8)
+
+        let result = try JSONDecoder().decode(RadioLiteHardwarePreflightResult.self, from: data)
+
+        XCTAssertTrue(result.readOnly)
+        XCTAssertEqual(result.overallStatus, .warning)
+        XCTAssertEqual(result.checks.map(\.id), [.cat, .capabilities, .audioInput, .audioOutput])
+        XCTAssertEqual(result.checks[0].details["frequencyHz"], "14074000")
+        XCTAssertEqual(result.checks[2].status, .warning)
+    }
+
+    func testHardwarePreflightOwnershipRejectsResultAfterDraftChanges() throws {
+        let original = RadioLiteRadioProfile(
+            id: "main",
+            name: "IC-7300",
+            hamlibModelId: 3_073,
+            connection: .init(
+                kind: "managed-serial",
+                devicePath: "/dev/ttyUSB0",
+                baudRate: 115_200,
+                host: nil,
+                port: nil
+            ),
+            ptt: .init(method: .rig),
+            audioInput: .init(backend: "alsa", id: "hw:1,0", label: nil),
+            audioOutput: .init(backend: "alsa", id: "hw:1,0", label: nil),
+            station: .init(callsign: "BI1ABC", grid: "OM89"),
+            hardwareTxEnabled: false
+        )
+        var draft = RadioLiteRadioConfigurationDraft(profile: original)
+        let ownership = RadioLiteHardwarePreflightOwnership(
+            draft: draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: "admin-1"
+        )
+
+        XCTAssertTrue(ownership.isCurrent(
+            draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: "admin-1"
+        ))
+        XCTAssertEqual(try ownership.makeProfile(), try draft.makeProfile())
+
+        draft.audioInput = .init(backend: "alsa", id: "hw:9,0", label: nil)
+
+        XCTAssertFalse(ownership.isCurrent(
+            draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: "admin-1"
+        ))
+    }
+
+    func testHardwarePreflightOwnershipRejectsResultAfterServerOrAccountChanges() {
+        let profile = RadioLiteRadioProfile(
+            id: "dummy",
+            name: "Dummy",
+            hamlibModelId: 1,
+            connection: .init(kind: "hamlib-dummy", devicePath: nil, baudRate: nil, host: nil, port: nil),
+            ptt: .init(method: .none),
+            audioInput: .init(backend: "alsa", id: "synthetic-rx", label: nil),
+            audioOutput: .init(backend: "alsa", id: "synthetic-tx", label: nil),
+            station: .init(callsign: "N0CALL", grid: "AA00"),
+            hardwareTxEnabled: false
+        )
+        let draft = RadioLiteRadioConfigurationDraft(profile: profile)
+        let ownership = RadioLiteHardwarePreflightOwnership(
+            draft: draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: "admin-1"
+        )
+
+        XCTAssertFalse(ownership.isCurrent(
+            draft,
+            serverAddress: "http://100.64.0.11:8080",
+            userId: "admin-1"
+        ))
+        XCTAssertFalse(ownership.isCurrent(
+            draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: "admin-2"
+        ))
+        XCTAssertFalse(ownership.isCurrent(
+            draft,
+            serverAddress: "http://100.64.0.10:8080",
+            userId: nil
+        ))
+    }
+
     func testLegacyRadioProfileDefaultsToRigPTT() throws {
         let payload = Data(#"""
         {

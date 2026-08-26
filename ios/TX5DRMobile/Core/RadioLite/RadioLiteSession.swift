@@ -112,6 +112,9 @@ final class RadioLiteSession: ObservableObject {
         self.serverAddress = UserDefaults.standard.string(forKey: Self.addressDefaultsKey)
             ?? "http://localhost:8787"
 
+        audio.onCaptureInterrupted = { [weak self] in
+            self?.handleAudioSessionInterruption()
+        }
         control.onEvent = { [weak self] value in self?.handleControlEvent(value) }
         control.onDisconnect = { [weak self] error in self?.handleConnectionLoss(error) }
         media.onDisconnect = { [weak self] error in self?.handleConnectionLoss(error) }
@@ -870,6 +873,7 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
             return
         }
+        audio.armPTTInterruptionFailSafe()
         voicePTTStartupTask?.cancel()
         let generation = transmitEpoch.begin()
         voicePTTGeneration = generation
@@ -996,6 +1000,16 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func endVoicePTT() {
+        endVoicePTT(reason: .userRelease)
+    }
+
+    private func handleAudioSessionInterruption() {
+        _ = suspendReceiveAudio()
+        endVoicePTT(reason: .audioInterruption)
+        endTuning()
+    }
+
+    private func endVoicePTT(reason: RadioLiteVoicePTTStopReason) {
         guard isVoicePTTHeld || voicePTTStartupTask != nil ||
                 activeCaptureOwnership != nil || activeUplinkOwnership != nil else { return }
         let transmitToken = activeTransmitToken
@@ -1003,7 +1017,7 @@ final class RadioLiteSession: ObservableObject {
         let receiveRestore = voicePTTGeneration.flatMap {
             takeVoicePTTReceiveRestore(
                 transmitGeneration: $0,
-                reason: .userRelease
+                reason: reason
             )
         }
         _ = stopLocalTransmit()
@@ -1263,6 +1277,14 @@ final class RadioLiteSession: ObservableObject {
         guard isAdmin else { throw RadioLiteSessionError.administratorRequired }
         guard let http else { throw RadioLiteSessionError.notConnected }
         return try await http.hardwareDiscovery()
+    }
+
+    func testRadioConfiguration(
+        _ profile: RadioLiteRadioProfile
+    ) async throws -> RadioLiteHardwarePreflightResult {
+        guard isAdmin else { throw RadioLiteSessionError.administratorRequired }
+        guard let http else { throw RadioLiteSessionError.notConnected }
+        return try await http.testHardware(profile)
     }
 
     @discardableResult

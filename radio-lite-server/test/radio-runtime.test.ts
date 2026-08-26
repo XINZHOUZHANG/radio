@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { PublicUser } from "../src/auth/user-store.ts";
@@ -6,9 +9,12 @@ import { parseRadioProfile } from "../src/config/types.ts";
 import { ControlBusyError } from "../src/control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
+  ManagedSerialDeviceBusyError,
   RigControlTransmitLockedError,
   RadioRuntime,
+  RadioRuntimeCleanupUncertainError,
   RadioRuntimeRegistry,
+  RadioRuntimeRegistryClosedError,
   TransmitPermissionError,
   type RigControl,
 } from "../src/rig/radio-runtime.ts";
@@ -66,6 +72,21 @@ class DeferredControlRig extends FakeRig {
     this.controls.set(id, value);
     this.events.push(`control:${id}:${value}`);
     return { ...control, value };
+  }
+}
+
+class FailingDeKeyRig extends FakeRig {
+  failDeKey = false;
+  deKeyAttempts = 0;
+
+  async setPtt(value: boolean) {
+    if (!value) {
+      this.deKeyAttempts += 1;
+      if (this.failDeKey) {
+        throw new Error("PTT off failed");
+      }
+    }
+    return super.setPtt(value);
   }
 }
 
@@ -213,6 +234,21 @@ test("runtime de-keys immediately when an allowed control write is stalled", asy
   assert.equal(rig.ptt, false);
 });
 
+test("runtime close still cleans dependencies and reports an uncertain de-key", async () => {
+  const rig = new FailingDeKeyRig();
+  let dependencyCloseCount = 0;
+  const runtime = new RadioRuntime(rigProfile(false), rig, async () => {
+    dependencyCloseCount += 1;
+  });
+  await runtime.initialize();
+  rig.failDeKey = true;
+
+  await assert.rejects(runtime.close(), RadioRuntimeCleanupUncertainError);
+  assert.equal(dependencyCloseCount, 1);
+  await assert.rejects(runtime.close(), RadioRuntimeCleanupUncertainError);
+  assert.equal(dependencyCloseCount, 1, "idempotent close must preserve the first failure");
+});
+
 test("runtime registry waits for invalidated resources to close before creating a replacement", async (context) => {
   const configuredProfile = profile(false);
   const closeStarted = deferred();
@@ -286,6 +322,255 @@ test("failed stale runtime initialization cannot evict or leak its replacement",
   assert.deepEqual(closed, [2]);
 });
 
+test("runtime registry refuses a preflight reservation while a serial runtime is initializing", async () => {
+  const configuredProfile = managedProfile();
+  assert.equal(configuredProfile.connection.kind, "managed-serial");
+  if (configuredProfile.connection.kind !== "managed-serial") throw new Error("test profile must be serial");
+  const devicePath = configuredProfile.connection.devicePath;
+  const runtimeReady = deferred<RadioRuntime>();
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async () => runtimeReady.promise,
+  );
+  const initializing = registry.get("main");
+  const runtime = new RadioRuntime(configuredProfile, new FakeRig());
+  await runtime.initialize();
+
+  try {
+    assert.throws(
+      () => registry.reserveManagedSerialDevice(devicePath),
+      ManagedSerialDeviceBusyError,
+    );
+  } finally {
+    runtimeReady.resolve(runtime);
+  }
+
+  assert.equal(await initializing, runtime);
+  await registry.close();
+});
+
+test("runtime registry blocks serial aliases for the lifetime of a preflight reservation", async () => {
+  const configuredProfile = managedProfile("/dev/ttyUSB0");
+  assert.equal(configuredProfile.connection.kind, "managed-serial");
+  let factoryCalls = 0;
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      factoryCalls += 1;
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig());
+      await runtime.initialize();
+      return runtime;
+    },
+    (devicePath) => devicePath === "/dev/serial/by-id/usb-radio"
+      ? "/dev/ttyUSB0"
+      : devicePath,
+  );
+  const reservation = registry.reserveManagedSerialDevice("/dev/serial/by-id/usb-radio");
+
+  try {
+    assert.throws(() => registry.get("main"), ManagedSerialDeviceBusyError);
+    assert.equal(factoryCalls, 0);
+  } finally {
+    reservation.release();
+  }
+
+  await registry.get("main");
+  assert.equal(factoryCalls, 1);
+  await registry.close();
+});
+
+test("runtime registry resolves filesystem aliases to one reservation key", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-runtime-device-alias-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const target = join(directory, "ttyUSB0");
+  const alias = join(directory, "radio-by-id");
+  await mkdir(target);
+  await symlink(target, alias, process.platform === "win32" ? "junction" : "dir");
+  const registry = new RadioRuntimeRegistry(() => ({ version: 1, radios: [] }));
+  const reservation = registry.reserveManagedSerialDevice(target);
+
+  try {
+    assert.throws(
+      () => registry.reserveManagedSerialDevice(alias),
+      ManagedSerialDeviceBusyError,
+    );
+  } finally {
+    reservation.release();
+    await registry.close();
+  }
+});
+
+test("serial quarantine keeps the reservation's original canonical key across device removal", async () => {
+  const stablePath = "/dev/serial/by-id/usb-radio";
+  let attached = true;
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [] }),
+    undefined,
+    (devicePath) => devicePath === stablePath && attached ? "/dev/ttyUSB0" : devicePath,
+  );
+  const reservation = registry.reserveManagedSerialDevice(stablePath);
+
+  attached = false;
+  reservation.quarantine();
+  reservation.release();
+  attached = true;
+
+  assert.throws(
+    () => registry.reserveManagedSerialDevice(stablePath),
+    ManagedSerialDeviceBusyError,
+  );
+  await assert.rejects(registry.close(), RadioRuntimeCleanupUncertainError);
+});
+
+test("stale reservation handles cannot release or quarantine a newer generation", async () => {
+  const registry = new RadioRuntimeRegistry(() => ({ version: 1, radios: [] }));
+  const first = registry.reserveManagedSerialDevice("/dev/ttyUSB0");
+  first.release();
+  const second = registry.reserveManagedSerialDevice("/dev/ttyUSB0");
+
+  first.quarantine();
+  first.release();
+  assert.throws(
+    () => registry.reserveManagedSerialDevice("/dev/ttyUSB0"),
+    ManagedSerialDeviceBusyError,
+  );
+  second.release();
+  const third = registry.reserveManagedSerialDevice("/dev/ttyUSB0");
+  third.release();
+  await registry.close();
+});
+
+test("runtime registry rejects new runtimes and reservations as soon as close starts", async () => {
+  const configuredProfile = managedProfile();
+  const closeStarted = deferred<void>();
+  const allowClose = deferred<void>();
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig(), async () => {
+        closeStarted.resolve();
+        await allowClose.promise;
+      });
+      await runtime.initialize();
+      return runtime;
+    },
+  );
+  await registry.get("main");
+
+  const closing = registry.close();
+  await closeStarted.promise;
+  assert.throws(() => registry.get("main"), RadioRuntimeRegistryClosedError);
+  assert.throws(
+    () => registry.reserveManagedSerialDevice("/dev/serial/by-id/usb-radio"),
+    RadioRuntimeRegistryClosedError,
+  );
+
+  allowClose.resolve();
+  await Promise.all([closing, registry.close()]);
+});
+
+test("runtime invalidation quarantines a serial device when de-key cannot be confirmed", async () => {
+  const configuredProfile = managedProfile("/dev/ttyUSB0");
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      const rig = new FailingDeKeyRig();
+      const runtime = new RadioRuntime(runtimeProfile, rig);
+      await runtime.initialize();
+      rig.failDeKey = true;
+      return runtime;
+    },
+    (devicePath) => devicePath === "/dev/serial/by-id/usb-radio"
+      ? "/dev/ttyUSB0"
+      : devicePath,
+  );
+  await registry.get("main");
+
+  await assert.rejects(registry.invalidate("main"), RadioRuntimeCleanupUncertainError);
+  assert.throws(() => registry.get("main"), ManagedSerialDeviceBusyError);
+  assert.throws(
+    () => registry.reserveManagedSerialDevice("/dev/serial/by-id/usb-radio"),
+    ManagedSerialDeviceBusyError,
+  );
+  await assert.rejects(registry.close(), RadioRuntimeCleanupUncertainError);
+});
+
+test("registry shutdown waits for an in-flight invalidation and propagates cleanup uncertainty", async () => {
+  const configuredProfile = managedProfile();
+  const dependencyCloseStarted = deferred<void>();
+  const allowDependencyClose = deferred<void>();
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig(), async () => {
+        dependencyCloseStarted.resolve();
+        await allowDependencyClose.promise;
+        throw new Error("managed process exit remained uncertain");
+      });
+      await runtime.initialize();
+      return runtime;
+    },
+  );
+  await registry.get("main");
+
+  const invalidating = registry.invalidate("main");
+  const invalidationFailed = assert.rejects(invalidating, RadioRuntimeCleanupUncertainError);
+  await dependencyCloseStarted.promise;
+  const closing = registry.close();
+  let closeSettled = false;
+  void closing.then(
+    () => { closeSettled = true; },
+    () => { closeSettled = true; },
+  );
+  const closeFailed = assert.rejects(closing, RadioRuntimeCleanupUncertainError);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closeSettled, false);
+
+  allowDependencyClose.resolve();
+  await Promise.all([invalidationFailed, closeFailed]);
+  assert.throws(() => registry.get("main"), RadioRuntimeRegistryClosedError);
+  assert.throws(
+    () => registry.reserveManagedSerialDevice(configuredProfile.connection.kind === "managed-serial"
+      ? configuredProfile.connection.devicePath
+      : "/dev/invalid"),
+    RadioRuntimeRegistryClosedError,
+  );
+});
+
+test("queued get becomes device busy when invalidation quarantines the serial path", async () => {
+  const configuredProfile = managedProfile();
+  const dependencyCloseStarted = deferred<void>();
+  const allowDependencyClose = deferred<void>();
+  let factoryCalls = 0;
+  const registry = new RadioRuntimeRegistry(
+    () => ({ version: 1, radios: [configuredProfile] }),
+    async (runtimeProfile) => {
+      factoryCalls += 1;
+      const runtime = new RadioRuntime(runtimeProfile, new FakeRig(), async () => {
+        dependencyCloseStarted.resolve();
+        await allowDependencyClose.promise;
+        throw new Error("managed process exit remained uncertain");
+      });
+      await runtime.initialize();
+      return runtime;
+    },
+  );
+  await registry.get("main");
+
+  const invalidating = registry.invalidate("main");
+  const invalidationFailed = assert.rejects(invalidating, RadioRuntimeCleanupUncertainError);
+  await dependencyCloseStarted.promise;
+  const queuedGetFailed = assert.rejects(
+    registry.get("main"),
+    ManagedSerialDeviceBusyError,
+  );
+  allowDependencyClose.resolve();
+
+  await Promise.all([invalidationFailed, queuedGetFailed]);
+  assert.equal(factoryCalls, 1, "cleanup failure must not start a replacement runtime");
+  await assert.rejects(registry.close(), RadioRuntimeCleanupUncertainError);
+});
+
 function profile(hardwareTxEnabled: boolean) {
   return parseRadioProfile({
     id: "main",
@@ -296,6 +581,28 @@ function profile(hardwareTxEnabled: boolean) {
     audioOutput: { backend: "alsa", id: "hw:1,0" },
     station: { callsign: "BI1ABC", grid: "OM89" },
     hardwareTxEnabled,
+  });
+}
+
+function rigProfile(hardwareTxEnabled: boolean) {
+  return profile(hardwareTxEnabled);
+}
+
+function managedProfile(devicePath = "/dev/serial/by-id/usb-Yaesu_FT-710-if00") {
+  return parseRadioProfile({
+    id: "main",
+    name: "FT-710",
+    hamlibModelId: 1049,
+    connection: {
+      kind: "managed-serial",
+      devicePath,
+      baudRate: 38_400,
+    },
+    audioInput: { backend: "alsa", id: "hw:1,0" },
+    audioOutput: { backend: "alsa", id: "hw:1,0" },
+    ptt: { method: "RIG" },
+    station: { callsign: "BI1ABC", grid: "OM89" },
+    hardwareTxEnabled: false,
   });
 }
 

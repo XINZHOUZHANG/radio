@@ -23,6 +23,10 @@ as visual/reference components while migration tests are retired.
 - administrator account creation and six-digit pairing-code generation;
 - administrator hardware setup with searchable full `rigctl -l` model catalog,
   CAT/baud, Hamlib PTT method and PulseAudio/PipeWire/ALSA endpoint selection;
+- an administrator-only read-only configuration test that reports CAT
+  frequency/mode readback, optional Hamlib capabilities and both audio endpoints
+  before saving, without obtaining control or issuing PTT, tuner, frequency or
+  mode write commands;
 - non-empty passwords without complexity or character-count rules, with clear
   setup validation before submission;
 - opt-in speaker playback, recoverable media-only retry and dismiss-once error

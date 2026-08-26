@@ -16,11 +16,19 @@ import {
 import { type PublicUser, UserStore } from "../auth/user-store.ts";
 import { RadioConfigStore } from "../config/radio-config-store.ts";
 import { HardwareDiscovery } from "../config/hardware-discovery.ts";
+import {
+  HardwarePreflight,
+  HardwarePreflightCleanupUncertainError,
+  type HardwarePreflightRunner,
+} from "../config/hardware-preflight.ts";
+import { parseRadioProfile } from "../config/types.ts";
 import { ControlBusyError, InvalidControlLeaseError } from "../control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
+  ManagedSerialDeviceBusyError,
   RigControlTransmitLockedError,
   RadioRuntimeRegistry,
+  RadioRuntimeCleanupUncertainError,
   TransmitPermissionError,
   type RadioRuntimeFactory,
 } from "../rig/radio-runtime.ts";
@@ -52,6 +60,7 @@ export type RadioLiteServiceOptions = {
   secureCookies?: boolean;
   runtimeFactory?: RadioRuntimeFactory;
   hardwareDiscovery?: HardwareDiscovery;
+  hardwarePreflight?: HardwarePreflightRunner;
   mediaWorkerFactory?: MediaWorkerFactory;
   digitalWorkerFactory?: DigitalWorkerFactory;
   logStore?: AdifLogStore;
@@ -83,6 +92,7 @@ export class RadioLiteService {
   readonly #log: AdifLogStore;
   readonly #digital: DigitalRadioHub;
   readonly #hardwareDiscovery: HardwareDiscovery;
+  readonly #hardwarePreflight: HardwarePreflightRunner;
   readonly #secureCookies: boolean;
   #server: Server | null = null;
   #webSocketServer: WebSocketServer | null = null;
@@ -164,6 +174,10 @@ export class RadioLiteService {
       onEvent: (event) => this.#broadcastControl(event),
     });
     this.#hardwareDiscovery = options.hardwareDiscovery ?? new HardwareDiscovery();
+    this.#hardwarePreflight = options.hardwarePreflight ?? new HardwarePreflight({
+      now: this.#now,
+      discover: () => this.#hardwareDiscovery.discover(),
+    });
     this.#secureCookies = options.secureCookies === true;
   }
 
@@ -254,18 +268,34 @@ export class RadioLiteService {
     }
     this.#webSockets.clear();
     this.#controlWebSockets.clear();
-    await this.#digital.close();
-    await this.#media.close();
-    await this.#runtimes.close();
-    if (webSocketServer !== null) {
-      await new Promise<void>((resolve) => webSocketServer.close(() => resolve()));
+    const webSocketServerClosing = webSocketServer === null
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => webSocketServer.close(() => resolve()));
+    const serverClosing = server === null
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => {
+          server.close((error) => error === undefined ? resolve() : reject(error));
+        });
+    const failures: unknown[] = [];
+    for (const operation of [
+      () => this.#digital.close(),
+      () => this.#media.close(),
+      () => webSocketServerClosing,
+      () => serverClosing,
+      () => this.#runtimes.close(),
+    ]) {
+      try {
+        await operation();
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    if (server === null) {
-      return;
+    if (failures.length > 0) {
+      throw new RadioRuntimeCleanupUncertainError(
+        "service shutdown cleanup could not be confirmed",
+        { cause: new AggregateError(failures) },
+      );
     }
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error === undefined ? resolve() : reject(error));
-    });
   }
 
   #acceptWebSocket(
@@ -957,6 +987,37 @@ export class RadioLiteService {
         sendJson(response, 200, await this.#hardwareDiscovery.discover());
         return;
       }
+      if (method === "POST" && url.pathname === "/api/v1/hardware/test") {
+        const principal = this.#requireAdmin(request, true);
+        const body = await jsonObject(request, ["profile"]);
+        const profile = parseRadioProfile(body.profile);
+        const serialDeviceReservation = profile.connection.kind === "managed-serial"
+          ? this.#runtimes.reserveManagedSerialDevice(profile.connection.devicePath)
+          : undefined;
+        const result = await (async () => {
+          try {
+            return await this.#hardwarePreflight.test(profile);
+          } catch (error) {
+            if (
+              error instanceof HardwarePreflightCleanupUncertainError &&
+              profile.connection.kind === "managed-serial"
+            ) {
+              serialDeviceReservation?.quarantine();
+            }
+            throw error;
+          } finally {
+            serialDeviceReservation?.release();
+          }
+        })();
+        await this.#audit.append({
+          occurredAtMs: this.#now(), action: "hardware.preflight", result: "success",
+          actorUserId: principal.user.id, actorDeviceId: principal.deviceId ?? undefined,
+          targetId: profile.id,
+          metadata: { "overall-status": result.overallStatus, "read-only": true },
+        });
+        sendJson(response, 200, result);
+        return;
+      }
       if (method === "POST" && url.pathname === "/api/v1/users") {
         this.#requireAdmin(request, true);
         const body = await jsonObject(request, ["username", "password", "role", "canTransmit", "mustChangePassword"], ["canTransmit", "mustChangePassword"]);
@@ -1340,6 +1401,19 @@ function mapError(error: unknown): HttpError {
   }
   if (error instanceof InvalidDeviceCredentialError) {
     return new HttpError(401, "invalid_device_credential", "device credential is invalid");
+  }
+  if (error instanceof ManagedSerialDeviceBusyError) {
+    return new HttpError(409, "radio_device_busy", "radio serial device is already in use");
+  }
+  if (
+    error instanceof HardwarePreflightCleanupUncertainError ||
+    error instanceof RadioRuntimeCleanupUncertainError
+  ) {
+    return new HttpError(
+      503,
+      "hardware_cleanup_uncertain",
+      "radio cleanup could not be confirmed; restart the service before reusing this serial device",
+    );
   }
   if (error instanceof Error && /already|duplicate|cannot enable|final enabled/u.test(error.message)) {
     return new HttpError(409, "conflict", error.message);

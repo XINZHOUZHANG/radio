@@ -408,6 +408,33 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
             RadioLiteVoicePTTStopReason.connectionLoss.restoresReceiveMonitoring,
             "connection recovery owns a newer monitoring suspension"
         )
+        XCTAssertFalse(
+            RadioLiteVoicePTTStopReason.audioInterruption.restoresReceiveMonitoring,
+            "an interrupted AVAudioSession must not be reactivated while PTT is being revoked"
+        )
+    }
+
+    func testAudioInterruptionInvalidatesQueuedUserReleaseReceiveRestore() {
+        var intent = RadioLiteReceiveMonitoringIntent()
+        intent.setDesired(true)
+        let queuedRestore = RadioLiteReceiveMonitoringOwnership(
+            radioId: "main",
+            generation: intent.suspend()
+        )
+
+        _ = intent.suspend()
+
+        XCTAssertFalse(
+            intent.resume(
+                generation: queuedRestore.generation,
+                expectedRadioId: "main",
+                selectedRadioId: "main",
+                subscribedRadioId: "main"
+            ),
+            "an audio interruption must invalidate receive recovery already queued by user release"
+        )
+        XCTAssertTrue(intent.isSuspended)
+        XCTAssertFalse(intent.shouldMonitor)
     }
 
     func testOldConfigurationReconnectCannotPublishControlForNewRadio() {

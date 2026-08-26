@@ -2,10 +2,7 @@ import SwiftUI
 
 struct RadioLiteFT8View: View {
     @EnvironmentObject private var session: RadioLiteSession
-    @State private var mode = "FT8"
-    @State private var selectedDecodeId: String?
-    @State private var displayedBatch: RadioLiteDigitalDecodeBatch?
-    @State private var cqOnly = true
+    @State private var decodeFeed = RadioLiteDecodeFeedState()
     @State private var manualCall = ""
     @State private var manualGrid = ""
     @State private var audioFrequency = "1300"
@@ -46,20 +43,16 @@ struct RadioLiteFT8View: View {
                 selectedActionBar(selectedDecode)
             }
         }
-        .onAppear { updateDisplayedBatch(force: true) }
-        .onChange(of: mode) { _, _ in
-            selectedDecodeId = nil
-            updateDisplayedBatch(force: true)
-        }
+        .onAppear { decodeFeed.receive(latestBatch) }
         .onChange(of: latestBatch?.id) { _, _ in
-            if selectedDecodeId == nil { updateDisplayedBatch(force: true) }
+            decodeFeed.receive(latestBatch)
         }
     }
 
     private var modeAndSlotPanel: some View {
         RadioPanel {
             VStack(spacing: 13) {
-                Picker("数字模式", selection: $mode) {
+                Picker("数字模式", selection: modeBinding) {
                     Text("FT8 · 15 秒").tag("FT8")
                     Text("FT4 · 7.5 秒").tag("FT4")
                 }
@@ -69,7 +62,7 @@ struct RadioLiteFT8View: View {
                     Label("整时隙批次", systemImage: "clock.badge.checkmark")
                         .foregroundStyle(RadioPalette.accent)
                     Spacer()
-                    if let batch = displayedBatch {
+                    if let batch = decodeFeed.displayedBatch {
                         Text(slotDate(batch.slotStartMs), style: .time)
                             .monospacedDigit()
                         Text("· \(batch.decodes.count) 条")
@@ -89,7 +82,7 @@ struct RadioLiteFT8View: View {
 
     private var slotClockPanel: some View {
         TimelineView(.periodic(from: .now, by: 0.1)) { context in
-            if let clock = RadioLiteDigitalSlotClock(mode: mode) {
+            if let clock = RadioLiteDigitalSlotClock(mode: decodeFeed.mode) {
                 let snapshot = clock.snapshot(at: context.date)
                 let state = clock.displayState(
                     at: context.date,
@@ -101,7 +94,7 @@ struct RadioLiteFT8View: View {
                         Label("UTC 时隙", systemImage: "timer")
                             .foregroundStyle(RadioPalette.accent)
                         Spacer()
-                        Text("\(mode) · \(parityLabel(snapshot.parity))数时隙")
+                        Text("\(decodeFeed.mode) · \(parityLabel(snapshot.parity))数时隙")
                     }
                     .font(.caption.weight(.semibold))
                     ProgressView(value: snapshot.progress)
@@ -128,7 +121,7 @@ struct RadioLiteFT8View: View {
                     Label("解码消息", systemImage: "text.line.first.and.arrowtriangle.forward")
                         .font(.headline)
                     Spacer()
-                    Toggle("仅 CQ", isOn: $cqOnly)
+                    Toggle("仅 CQ", isOn: cqOnlyBinding)
                         .labelsHidden()
                         .tint(RadioPalette.accent)
                     Text("CQ")
@@ -137,14 +130,14 @@ struct RadioLiteFT8View: View {
                 }
                 if filteredDecodes.isEmpty {
                     ContentUnavailableView(
-                        cqOnly ? "本时隙没有 CQ" : "本时隙没有解码",
+                        decodeFeed.cqOnly ? "本时隙没有 CQ" : "本时隙没有解码",
                         systemImage: "waveform.badge.magnifyingglass"
                     )
                     .frame(minHeight: 130)
                 } else {
                     LazyVStack(spacing: 7) {
                         ForEach(filteredDecodes) { decode in
-                            Button { selectedDecodeId = decode.id } label: {
+                            Button { decodeFeed.select(decodeId: decode.id) } label: {
                                 decodeRow(decode)
                             }
                             .buttonStyle(.plain)
@@ -156,7 +149,7 @@ struct RadioLiteFT8View: View {
     }
 
     private func decodeRow(_ decode: RadioLiteDigitalDecode) -> some View {
-        let selected = selectedDecodeId == decode.id
+        let selected = decodeFeed.selectedDecodeId == decode.id
         return HStack(spacing: 10) {
             Text(String(format: "%+.0f", decode.snrDb))
                 .font(.caption.monospacedDigit().weight(.bold))
@@ -274,14 +267,14 @@ struct RadioLiteFT8View: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                Button("加入 \(mode) 呼叫队列") {
+                Button("加入 \(decodeFeed.mode) 呼叫队列") {
                     focusedField = nil
                     guard let frequency = Int(audioFrequency) else { return }
                     Task {
                         await session.addManualCall(
                             callsign: manualCall,
                             grid: manualGrid.isEmpty ? nil : manualGrid,
-                            mode: mode,
+                            mode: decodeFeed.mode,
                             audioFrequencyHz: frequency,
                             parity: parity
                         )
@@ -348,15 +341,13 @@ struct RadioLiteFT8View: View {
             }
             Spacer()
             Button("取消") {
-                selectedDecodeId = nil
-                updateDisplayedBatch(force: true)
+                decodeFeed.resume()
             }
             .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.muted))
             Button("加入队列") {
                 Task {
                     await session.addDecodeToQueue(decode.id)
-                    selectedDecodeId = nil
-                    updateDisplayedBatch(force: true)
+                    decodeFeed.resume()
                 }
             }
             .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
@@ -368,22 +359,35 @@ struct RadioLiteFT8View: View {
     }
 
     private var latestBatch: RadioLiteDigitalDecodeBatch? {
-        session.decodeBatches.first { $0.mode == mode }
+        latestBatch(for: decodeFeed.mode)
     }
 
     private var filteredDecodes: [RadioLiteDigitalDecode] {
-        let values = displayedBatch?.decodes ?? []
-        return cqOnly ? values.filter { isCQ($0.message) } : values
+        decodeFeed.filteredDecodes
     }
 
     private var selectedDecode: RadioLiteDigitalDecode? {
-        guard let selectedDecodeId else { return nil }
-        return displayedBatch?.decodes.first { $0.id == selectedDecodeId }
+        decodeFeed.selectedDecode
     }
 
-    private func updateDisplayedBatch(force: Bool) {
-        guard force || selectedDecodeId == nil else { return }
-        displayedBatch = latestBatch
+    private var modeBinding: Binding<String> {
+        Binding(
+            get: { decodeFeed.mode },
+            set: { value in
+                decodeFeed.changeMode(to: value, latestBatch: latestBatch(for: value))
+            }
+        )
+    }
+
+    private var cqOnlyBinding: Binding<Bool> {
+        Binding(
+            get: { decodeFeed.cqOnly },
+            set: { decodeFeed.setCQOnly($0) }
+        )
+    }
+
+    private func latestBatch(for mode: String) -> RadioLiteDigitalDecodeBatch? {
+        session.decodeBatches.first { $0.mode == mode }
     }
 
     private func isCQ(_ message: String) -> Bool {

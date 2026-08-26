@@ -32,6 +32,7 @@ X-Radio-Lite-Device-Id: <deviceId>
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/api/v1/hardware/discovery` | administrator | Discover Hamlib models, serial ports, audio devices, PTT methods and baud rates |
+| `POST` | `/api/v1/hardware/test` | administrator | Run a non-persistent, read-only CAT/capability/audio-endpoint preflight for one draft profile |
 | `GET` | `/api/v1/radios` | authenticated | Read the versioned radio-profile list |
 | `POST` | `/api/v1/radios` | administrator | Create or replace one radio profile by `id` |
 
@@ -56,6 +57,55 @@ abbreviated here:
   "pttMethods": ["RIG","DTR","RTS","Parallel","CM108","GPIO","GPION","None"],
   "baudRates": [1200,2400,4800,9600,19200,38400,57600,115200,230400],
   "warnings": []
+}
+```
+
+`POST /api/v1/hardware/test` accepts `{"profile": <complete-profile>}` using
+the same profile validation as a save, but it does not write `radios.json`,
+register a runtime or obtain a control lease. For a real rig the application
+sends only the bounded read queries `get_freq`, `get_mode`, `get_ptt`,
+`get_func TUNER`, `get_level ?` and `get_func ?`; it does not send PTT, tuner,
+frequency or mode write commands. A managed-serial test starts its temporary
+rigctld with PTT forced to `None` and omits the draft PTT path and GPIO bit, so
+the preflight process does not initialize those external PTT devices.
+Unsupported optional capability queries produce a warning without hiding a
+successful frequency/mode readback.
+Audio input and output are checked independently against read-only device
+discovery. Dummy profiles return a deterministic synthetic result without
+opening rigctld or host audio devices.
+
+Managed serial paths are canonicalized before locking, so aliases such as
+`/dev/ttyUSB0` and `/dev/serial/by-id/...` cannot run concurrently. An active or
+initializing runtime returns `409 radio_device_busy`. If shutdown of a temporary
+rigctld process cannot be confirmed, the endpoint returns
+`503 hardware_cleanup_uncertain` and keeps that device quarantined until the
+service is restarted instead of risking a second process opening the same radio.
+
+The response always orders the four checks as CAT, capabilities, audio input
+and audio output. `details` contains display-safe strings only:
+
+```json
+{
+  "profileId": "main",
+  "testedAtMs": 1787700000000,
+  "readOnly": true,
+  "overallStatus": "warning",
+  "checks": [
+    {
+      "id": "cat",
+      "status": "passed",
+      "message": "CAT connection and frequency/mode readback succeeded",
+      "details": {"frequencyHz":"14074000","mode":"PKTUSB","passbandHz":"3000"}
+    },
+    {
+      "id": "capabilities",
+      "status": "warning",
+      "message": "CAT is available, but one or more optional capability queries are unsupported",
+      "details": {"pttReadback":"true","internalTunerReadback":"false","readableLevels":"AF,RFPOWER"}
+    },
+    {"id":"audioInput","status":"passed","message":"Configured audio endpoint was found","details":{"backend":"alsa","id":"hw:1,0"}},
+    {"id":"audioOutput","status":"passed","message":"Configured audio endpoint was found","details":{"backend":"alsa","id":"hw:1,0"}}
+  ]
 }
 ```
 

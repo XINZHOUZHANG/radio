@@ -9,7 +9,10 @@ struct RadioLiteDeviceConfigurationView: View {
     @State private var discovery: RadioLiteHardwareDiscovery?
     @State private var loading = true
     @State private var saving = false
+    @State private var testingHardware = false
     @State private var loadError: String?
+    @State private var hardwareTestError: String?
+    @State private var hardwareTestResult: RadioLiteHardwarePreflightResult?
     @State private var showModelPicker = false
     @State private var activeAlert: DeviceConfigurationAlert?
     @FocusState private var editingText: Bool
@@ -170,6 +173,64 @@ struct RadioLiteDeviceConfigurationView: View {
                 }
 
                 Section {
+                    Button {
+                        Task { await testHardware() }
+                    } label: {
+                        HStack {
+                            Label(
+                                testingHardware ? "正在测试 CAT 与音频端点…" : "测试 CAT 与音频端点",
+                                systemImage: "stethoscope"
+                            )
+                            Spacer()
+                            if testingHardware { ProgressView().controlSize(.small) }
+                        }
+                    }
+                    .disabled(testingHardware || saving || draft.validationMessage != nil)
+
+                    if let hardwareTestError {
+                        Label(hardwareTestError, systemImage: "xmark.octagon.fill")
+                            .font(.footnote)
+                            .foregroundStyle(RadioPalette.transmit)
+                    }
+
+                    if let result = hardwareTestResult {
+                        Label(
+                            preflightSummary(result.overallStatus),
+                            systemImage: preflightIcon(result.overallStatus)
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(preflightColor(result.overallStatus))
+
+                        ForEach(result.checks) { check in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Label(preflightTitle(check.id), systemImage: preflightIcon(check.status))
+                                        .font(.subheadline.weight(.semibold))
+                                    Spacer()
+                                    Text(preflightStatusLabel(check.status))
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(preflightColor(check.status))
+                                }
+                                Text(check.message)
+                                    .font(.caption)
+                                    .foregroundStyle(RadioPalette.muted)
+                                if let detail = preflightDetail(check), !detail.isEmpty {
+                                    Text(detail)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(RadioPalette.cyan)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                } header: {
+                    Text("只读连接测试")
+                } footer: {
+                    Text("测试不会保存配置或取得控制权；CAT 预检只发送读取查询，不会发送 PTT、天调、频率或模式写命令。")
+                }
+
+                Section {
                     Label("保存会停止当前 PTT/天调、释放旧设备并重新连接电台与音频，通常只会短暂中断。", systemImage: "arrow.triangle.2.circlepath")
                         .font(.footnote)
                         .foregroundStyle(RadioPalette.muted)
@@ -193,7 +254,7 @@ struct RadioLiteDeviceConfigurationView: View {
                             Text("保存")
                         }
                     }
-                    .disabled(saving || draft.validationMessage != nil)
+                    .disabled(saving || testingHardware || draft.validationMessage != nil)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -236,6 +297,10 @@ struct RadioLiteDeviceConfigurationView: View {
                     draft.connectionKind = .managedSerial
                     draft.pttMethod = .rig
                 }
+            }
+            .onChange(of: draft) { _, _ in
+                hardwareTestResult = nil
+                hardwareTestError = nil
             }
             .alert(item: $activeAlert) { item in
                 switch item {
@@ -294,6 +359,36 @@ struct RadioLiteDeviceConfigurationView: View {
         }
     }
 
+    private func testHardware() async {
+        guard !testingHardware else { return }
+        editingText = false
+        let ownership = RadioLiteHardwarePreflightOwnership(
+            draft: draft,
+            serverAddress: session.serverAddress,
+            userId: session.principal?.userId
+        )
+        testingHardware = true
+        hardwareTestError = nil
+        hardwareTestResult = nil
+        defer { testingHardware = false }
+        do {
+            let result = try await session.testRadioConfiguration(ownership.makeProfile())
+            guard ownership.isCurrent(
+                draft,
+                serverAddress: session.serverAddress,
+                userId: session.principal?.userId
+            ) else { return }
+            hardwareTestResult = result
+        } catch {
+            guard ownership.isCurrent(
+                draft,
+                serverAddress: session.serverAddress,
+                userId: session.principal?.userId
+            ) else { return }
+            hardwareTestError = "连接测试失败：\(error.localizedDescription)"
+        }
+    }
+
     private func save(confirmHardwareTransmission: Bool) async {
         saving = true
         defer { saving = false }
@@ -331,6 +426,66 @@ struct RadioLiteDeviceConfigurationView: View {
         case "pulseaudio_discovery_unavailable_using_alsa": "PulseAudio 不可用，已改用 ALSA 设备"
         case "audio_discovery_unavailable": "无法扫描音频设备，可手动输入 ALSA/PulseAudio ID"
         default: value
+        }
+    }
+
+    private func preflightTitle(_ id: RadioLiteHardwarePreflightCheckID) -> String {
+        switch id {
+        case .cat: "CAT 读回"
+        case .capabilities: "Hamlib 能力"
+        case .audioInput: "接收音频输入"
+        case .audioOutput: "发射音频输出"
+        }
+    }
+
+    private func preflightStatusLabel(_ status: RadioLiteHardwarePreflightStatus) -> String {
+        switch status {
+        case .passed: "通过"
+        case .warning: "警告"
+        case .failed: "失败"
+        }
+    }
+
+    private func preflightSummary(_ status: RadioLiteHardwarePreflightStatus) -> String {
+        switch status {
+        case .passed: "所有只读检查均已通过"
+        case .warning: "CAT 可用，但部分能力或音频端点需要确认"
+        case .failed: "CAT 连接或读回失败，请修正配置后重试"
+        }
+    }
+
+    private func preflightIcon(_ status: RadioLiteHardwarePreflightStatus) -> String {
+        switch status {
+        case .passed: "checkmark.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .failed: "xmark.octagon.fill"
+        }
+    }
+
+    private func preflightColor(_ status: RadioLiteHardwarePreflightStatus) -> Color {
+        switch status {
+        case .passed: RadioPalette.accent
+        case .warning: RadioPalette.warning
+        case .failed: RadioPalette.transmit
+        }
+    }
+
+    private func preflightDetail(_ check: RadioLiteHardwarePreflightCheck) -> String? {
+        switch check.id {
+        case .cat:
+            let frequency = check.details["frequencyHz"].flatMap(Int64.init)
+                .map { String(format: "%.6f MHz", Double($0) / 1_000_000) }
+                ?? "—"
+            return "\(frequency) · \(check.details["mode"] ?? "—") · \(check.details["passbandHz"] ?? "—") Hz"
+        case .capabilities:
+            let levels = check.details["readableLevels"] ?? ""
+            let functions = check.details["readableFunctions"] ?? ""
+            return [levels.isEmpty ? nil : "LEVEL \(levels)", functions.isEmpty ? nil : "FUNC \(functions)"]
+                .compactMap { $0 }
+                .joined(separator: " · ")
+        case .audioInput, .audioOutput:
+            guard let backend = check.details["backend"], let id = check.details["id"] else { return nil }
+            return "\(backend.uppercased()) · \(id)"
         }
     }
 }

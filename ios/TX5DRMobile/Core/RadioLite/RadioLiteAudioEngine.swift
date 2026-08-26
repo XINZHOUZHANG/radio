@@ -20,6 +20,114 @@ enum RadioLiteAudioError: LocalizedError {
     }
 }
 
+enum RadioLiteAudioInterruptionAction: Equatable, Sendable {
+    case stopCaptureAndTransmit
+    case ignore
+}
+
+enum RadioLiteAudioInterruptionPolicy {
+    static func action(for notification: Notification) -> RadioLiteAudioInterruptionAction {
+        if notification.name == AVAudioSession.mediaServicesWereLostNotification
+            || notification.name == AVAudioSession.mediaServicesWereResetNotification {
+            return .stopCaptureAndTransmit
+        }
+        guard let type = interruptionType(for: notification) else {
+            return .ignore
+        }
+        return type == .began ? .stopCaptureAndTransmit : .ignore
+    }
+
+    static func interruptionType(for notification: Notification) -> AVAudioSession.InterruptionType? {
+        guard notification.name == AVAudioSession.interruptionNotification,
+              let rawValue = interruptionTypeRawValue(
+                notification.userInfo?[AVAudioSessionInterruptionTypeKey]
+              ) else {
+            return nil
+        }
+        return AVAudioSession.InterruptionType(rawValue: rawValue)
+    }
+
+    private static func interruptionTypeRawValue(_ value: Any?) -> UInt? {
+        if let rawValue = value as? UInt { return rawValue }
+        return (value as? NSNumber)?.uintValue
+    }
+}
+
+private final class RadioLiteNotificationObservationBag {
+    private let notificationCenter: NotificationCenter
+    private var observers: [NSObjectProtocol] = []
+
+    init(notificationCenter: NotificationCenter) {
+        self.notificationCenter = notificationCenter
+    }
+
+    func insert(_ observer: NSObjectProtocol) {
+        observers.append(observer)
+    }
+
+    deinit {
+        for observer in observers {
+            notificationCenter.removeObserver(observer)
+        }
+    }
+}
+
+@MainActor
+final class RadioLiteAudioInterruptionObserver {
+    private let observationBag: RadioLiteNotificationObservationBag
+    private let onStopCaptureAndTransmit: @MainActor () -> Void
+    private let onMediaServicesReset: @MainActor () -> Void
+    private var stopDeliveredForCurrentEpisode = false
+
+    init(
+        notificationCenter: NotificationCenter = .default,
+        onStopCaptureAndTransmit: @escaping @MainActor () -> Void,
+        onMediaServicesReset: @escaping @MainActor () -> Void
+    ) {
+        let observationBag = RadioLiteNotificationObservationBag(
+            notificationCenter: notificationCenter
+        )
+        self.observationBag = observationBag
+        self.onStopCaptureAndTransmit = onStopCaptureAndTransmit
+        self.onMediaServicesReset = onMediaServicesReset
+        for name in [
+            AVAudioSession.interruptionNotification,
+            AVAudioSession.mediaServicesWereLostNotification,
+            AVAudioSession.mediaServicesWereResetNotification,
+        ] {
+            let observer = notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    self?.receive(notification)
+                }
+            }
+            observationBag.insert(observer)
+        }
+    }
+
+    func rearm() {
+        stopDeliveredForCurrentEpisode = false
+    }
+
+    private func receive(_ notification: Notification) {
+        if RadioLiteAudioInterruptionPolicy.interruptionType(for: notification) == .ended {
+            rearm()
+            return
+        }
+        if RadioLiteAudioInterruptionPolicy.action(for: notification) == .stopCaptureAndTransmit,
+           !stopDeliveredForCurrentEpisode {
+            stopDeliveredForCurrentEpisode = true
+            onStopCaptureAndTransmit()
+        }
+        if notification.name == AVAudioSession.mediaServicesWereResetNotification {
+            onMediaServicesReset()
+        }
+    }
+}
+
 struct RadioLiteMicrophoneCaptureOwnership: Equatable, Sendable {
     let epoch: UInt64
 }
@@ -92,15 +200,20 @@ final class RadioLiteAudioEngine: ObservableObject {
         didSet { player.volume = Float(min(1, max(0, monitorVolume))) }
     }
 
+    var onCaptureInterrupted: (@MainActor () -> Void)?
+
     // Keep playback and recording on separate graphs. Once an AVAudioEngine's
     // input node has been activated, restarting that same graph under a
     // playback-only AVAudioSession can fail with OSStatus '!rec'. Separate
     // graphs also let PTT release the microphone without tearing down the
     // optional receive-audio player.
-    private let playbackEngine = AVAudioEngine()
-    private let captureEngine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    private var playbackEngine = AVAudioEngine()
+    private var captureEngine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
+    private var audioSessionInterruptionObserver: RadioLiteAudioInterruptionObserver?
     private var codec: RadioLiteOpusCodec?
+    private var configuredOpusBitrate = 20_000
+    private var playbackResourceGeneration: UInt64 = 1
     private var inputTapInstalled = false
     private var captureAccumulator: [Float] = []
     private var captureSampleRate: Double = 48_000
@@ -111,22 +224,24 @@ final class RadioLiteAudioEngine: ObservableObject {
     private let targetBuffers = 3
     private let maximumBuffers = 25
 
-    init() {
+    init(notificationCenter: NotificationCenter = .default) {
         let microphonePreferences = RadioLiteMicrophonePreferences.load()
         microphoneProcessingMode = microphonePreferences.processingMode
         microphoneGain = microphonePreferences.gain
-        playbackEngine.attach(player)
-        do {
-            let codec = try RadioLiteOpusCodec()
-            self.codec = codec
-            playbackEngine.connect(player, to: playbackEngine.mainMixerNode, format: codec.pcmFormat)
-        } catch {
-            lastError = error.localizedDescription
-        }
-        player.volume = Float(monitorVolume)
+        configureAudioResources()
+        audioSessionInterruptionObserver = RadioLiteAudioInterruptionObserver(
+            notificationCenter: notificationCenter,
+            onStopCaptureAndTransmit: { [weak self] in
+                self?.handleAudioSessionInterruption()
+            },
+            onMediaServicesReset: { [weak self] in
+                self?.rebuildAudioResourcesAfterMediaServicesReset()
+            }
+        )
     }
 
     func setOpusBitrate(_ bitrate: Int) {
+        configuredOpusBitrate = bitrate
         do {
             try codec?.setBitrate(bitrate)
         } catch {
@@ -135,6 +250,7 @@ final class RadioLiteAudioEngine: ObservableObject {
     }
 
     func startMonitoring() throws {
+        audioSessionInterruptionObserver?.rearm()
         guard codec != nil else {
             throw RadioLiteAudioError.codecUnavailable(lastError ?? "系统 Opus 编解码器不可用")
         }
@@ -186,9 +302,14 @@ final class RadioLiteAudioEngine: ObservableObject {
             }
             scheduledBuffers += 1
             receivedPackets &+= 1
+            let resourceGeneration = playbackResourceGeneration
             player.scheduleBuffer(buffer) { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.scheduledBuffers = max(0, (self?.scheduledBuffers ?? 1) - 1)
+                    guard let self,
+                          self.playbackResourceGeneration == resourceGeneration else {
+                        return
+                    }
+                    self.scheduledBuffers = max(0, self.scheduledBuffers - 1)
                 }
             }
             if !playbackEngine.isRunning { try ensurePlaybackEngineStarted() }
@@ -209,6 +330,7 @@ final class RadioLiteAudioEngine: ObservableObject {
             packetHandler = onPacket
             return ownership
         }
+        armPTTInterruptionFailSafe()
         let ownership = captureEpochState.begin()
         guard await requestMicrophonePermission() else {
             _ = captureEpochState.stop(epoch: ownership.epoch)
@@ -266,17 +388,30 @@ final class RadioLiteAudioEngine: ObservableObject {
 
     /// Synchronous by design: release the hardware microphone before any network await.
     @discardableResult
-    func stopMicrophoneCapture(epoch: UInt64? = nil) -> Bool {
+    func stopMicrophoneCapture(
+        epoch: UInt64? = nil,
+        resumeMonitoringAfterCapture: Bool = true
+    ) -> Bool {
         let result = captureEpochState.stop(epoch: epoch)
         guard result == .stoppedActive else { return false }
         cleanupCaptureGraph()
 
-        if isMonitoring {
+        if resumeMonitoringAfterCapture, isMonitoring {
             resumePlaybackAfterCaptureIfNeeded()
         } else {
+            if !resumeMonitoringAfterCapture {
+                isMonitoring = false
+                player.stop()
+                scheduledBuffers = 0
+                playbackEngine.stop()
+            }
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
         return true
+    }
+
+    func armPTTInterruptionFailSafe() {
+        audioSessionInterruptionObserver?.rearm()
     }
 
     func stopAll() {
@@ -412,6 +547,58 @@ final class RadioLiteAudioEngine: ObservableObject {
             processingMode: microphoneProcessingMode,
             gain: microphoneGain
         ).save()
+    }
+
+    private func configureAudioResources() {
+        playbackEngine.attach(player)
+        do {
+            let codec = try RadioLiteOpusCodec(bitrate: configuredOpusBitrate)
+            self.codec = codec
+            playbackEngine.connect(
+                player,
+                to: playbackEngine.mainMixerNode,
+                format: codec.pcmFormat
+            )
+            lastError = nil
+        } catch {
+            codec = nil
+            lastError = error.localizedDescription
+        }
+        player.volume = Float(monitorVolume)
+    }
+
+    private func rebuildAudioResourcesAfterMediaServicesReset() {
+        // Apple invalidates every AVAudioEngine node and AudioConverter after
+        // a media-services reset. Release the orphaned graph and codec instead
+        // of attempting to restart them.
+        _ = captureEpochState.stop()
+        isMonitoring = false
+        isCapturingMicrophone = false
+        inputTapInstalled = false
+        packetHandler = nil
+        captureAccumulator.removeAll(keepingCapacity: true)
+        captureSampleRate = 48_000
+        microphoneTelemetryLimiter.reset()
+        microphoneLevel = 0
+        scheduledBuffers = 0
+        playbackResourceGeneration &+= 1
+        if playbackResourceGeneration == 0 { playbackResourceGeneration = 1 }
+        codec = nil
+        playbackEngine = AVAudioEngine()
+        captureEngine = AVAudioEngine()
+        player = AVAudioPlayerNode()
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        configureAudioResources()
+    }
+
+    private func handleAudioSessionInterruption() {
+        // Stop the hardware before asking the session to perform any
+        // asynchronous remote cleanup. Never restart capture on .ended.
+        _ = stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
+        onCaptureInterrupted?()
     }
 
     private func requestMicrophonePermission() async -> Bool {

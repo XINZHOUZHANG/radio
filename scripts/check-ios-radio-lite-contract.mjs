@@ -26,6 +26,10 @@ const rigControls = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteRi
 const spectrumAGC = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteSpectrumAGC.swift');
 const digitalSlotClock = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteDigitalSlotClock.swift');
 const rigControlsView = read('ios', 'TX5DRMobile', 'Features', 'RadioLite', 'RadioLiteRigControlsView.swift');
+const deviceConfiguration = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteDeviceConfiguration.swift');
+const deviceConfigurationView = read('ios', 'TX5DRMobile', 'Features', 'RadioLite', 'RadioLiteDeviceConfigurationView.swift');
+const hardwarePreflight = read('radio-lite-server', 'src', 'config', 'hardware-preflight.ts');
+const serverEntrypoint = read('radio-lite-server', 'src', 'index.ts');
 const frame = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteMediaFrame.swift');
 const socket = read('ios', 'TX5DRMobile', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
@@ -39,6 +43,7 @@ const httpPaths = [
   '/api/v1/session',
   '/api/v1/session/logout',
   '/api/v1/users',
+  '/api/v1/hardware/test',
   '/api/v1/pairing/code',
   '/api/v1/pairing/redeem',
   '/api/v1/device/refresh',
@@ -152,6 +157,34 @@ assert(audio.includes('stopMicrophoneCapture(epoch:'));
 assert(audio.includes('ownership: ownership'));
 assert(audio.includes('captureEpochState.isActive(ownership)'));
 assert(audio.includes('microphoneTelemetryLimiter.shouldPublish'));
+assert(audio.includes('AVAudioSession.interruptionNotification'));
+assert(audio.includes('AVAudioSession.mediaServicesWereLostNotification'));
+assert(audio.includes('AVAudioSession.mediaServicesWereResetNotification'));
+assert(audio.includes('RadioLiteAudioInterruptionPolicy.action'));
+assert(audio.includes('return type == .began ? .stopCaptureAndTransmit : .ignore'));
+assert(audio.includes('final class RadioLiteAudioInterruptionObserver'));
+assert(audio.includes('final class RadioLiteNotificationObservationBag'));
+assert(audio.includes('stopDeliveredForCurrentEpisode'));
+assert(!audio.includes('resetDeliveredForCurrentEpisode'));
+assert(audio.includes('interruptionType(for: notification) == .ended'));
+assert(audio.includes('func rearm()'));
+assert(/func startMonitoring\(\) throws \{\n\s*audioSessionInterruptionObserver\?\.rearm\(\)/u.test(audio));
+assert(audio.includes('resumeMonitoringAfterCapture: false'));
+assert(audio.includes('onCaptureInterrupted?()'));
+assert(audio.includes('onMediaServicesReset()'));
+assert(audio.includes('rebuildAudioResourcesAfterMediaServicesReset()'));
+assert(audio.includes('playbackEngine = AVAudioEngine()'));
+assert(audio.includes('captureEngine = AVAudioEngine()'));
+assert(audio.includes('player = AVAudioPlayerNode()'));
+assert(audio.includes('removeObserver(observer)'));
+assert(/private func handleAudioSessionInterruption\(\) \{[\s\S]*stopMicrophoneCapture\(resumeMonitoringAfterCapture: false\)[\s\S]*onCaptureInterrupted\?\(\)/u.test(audio));
+assert(/addObserver\([\s\S]*\) \{ \[weak self\] notification in/u.test(audio));
+assert(session.includes('audio.onCaptureInterrupted ='));
+assert(session.includes('endVoicePTT(reason: .audioInterruption)'));
+assert(/private func handleAudioSessionInterruption\(\) \{[\s\S]*suspendReceiveAudio\(\)[\s\S]*endVoicePTT\(reason: \.audioInterruption\)[\s\S]*endTuning\(\)/u.test(session));
+assert(session.includes('audio.armPTTInterruptionFailSafe()'));
+assert(operationEpoch.includes('case audioInterruption'));
+assert(operationEpoch.includes('case .connectionLoss, .audioInterruption: return false'));
 assert(models.includes('case dataUpper = "DATA-U"'));
 assert(models.includes('case dataLower = "DATA-L"'));
 assert(models.includes('case .dataUpper: "PKTUSB"'));
@@ -172,6 +205,33 @@ assert(receiveMonitoringPreference.includes('radioPageDidAppear()'));
 assert(spectrumAGC.includes('smoothingFactor'));
 assert(digitalSlotClock.includes('case "FT8"'));
 assert(digitalSlotClock.includes('case "FT4"'));
+assert(deviceConfiguration.includes('struct RadioLiteHardwarePreflightResult'));
+assert(deviceConfiguration.includes('let readOnly: Bool'));
+assert(deviceConfiguration.includes('struct RadioLiteHardwarePreflightOwnership'));
+assert(deviceConfiguration.includes('private let serverAddressSnapshot: String'));
+assert(deviceConfiguration.includes('private let userIdSnapshot: String?'));
+assert(http.includes('func testHardware('));
+assert(session.includes('func testRadioConfiguration('));
+assert(deviceConfigurationView.includes('测试 CAT 与音频端点'));
+assert(deviceConfigurationView.includes('guard !testingHardware else { return }'));
+assert(deviceConfigurationView.includes('serverAddress: session.serverAddress'));
+assert(deviceConfigurationView.includes('userId: session.principal?.userId'));
+assert(deviceConfigurationView.includes('guard ownership.isCurrent('));
+assert(deviceConfigurationView.includes('CAT 预检只发送读取查询'));
+assert(deviceConfigurationView.includes('不会发送 PTT、天调、频率或模式写命令'));
+assert(hardwarePreflight.includes('const READ_ONLY_COMMANDS'));
+for (const command of ['\\\\get_freq', '\\\\get_mode', '\\\\get_ptt', '\\\\get_func TUNER', '\\\\get_level ?', '\\\\get_func ?']) {
+  assert(hardwarePreflight.includes(`"${command}"`), `hardware preflight is missing ${command}`);
+}
+assert(!hardwarePreflight.includes('"\\\\set_ptt'));
+assert(!hardwarePreflight.includes('"\\\\set_func'));
+assert(!hardwarePreflight.includes('"\\\\set_freq'));
+assert(!hardwarePreflight.includes('"\\\\set_mode'));
+assert(protocol.includes('read-only CAT/capability/audio-endpoint preflight'));
+assert(protocol.includes('PTT forced to `None`'));
+assert(!serverEntrypoint.includes('finally(() => process.exit(0))'));
+assert(serverEntrypoint.includes('process.exit(1)'));
+assert(serverEntrypoint.includes('shutdown cleanup could not be confirmed'));
 
 process.stdout.write(
   `Verified ${httpPaths.length} HTTP paths, ${controlMessages.length} control messages, media messages, and the binary frame contract.\n`,

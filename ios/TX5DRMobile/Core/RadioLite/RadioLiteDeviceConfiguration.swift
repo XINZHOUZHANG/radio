@@ -78,6 +78,60 @@ struct RadioLiteHardwareDiscovery: Codable, Equatable, Sendable {
     }
 }
 
+enum RadioLiteHardwarePreflightStatus: String, Codable, Equatable, Sendable {
+    case passed
+    case warning
+    case failed
+}
+
+enum RadioLiteHardwarePreflightCheckID: String, Codable, Equatable, Hashable, Sendable {
+    case cat
+    case capabilities
+    case audioInput
+    case audioOutput
+}
+
+struct RadioLiteHardwarePreflightCheck: Codable, Identifiable, Equatable, Sendable {
+    let id: RadioLiteHardwarePreflightCheckID
+    let status: RadioLiteHardwarePreflightStatus
+    let message: String
+    let details: [String: String]
+}
+
+struct RadioLiteHardwarePreflightResult: Codable, Equatable, Sendable {
+    let profileId: String
+    let testedAtMs: Int64
+    let readOnly: Bool
+    let overallStatus: RadioLiteHardwarePreflightStatus
+    let checks: [RadioLiteHardwarePreflightCheck]
+}
+
+struct RadioLiteHardwarePreflightOwnership: Equatable, Sendable {
+    private let draftSnapshot: RadioLiteRadioConfigurationDraft
+    private let serverAddressSnapshot: String
+    private let userIdSnapshot: String?
+
+    init(draft: RadioLiteRadioConfigurationDraft, serverAddress: String, userId: String?) {
+        draftSnapshot = draft
+        serverAddressSnapshot = serverAddress
+        userIdSnapshot = userId
+    }
+
+    func makeProfile() throws -> RadioLiteRadioProfile {
+        try draftSnapshot.makeProfile()
+    }
+
+    func isCurrent(
+        _ draft: RadioLiteRadioConfigurationDraft,
+        serverAddress: String,
+        userId: String?
+    ) -> Bool {
+        draft == draftSnapshot
+            && serverAddress == serverAddressSnapshot
+            && userId == userIdSnapshot
+    }
+}
+
 enum RadioLiteConnectionKind: String, CaseIterable, Identifiable, Sendable {
     case managedSerial = "managed-serial"
     case networkRigctld = "network-rigctld"

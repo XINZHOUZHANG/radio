@@ -9,18 +9,28 @@ import { DeviceStore } from "../src/auth/device-store.ts";
 import { SessionStore } from "../src/auth/session-store.ts";
 import { UserStore } from "../src/auth/user-store.ts";
 import { DummyDigitalWorker } from "../src/digital/dummy-worker.ts";
+import {
+  HardwarePreflightCleanupUncertainError,
+  type HardwarePreflightResult,
+} from "../src/config/hardware-preflight.ts";
+import type { RadioProfile } from "../src/config/types.ts";
 import { parseAdif } from "../src/log/adif.ts";
 import { decodeMediaFrame, encodeMediaFrame, MediaKind } from "../src/media/frame.ts";
 import type { MediaPolicy } from "../src/media/adaptive-policy.ts";
 import type { MediaWorkerOutput } from "../src/media/media-hub.ts";
 import { RigModeError } from "../src/rig/hamlib-rig.ts";
-import { RadioRuntime, type RigControl } from "../src/rig/radio-runtime.ts";
+import {
+  RadioRuntime,
+  RadioRuntimeCleanupUncertainError,
+  type RigControl,
+} from "../src/rig/radio-runtime.ts";
 import { RadioLiteService } from "../src/server/radio-lite-service.ts";
 
 test("HTTP service completes setup, login, pairing and radio configuration", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "radio-lite-http-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   let userNumber = 0;
+  let deviceNumber = 0;
   let tokenNumber = 0;
   const codes = [123456, 654321];
   const now = () => 10_000;
@@ -30,7 +40,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   });
   const devices = new DeviceStore(join(directory, "devices.json"), {
     now,
-    idFactory: () => "device-1",
+    idFactory: () => `device-${++deviceNumber}`,
     tokenFactory: () => `device_${String(++tokenNumber).padStart(40, "0")}`,
   });
   const sessions = new SessionStore({
@@ -39,6 +49,22 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     csrfKey: Buffer.alloc(32, 5),
   });
   const rig = new ApiFakeRig();
+  let failRuntimeClose = false;
+  const cleanupPreflightStarted = deferred<void>();
+  const allowCleanupPreflightFailure = deferred<void>();
+  const testedProfiles: RadioProfile[] = [];
+  const hardwareTestResult: HardwarePreflightResult = {
+    profileId: "dummy",
+    testedAtMs: now(),
+    readOnly: true,
+    overallStatus: "passed",
+    checks: [
+      { id: "cat", status: "passed", message: "Dummy CAT readback is available", details: {} },
+      { id: "capabilities", status: "passed", message: "Dummy capabilities are available", details: {} },
+      { id: "audioInput", status: "passed", message: "Dummy input is available", details: {} },
+      { id: "audioOutput", status: "passed", message: "Dummy output is available", details: {} },
+    ],
+  };
   const microphonePackets: Buffer[] = [];
   const mediaPolicies: MediaPolicy[] = [];
   let mediaOutput: MediaWorkerOutput | undefined;
@@ -53,9 +79,27 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
       hmacKey: Buffer.alloc(32, 6),
     },
     runtimeFactory: async (profile) => {
-      const runtime = new RadioRuntime(profile, rig, async () => undefined, now);
+      const runtime = new RadioRuntime(profile, rig, async () => {
+        if (failRuntimeClose) {
+          throw new Error("test runtime cleanup remained uncertain");
+        }
+      }, now);
       await runtime.initialize();
       return runtime;
+    },
+    hardwarePreflight: {
+      test: async (profile) => {
+        testedProfiles.push(profile);
+        if (profile.id === "cleanup-uncertain") {
+          throw new HardwarePreflightCleanupUncertainError("test cleanup remained uncertain");
+        }
+        if (profile.id === "cleanup-inflight") {
+          cleanupPreflightStarted.resolve();
+          await allowCleanupPreflightFailure.promise;
+          throw new HardwarePreflightCleanupUncertainError("in-flight cleanup remained uncertain");
+        }
+        return hardwareTestResult;
+      },
     },
     mediaWorkerFactory: async (_profile, _radioSlot, output) => {
       mediaOutput = output;
@@ -71,7 +115,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     digitalWorkerFactory: () => new DummyDigitalWorker({ playbackDelayMs: 0 }),
   });
   const address = await service.listen();
-  context.after(() => service.close());
+  context.after(() => service.close().catch(() => undefined));
   const base = `http://127.0.0.1:${address.port}`;
 
   let response = await fetch(`${base}/healthz`);
@@ -104,6 +148,39 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(response.status, 200);
   assert.equal((await response.json()).user.username, "connor");
 
+  const dummyProfile: RadioProfile = {
+    id: "dummy",
+    name: "Safe Dummy",
+    hamlibModelId: 1,
+    connection: { kind: "hamlib-dummy" },
+    ptt: { method: "None" },
+    audioInput: { backend: "pulse", id: "dummy-input" },
+    audioOutput: { backend: "pulse", id: "dummy-output" },
+    station: { callsign: "BI1ABC", grid: "OM89" },
+    hardwareTxEnabled: false,
+  };
+  response = await postJson(`${base}/api/v1/hardware/test`, { profile: dummyProfile });
+  assert.equal(response.status, 401);
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: dummyProfile },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  const hardwareTestBody = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(hardwareTestBody));
+  assert.deepEqual(hardwareTestBody, hardwareTestResult);
+  assert.deepEqual(testedProfiles, [dummyProfile]);
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: { ...dummyProfile, connection: { kind: "network-rigctld", host: "127.0.0.1", port: 4_532 } } },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  assert.equal(response.status, 400);
+  assert.deepEqual(testedProfiles, [dummyProfile]);
+  response = await fetch(`${base}/api/v1/radios`, { headers: { Cookie: cookie! } });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).radios, []);
+
   response = await postJson(
     `${base}/api/v1/pairing/code`,
     { userId: initialized.user.id },
@@ -120,6 +197,49 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   const credentials = await response.json();
   assert.equal(credentials.deviceId, "device-1");
   assert.match(credentials.accessToken, /^device_/u);
+
+  const operator = await users.create({
+    username: "operator",
+    password: "operator-password",
+    role: "operator",
+    canTransmit: false,
+  });
+  const operatorDevice = await devices.pair(operator.id, "Operator iPhone");
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: dummyProfile },
+    {
+      Authorization: `Bearer ${operatorDevice.accessToken}`,
+      "X-Radio-Lite-Device-Id": operatorDevice.deviceId,
+    },
+  );
+  assert.equal(response.status, 403);
+  assert.deepEqual(testedProfiles, [dummyProfile]);
+
+  const uncertainCleanupProfile: RadioProfile = {
+    ...dummyProfile,
+    id: "cleanup-uncertain",
+    name: "Cleanup quarantine test",
+    hamlibModelId: 1049,
+    connection: { kind: "managed-serial", devicePath: "/dev/ttyUSB99", baudRate: 38_400 },
+    ptt: { method: "RIG" },
+  };
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: uncertainCleanupProfile },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, "hardware_cleanup_uncertain");
+  const callsAfterUncertainCleanup = testedProfiles.length;
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: uncertainCleanupProfile },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, "radio_device_busy");
+  assert.equal(testedProfiles.length, callsAfterUncertainCleanup);
 
   response = await postJson(
     `${base}/api/v1/radios`,
@@ -236,6 +356,17 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   let reply = await sendJsonAndReceive(webSocket, { t: "control.acquire", radioId: "main" });
   assert.equal(reply.t, "control.acquired");
   const controlToken = reply.controlToken;
+
+  const preflightCallsBeforeBusyCheck = testedProfiles.length;
+  response = await postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: savedRadio.radio },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  const busyPreflight = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(busyPreflight));
+  assert.equal(busyPreflight.error.code, "radio_device_busy");
+  assert.equal(testedProfiles.length, preflightCallsBeforeBusyCheck);
 
   rig.rejectedMode = "DATA-U";
   reply = await sendJsonAndReceive(webSocket, {
@@ -526,6 +657,35 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   await new Promise<void>((resolve) => mediaSocket.once("close", () => resolve()));
   await waitFor(() => rig.ptt === false);
   webSocket.close();
+
+  const inFlightCleanupProfile: RadioProfile = {
+    ...uncertainCleanupProfile,
+    id: "cleanup-inflight",
+    name: "In-flight cleanup shutdown test",
+    connection: { kind: "managed-serial", devicePath: "/dev/ttyUSB98", baudRate: 38_400 },
+  };
+  const inFlightPreflight = postJson(
+    `${base}/api/v1/hardware/test`,
+    { profile: inFlightCleanupProfile },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  await cleanupPreflightStarted.promise;
+  failRuntimeClose = true;
+  const closing = service.close();
+  let closeSettled = false;
+  void closing.then(
+    () => { closeSettled = true; },
+    () => { closeSettled = true; },
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closeSettled, false, "shutdown must drain an active hardware preflight");
+
+  allowCleanupPreflightFailure.resolve();
+  response = await inFlightPreflight;
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, "hardware_cleanup_uncertain");
+  await assert.rejects(closing, RadioRuntimeCleanupUncertainError);
+  await assert.rejects(fetch(`${base}/healthz`));
 });
 
 function postJson(
@@ -631,6 +791,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 class ApiFakeRig implements RigControl {

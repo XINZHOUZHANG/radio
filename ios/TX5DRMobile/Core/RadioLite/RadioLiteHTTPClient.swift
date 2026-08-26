@@ -166,6 +166,15 @@ final class RadioLiteHTTPClient: @unchecked Sendable {
         try await send(method: "GET", path: "/api/v1/hardware/discovery")
     }
 
+    func testHardware(_ profile: RadioLiteRadioProfile) async throws -> RadioLiteHardwarePreflightResult {
+        struct Body: Encodable { let profile: RadioLiteRadioProfile }
+        return try await send(
+            method: "POST",
+            path: "/api/v1/hardware/test",
+            body: Body(profile: profile)
+        )
+    }
+
     func upsertRadio(
         _ profile: RadioLiteRadioProfile,
         confirmHardwareTransmission: Bool

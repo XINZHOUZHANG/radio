@@ -16,9 +16,20 @@ if (service.setupCode !== null) {
 const address = await service.listen(port, host, allowInsecure);
 process.stdout.write(`Radio Lite listening on http://${address.host}:${address.port}\n`);
 
+let shutdownStarted = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void service.close().finally(() => process.exit(0));
+    if (shutdownStarted) {
+      return;
+    }
+    shutdownStarted = true;
+    void service.close().then(
+      () => process.exit(0),
+      () => {
+        process.stderr.write("Radio Lite shutdown cleanup could not be confirmed.\n");
+        process.exit(1);
+      },
+    );
   });
 }
 

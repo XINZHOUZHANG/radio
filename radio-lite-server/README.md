@@ -15,6 +15,8 @@ Implemented in the first milestone:
 - Argon2id passwords, browser sessions, CSRF, six-digit pairing and refresh
   token rotation/reuse revocation;
 - Hamlib catalog, serial/audio discovery and multi-radio profiles;
+- administrator-only, non-persistent hardware preflight using read-only CAT and
+  capability queries plus independent audio-endpoint discovery;
 - one control lease and one transmit interlock per radio;
 - persistent rigctld extended-response transport with authoritative read-back;
 - frequency, mode, voice/digital PTT and internal-tuner commands;
