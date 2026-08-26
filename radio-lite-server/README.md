@@ -1,8 +1,7 @@
 # Radio Lite Server
 
-Low-bandwidth, multi-radio control service for Debian 13. This directory is a
-new implementation and does not depend on TX-5DR or the historical Python
-prototype in `../server`.
+Low-bandwidth, multi-radio control service for Debian 13. This is the backend
+used by the native iOS client in `../ios/RadioLite/`.
 
 The control and storage core uses Node.js built-ins. Hamlib, ALSA/PulseAudio
 and Opus remain Debian services/tools. Runtime dependencies are the small `ws`

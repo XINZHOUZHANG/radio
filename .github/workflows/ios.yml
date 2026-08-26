@@ -1,4 +1,4 @@
-name: iOS native client
+name: Radio Lite iOS client
 
 on:
   push:
@@ -7,18 +7,14 @@ on:
       - codex/**
     paths:
       - ios/**
-      - docs/tx5dr/**
-      - scripts/check-ios-tx5dr-contract.mjs
+      - radio-lite-server/**
       - scripts/check-ios-radio-lite-contract.mjs
-      - scripts/tests/**
       - .github/workflows/ios.yml
   pull_request:
     paths:
       - ios/**
-      - docs/tx5dr/**
-      - scripts/check-ios-tx5dr-contract.mjs
+      - radio-lite-server/**
       - scripts/check-ios-radio-lite-contract.mjs
-      - scripts/tests/**
       - .github/workflows/ios.yml
   workflow_dispatch:
 
@@ -34,9 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - run: node --test scripts/tests/*.test.mjs
-      - run: node scripts/check-ios-tx5dr-contract.mjs
+          node-version: 24
       - run: node scripts/check-ios-radio-lite-contract.mjs
 
   xcode-build-and-test:
@@ -47,7 +41,7 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
-        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
+        run: xcodegen generate --spec ios/RadioLite/project.yml
       - name: Select an available iPhone simulator
         shell: bash
         run: |
@@ -70,8 +64,8 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild test \
-            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
-            -scheme TX5DRMobile \
+            -project ios/RadioLite/RadioLite.xcodeproj \
+            -scheme RadioLite \
             -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             CODE_SIGNING_ALLOWED=NO \
@@ -90,18 +84,18 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
-        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
+        run: xcodegen generate --spec ios/RadioLite/project.yml
       - name: Build unsigned iPhone application
         shell: bash
         run: |
           set -o pipefail
           xcodebuild build \
-            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
-            -scheme TX5DRMobile \
+            -project ios/RadioLite/RadioLite.xcodeproj \
+            -scheme RadioLite \
             -configuration Debug \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/TX5DRMobileDerivedData" \
+            -derivedDataPath "$RUNNER_TEMP/RadioLiteDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
@@ -111,8 +105,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$RUNNER_TEMP/TX5DRMobileDerivedData/Build/Products/Debug-iphoneos/TX5DRMobile.app"
-          PACKAGE_ROOT="$RUNNER_TEMP/TX5DRMobileUnsigned"
+          APP_PATH="$RUNNER_TEMP/RadioLiteDerivedData/Build/Products/Debug-iphoneos/RadioLite.app"
+          PACKAGE_ROOT="$RUNNER_TEMP/RadioLiteUnsigned"
           test -d "$APP_PATH"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "0.2.3"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "9"
@@ -122,7 +116,7 @@ jobs:
             exit 1
           fi
           mkdir -p "$PACKAGE_ROOT/Payload"
-          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/TX5DRMobile.app"
+          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/RadioLite.app"
           (
             cd "$PACKAGE_ROOT"
             /usr/bin/zip -qry "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" Payload

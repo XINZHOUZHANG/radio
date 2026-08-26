@@ -7,8 +7,8 @@
 
 ## 1. 目标
 
-Radio Lite Server 是一个独立于 TX-5DR 的低带宽远程电台服务端。它不重新实现
-无线电底层，而是把成熟组件组合成一个安全、可恢复、适合弱网的控制面：
+Radio Lite Server 是一个面向弱网的低带宽远程电台服务端。它不重新实现无线电
+底层，而是把成熟组件组合成一个安全、可恢复的控制面：
 
 - Hamlib `rigctld`：CAT、PTT、机内天调与不同电台机型；
 - `wsjtx-lib` 原生工作进程：FT8/FT4 解码、编码与时隙调度；
@@ -17,9 +17,8 @@ Radio Lite Server 是一个独立于 TX-5DR 的低带宽远程电台服务端。
 - FFT：低分辨率频谱；
 - ADIF：服务端通联日志。
 
-第一版不依赖 TX-5DR、不使用 SQLite、不支持外置天调，也不接 LoTW、eQSL、
-QRZ 或 Club Log。已有 TX-5DR 部署和 iOS 适配器在迁移完成前保留，便于对照和
-回退。
+第一版不使用 SQLite、不支持外置天调，也不接 LoTW、eQSL、QRZ 或 Club Log。
+服务端协议、iOS 客户端、部署数据和设备凭证均由 Radio Lite 自己管理。
 
 ## 2. 总体结构
 
@@ -219,12 +218,10 @@ Hamlib、ALSA/PulseAudio、Opus 和 DSP 动态库由 Debian 包管理器提供�
 包。升级使用版本目录加 `current` 符号链接；切换前备份配置和日志，健康检查失败时
 回滚旧版本。卸载程序不删除 `/var/lib/radio-lite`。
 
-## 11. iOS 迁移
+## 11. iOS 客户端
 
-连接配置增加协议类型 `TX-5DR` 与 `Radio Lite`。在 Radio Lite 完成真实设备验收前，
-现有 TX-5DR 配置、Keychain 凭证和功能保持不变。
-
-Radio Lite 适配器分阶段接入：
+原生 SwiftUI 客户端只连接 Radio Lite 协议，并使用独立 Bundle ID 与 Keychain
+凭证。客户端按以下功能边界组织：
 
 1. 配对、登录、发现和电台向导；
 2. CAT、控制权、PTT、机内天调；

@@ -1,23 +1,13 @@
 # Third-party notices
 
-## TX-5DR
-
-- Project: TX-5DR
-- Source: https://github.com/boybook/tx-5dr
-- Pinned commit: `f9e07fec6c5fb67b5c904936b5df03c1e3b0f5dc`
-- License: GNU General Public License version 3 (`GPL-3.0`)
-- Local modification: `deploy/tx5dr/patches/0001-mobile-six-digit-pairing.patch`
-
-The deployment script downloads the corresponding source tree and leaves it at
-`deploy/tx5dr/upstream/`, including TX-5DR's complete `LICENSE` file. The script
-then applies the tracked patch in the working tree and verifies that no other
-source differences are present before building the image.
+Radio Lite uses the following third-party components. Their licenses and
+copyright notices remain with the corresponding source or installed package.
 
 ## Hamlib
 
-The dummy deployment installs the Debian `libhamlib-utils` package and runs the
-Hamlib model 1 rigctld simulator. Hamlib license and copyright information is
-provided by the Debian package in the resulting container image.
+Radio Lite invokes the system-provided `rigctld` and `rigctl` utilities for
+radio discovery and control. Hamlib is installed separately on the Debian host;
+its package supplies the applicable license and copyright information.
 
 ## wsjtx-lib
 
@@ -25,12 +15,21 @@ provided by the Debian package in the resulting container image.
 - Source: https://github.com/boybook/wsjtx-lib-nodejs
 - License: GNU General Public License version 3 (`GPL-3.0`)
 
-The Radio Lite server pins this package exactly and uses its bundled platform
-prebuilds only inside an isolated child process for FT8/FT4 encoding and
-decoding. The installed package retains its complete `LICENSE` file.
+The server pins this package exactly and runs its native FT8/FT4 encoder and
+decoder in an isolated child process. The installed package includes its full
+`LICENSE` file.
 
-## PulseAudio
+## ws
 
-The dummy audio image installs Debian's PulseAudio packages and uses a null sink
-for loopback testing. PulseAudio license and copyright information is provided
-by the Debian packages in the resulting container image.
+- Package: `ws` version `8.21.3`
+- Source: https://github.com/websockets/ws
+- License: MIT
+
+The server pins this package exactly for its WebSocket transport. The installed
+package retains its license metadata.
+
+## Debian audio utilities
+
+Real audio capture, playback and Opus transport use separately installed ALSA,
+PulseAudio and `opus-tools` utilities. Their Debian packages provide the
+applicable license and copyright information.

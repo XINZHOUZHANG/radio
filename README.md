@@ -1,84 +1,71 @@
-# Remote Radio / Radio Lite
+# Radio Lite
 
-This repository is building **Radio Lite Server**, an independent low-bandwidth
-remote-radio backend for Debian 13, together with a native SwiftUI iOS client.
-It composes Hamlib, Opus, system audio and WSJT-X DSP instead of reimplementing
-radio hardware support. The existing TX-5DR deployment remains available as a
-compatibility reference and fallback while the iOS client migrates.
+Radio Lite is a self-contained low-bandwidth remote-radio system for Debian 13
+and iOS. The active stack consists of the TypeScript server in
+`radio-lite-server/` and the native SwiftUI client in `ios/RadioLite/`.
 
-## What is included
+The server composes established radio components instead of reimplementing the
+hardware layer:
 
-- `radio-lite-server/`: the new TypeScript service. Its first milestone includes
-  JSON account/device storage, Argon2id login, six-digit pairing, multi-radio
-  configuration and hardware discovery, authenticated control/media WebSockets,
-  Hamlib frequency/mode/PTT/internal-tuner control, per-radio controller leases,
-  transmit interlocks and disconnect fail-safe behavior;
-- `docs/design/2026-08-24-radio-lite-server.md`: approved architecture,
-  bandwidth targets, FT8/FT4, ADIF, deployment and iOS migration plan;
-- `deploy/tx5dr/`: reproducible Debian Docker deployment pinned to TX-5DR commit
-  `f9e07fec6c5fb67b5c904936b5df03c1e3b0f5dc`;
-- `deploy/tx5dr/patches/`: a reviewed server extension for single-use six-digit
-  iOS pairing codes;
-- `deploy/tx5dr/dummy-rig/`: Hamlib model 1 CAT/PTT/tuner simulator;
-- `deploy/tx5dr/dummy-audio/`: PulseAudio full-duplex loopback for real TX-5DR
-  audio, spectrum, FT8 and transmit-pipeline testing;
-- `ios/TX5DRMobile/`: native SwiftUI client for radio control, spectrum, FT8,
-  voice PTT/audio, CW, tuner, logbook, accounts and server settings;
-- `docs/tx5dr/contract.json`: extracted upstream HTTP/WebSocket/audio contract;
-- `scripts/check-ios-tx5dr-contract.mjs`: drift guard between the pinned TX-5DR
-  protocol and the iOS implementation.
+- Hamlib `rigctld` for CAT, PTT, internal tuner control and multiple radio models;
+- Opus and system audio for bidirectional voice;
+- WSJT-X DSP workers for FT8/FT4 decoding, encoding and automatic QSO flow;
+- compact binary spectrum frames designed for constrained links;
+- standard ADIF files for server-owned logging and worked-grid views.
 
-## Radio Lite local checks
+## Active components
 
-Radio Lite currently targets Node.js 24.7 or newer so it can use the built-in
-Argon2id implementation without shipping a native password module.
+- `radio-lite-server/`: accounts, six-digit pairing, device credentials,
+  multi-radio configuration, control leases, transmit interlocks, audio,
+  spectrum, FT8/FT4 automation and ADIF logging;
+- `ios/RadioLite/`: the Radio Lite SwiftUI application;
+- `ios/RadioLiteTests/`: focused client model, audio-policy and concurrency tests;
+- `radio-lite-server/PROTOCOL.md`: the HTTP, WebSocket and binary-media contract;
+- `docs/design/2026-08-24-radio-lite-server.md`: architecture and acceptance goals;
+- `scripts/check-ios-radio-lite-contract.mjs`: server/client contract drift check.
+
+The earlier Python control-plane experiment in `server/` and its static test UI
+in `web/` are retained for historical comparison. They are not used by the
+current iOS application or the TypeScript service.
+
+## Server checks
+
+Radio Lite Server requires Node.js 24.7 or newer.
 
 ```sh
 cd radio-lite-server
 npm install
-npm test
+npm run check
 ```
 
-Local loopback start:
+Run the server on loopback:
 
 ```sh
 RADIO_LITE_DATA_DIR=./data npm start
 ```
 
-Binding plaintext HTTP/WS beyond loopback is rejected unless the administrator
-explicitly sets `RADIO_LITE_ALLOW_INSECURE=1`; this switch is intended only for
-a trusted Tailscale or LAN test. Public deployment will use HTTPS/WSS.
+Plain HTTP/WS outside loopback is rejected unless the administrator explicitly
+sets `RADIO_LITE_ALLOW_INSECURE=1`. Use that override only on a trusted LAN or
+Tailscale network. Internet-facing deployments require HTTPS/WSS termination.
 
-## Debian dummy deployment
+## iOS checks
 
-Only deploy this checkout below `/opt/testradio`; the scripts refuse to prepare
-TX-5DR anywhere else.
-
-```sh
-cd /opt/testradio/deploy/tx5dr
-cp .env.example .env
-chmod +x prepare-upstream.sh start-dummy.sh
-./start-dummy.sh
-```
-
-The HTTP, HTTPS, realtime UDP, and optional rigctld bridge mappings explicitly
-bind to `0.0.0.0`. See `deploy/tx5dr/README.md` for ports, acceptance checks,
-hardware overrides and RF safety notes.
-
-## Local checks
+The cross-platform contract check runs without Xcode:
 
 ```sh
-node --test scripts/tests/*.test.mjs deploy/tx5dr/tests/*.test.mjs
-node scripts/check-ios-tx5dr-contract.mjs
+node scripts/check-ios-radio-lite-contract.mjs
 ```
 
-Generate and test the iOS project on macOS as described in `ios/README.md`.
+Generate and test the native project on macOS as described in `ios/README.md`.
+GitHub Actions builds the simulator tests and publishes an unsigned device IPA
+for branch pushes.
 
-## Upstream and licensing
+## Hardware safety
 
-TX-5DR is GPL-3.0 software. The deployment fetches the exact upstream commit,
-verifies its origin and applies the tracked pairing patch without hiding source
-changes. The TX-5DR-derived patch is distributed under GPL-3.0; retain upstream
-copyright and license notices when redistributing a built server image. See
-`THIRD_PARTY_NOTICES.md` for provenance. The separate legacy prototype and
-native client remain subject to the repository owner's licensing decision.
+Begin with Hamlib Dummy and synthetic audio. A real profile must pass the
+administrator's read-only CAT/audio preflight before it is saved, and hardware
+transmission remains disabled until the exact radio ID is explicitly confirmed.
+PTT, digital transmission and the internal tuner share one server-side interlock.
+
+Only deploy this checkout inside the directory you intend to manage. On the
+project's Debian test host, all deployment work is confined to `/opt/testradio`.
