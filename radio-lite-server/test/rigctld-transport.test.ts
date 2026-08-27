@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type Server, type Socket } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { Duplex } from "node:stream";
 import { test } from "node:test";
 
 import { encodeRigCommand, ExtendedResponseParser } from "../src/rig/extended-protocol.ts";
@@ -20,6 +21,19 @@ test("extended protocol parser handles fragmented fields and report framing", ()
   assert.equal(responses[0].report, 0);
   assert.deepEqual(encodeRigCommand("\\get_freq"), Buffer.from("|\\get_freq\n"));
   assert.throws(() => encodeRigCommand("\\get_freq\n\\set_ptt 1"), /one line/u);
+});
+
+test("unfinished ordinary request remains observable in DeferredSocket", async (context) => {
+  const fixture = deferredTransportFixture();
+  context.after(async () => fixture.transport.close());
+
+  const pending = fixture.transport.request("\\get_freq");
+  await fixture.socket.waitForPendingCommands(1);
+
+  assert.equal(fixture.socket.pendingCommands(), 1);
+  fixture.socket.reply("Frequency: 14074000");
+  assert.equal((await pending).fields.get("Frequency"), "14074000");
+  assert.equal(fixture.socket.pendingCommands(), 0);
 });
 
 test("persistent rigctld transport serializes commands and HamlibRig confirms read-back", async (context) => {
@@ -312,6 +326,75 @@ function responseValues(command: string, values: string[]) {
     fields: new Map<string, string>(),
     values,
     report: 0,
+  };
+}
+
+class DeferredSocket extends Duplex {
+  readonly #commands: string[] = [];
+  readonly #commandWaiters = new Set<() => void>();
+  #input = "";
+
+  pendingCommands(): number {
+    return this.#commands.length;
+  }
+
+  async waitForPendingCommands(count: number): Promise<void> {
+    while (this.#commands.length < count) {
+      await new Promise<void>((resolve) => this.#commandWaiters.add(resolve));
+    }
+  }
+
+  reply(...fields: string[]): void {
+    const command = this.#commands.shift();
+    if (command === undefined) {
+      throw new Error("DeferredSocket has no pending command to reply to");
+    }
+    const name = command.slice(1).split(" ")[0];
+    const body = fields.length === 0 ? "" : `${fields.join("|")}|`;
+    this.push(Buffer.from(`${name}:|${body}RPRT 0|\n`, "ascii"));
+  }
+
+  setNoDelay(_noDelay?: boolean): this {
+    return this;
+  }
+
+  override _read(): void {}
+
+  override _write(
+    chunk: Buffer | string,
+    encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.#input += Buffer.isBuffer(chunk) ? chunk.toString("ascii") : Buffer.from(chunk, encoding).toString("ascii");
+    while (this.#input.includes("\n")) {
+      const newline = this.#input.indexOf("\n");
+      const wire = this.#input.slice(0, newline);
+      this.#input = this.#input.slice(newline + 1);
+      this.#commands.push(wire.startsWith("|") ? wire.slice(1) : wire);
+      for (const resolve of this.#commandWaiters) resolve();
+      this.#commandWaiters.clear();
+    }
+    callback();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    callback();
+  }
+}
+
+function deferredTransportFixture(): {
+  transport: RigctldTransport;
+  socket: DeferredSocket;
+} {
+  const socket = new DeferredSocket();
+  const connect = (() => {
+    queueMicrotask(() => socket.emit("connect"));
+    return socket as unknown as Socket;
+  }) as typeof createConnection;
+  return {
+    socket,
+    transport: new RigctldTransport("deferred.test", 4_532, { connect }),
   };
 }
 

@@ -8,14 +8,12 @@ on:
     paths:
       - ios/**
       - radio-lite-server/**
-      - scripts/check-ios-radio-lite-contract.mjs
+      - web/**
+      - deploy/**
+      - scripts/**
+      - .node-version
       - .github/workflows/ios.yml
   pull_request:
-    paths:
-      - ios/**
-      - radio-lite-server/**
-      - scripts/check-ios-radio-lite-contract.mjs
-      - .github/workflows/ios.yml
   workflow_dispatch:
 
 concurrency:
@@ -23,6 +21,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  server-check:
+    name: server-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: radio-lite-server/package-lock.json
+      - run: npm --prefix radio-lite-server ci
+      - run: npm --prefix radio-lite-server run check
+
+  web-check:
+    name: web-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: npm --prefix web test
+
   protocol-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -30,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .node-version
       - run: node scripts/check-ios-radio-lite-contract.mjs
 
   xcode-build-and-test:
