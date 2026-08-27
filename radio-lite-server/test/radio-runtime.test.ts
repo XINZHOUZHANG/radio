@@ -369,6 +369,30 @@ test("runtime requires one control lease for writes and force takeover de-keys o
   await assert.rejects(runtime.stopTransmit("device-a", tx.leaseToken));
 });
 
+test("force takeover preserves a pre-existing unconfirmed dekey latch", async (context) => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(async () => {
+    rig.readPttOverride = false;
+    await runtime.close();
+  });
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const admin = user("admin", "admin", true);
+  const first = await runtime.acquireControl("device-a", operator);
+  const tx = await runtime.startTransmit("device-a", operator, first.lease.token, "voice");
+  rig.readPttOverride = true;
+  assert.deepEqual(await runtime.stopTransmitOutcome("device-a", tx.leaseToken), {
+    kind: "recoveryPending",
+    generation: 0,
+  });
+
+  const takeover = await runtime.acquireControl("device-admin", admin, true);
+
+  assert.equal(takeover.displacedOwnerId, "device-a");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, true);
+});
+
 test("runtime enforces account permission and explicit hardware TX switch", async (context) => {
   const rig = new FakeRig();
   const runtime = new RadioRuntime(profile(false), rig);

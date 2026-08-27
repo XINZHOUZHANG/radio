@@ -10,6 +10,7 @@ import { DigitalRadioController, type DigitalSlotScheduler } from "../src/digita
 import { DummyDigitalWorker } from "../src/digital/dummy-worker.ts";
 import { AdifLogStore } from "../src/log/adif-log-store.ts";
 import { RadioRuntime, type RigControl } from "../src/rig/radio-runtime.ts";
+import { InvalidLeaseError } from "../src/safety/transmit-interlock.ts";
 
 test("automatic digital controller uses the interlock and logs one completed FT8 QSO", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-controller-"));
@@ -207,6 +208,184 @@ test("digital worker failure during playback immediately de-keys and requeues th
   assert.ok(errors.includes("digital_worker_failed"));
 });
 
+test("confirmed upstream digital stop cleans local state without a second dekey", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-confirmed-stop-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000]);
+  const worker = new TrackingDummyDigitalWorker({ playbackDelayMs: 60_000 });
+  const errors: string[] = [];
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker,
+    logStore: log,
+    scheduler,
+    now: () => now,
+    onEvent: (event) => {
+      if (event.t === "digital.error") errors.push(event.code);
+    },
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+  let duplicateStops = 0;
+  runtime.stopTransmitOutcome = async () => {
+    duplicateStops += 1;
+    throw new Error("duplicate dekey should not run");
+  };
+
+  now = 45_000;
+  const firing = scheduler.fire();
+  await waitFor(() => rig.ptt);
+  assert.equal(await runtime.interlock.ownerDisconnected("connection:one"), true);
+  await controller.ownerStoppedWithProof("connection:one");
+  await firing;
+
+  assert.equal(rig.ptt, false);
+  assert.equal(duplicateStops, 0);
+  assert.equal(controller.qsoSnapshot(), null);
+  assert.equal(controller.queueSnapshot().entries.length, 0);
+  assert.equal(errors.includes("digital_ptt_off_failed"), false);
+});
+
+test("digital stop reports unconfirmed dekey rather than swallowing InvalidLease", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-invalid-lease-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000]);
+  const worker = new TrackingDummyDigitalWorker({ playbackDelayMs: 60_000 });
+  const errors: Array<{ code: string; message: string }> = [];
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker,
+    logStore: log,
+    scheduler,
+    now: () => now,
+    onEvent: (event) => {
+      if (event.t === "digital.error") errors.push({ code: event.code, message: event.message });
+    },
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+
+  runtime.stopTransmitOutcome = async () => {
+    throw new InvalidLeaseError("transmit lease expired before the caller stopped it");
+  };
+  now = 45_000;
+  const firing = scheduler.fire();
+  await waitFor(() => rig.ptt);
+  worker.injectFault(new Error("force automatic stop"));
+  await firing;
+  await waitFor(() => errors.some((event) => event.code === "digital_ptt_off_failed"));
+
+  assert.equal(rig.ptt, true, "an expired caller token is not evidence that physical PTT is off");
+  assert.equal(worker.stopCount > 0, true);
+  assert.match(
+    errors.find((event) => event.code === "digital_ptt_off_failed")?.message ?? "",
+    /expired before the caller stopped/u,
+  );
+});
+
+test("digital recoveryPending stop cannot record transmission or schedule another automatic QSO", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-pending-dekey-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000, 75_000]);
+  const worker = new TrackingDummyDigitalWorker({ playbackDelayMs: 0 });
+  const errors: string[] = [];
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker,
+    logStore: log,
+    scheduler,
+    now: () => now,
+    onEvent: (event) => {
+      if (event.t === "digital.error") errors.push(event.code);
+    },
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA2XYZ",
+      mode: "FT8",
+      audioFrequencyHz: 1_500,
+      txParity: "odd",
+    },
+  );
+  runtime.stopTransmitOutcome = async () => ({ kind: "recoveryPending", generation: 9 });
+
+  now = 45_000;
+  await scheduler.fire();
+
+  assert.equal(rig.ptt, true, "pending recovery is not physical PTT OFF evidence");
+  assert.equal(controller.qsoSnapshot(), null, "automatic QSO is terminated after unconfirmed OFF");
+  assert.equal(controller.queueSnapshot().entries.length, 1);
+  assert.equal(controller.queueSnapshot().entries[0]?.status, "queued");
+  assert.equal(log.count, 0, "an unconfirmed stop cannot be recorded as a completed transmission");
+  assert.equal(worker.stopCount > 0, true);
+  assert.ok(errors.includes("digital_ptt_off_failed"));
+  assert.ok(errors.includes("auto_qso_failed"));
+  await assert.rejects(scheduler.fire(), /no armed slot/u);
+});
+
 class ManualSlotScheduler implements DigitalSlotScheduler {
   readonly #slots: number[];
   #callback: ((slotStartMs: number) => void | Promise<void>) | null = null;
@@ -283,6 +462,15 @@ class DigitalFakeRig implements RigControl {
   async readControls() { return []; }
   async setControl(_id: string, _value: number): Promise<never> {
     throw new Error("digital controller test rig has no adjustable controls");
+  }
+}
+
+class TrackingDummyDigitalWorker extends DummyDigitalWorker {
+  stopCount = 0;
+
+  override async stopTransmission(): Promise<void> {
+    this.stopCount += 1;
+    await super.stopTransmission();
   }
 }
 

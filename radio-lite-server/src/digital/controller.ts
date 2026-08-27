@@ -4,7 +4,7 @@ import type { PublicUser } from "../auth/user-store.ts";
 import type { RadioProfile } from "../config/types.ts";
 import type { AdifLogStore, QsoLogRecord } from "../log/adif-log-store.ts";
 import type { RadioRuntime } from "../rig/radio-runtime.ts";
-import { InvalidLeaseError } from "../safety/transmit-interlock.ts";
+import type { DeKeyOutcome } from "../safety/dekey.ts";
 import { AutoQsoSession, type AutoQsoSnapshot } from "./auto-qso.ts";
 import {
   addDigitalCallFromDecode,
@@ -108,6 +108,7 @@ export class DigitalRadioController {
   #initialized = false;
   #closed = false;
   #workerFaulted = false;
+  #dekeyBlocked = false;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: DigitalRadioControllerOptions) {
@@ -294,13 +295,29 @@ export class DigitalRadioController {
   }
 
   ownerDisconnected(ownerId: string): Promise<void> {
+    return this.#ownerEnded(ownerId, false);
+  }
+
+  /** Cleanup-only path for a control takeover that already confirmed PTT OFF. */
+  ownerStoppedWithProof(ownerId: string): Promise<void> {
+    return this.#ownerEnded(ownerId, true);
+  }
+
+  #ownerEnded(ownerId: string, pttOffConfirmed: boolean): Promise<void> {
     return this.#serialize(async () => {
       const active = this.#queue.snapshot().entries.find((entry) => entry.status === "active");
       if (active?.ownerId === ownerId) {
-        await this.#stopCurrentSession("control connection disconnected", "keep");
+        await this.#stopCurrentSession(
+          "control connection disconnected",
+          "keep",
+          pttOffConfirmed,
+        );
       }
       for (const removed of this.#queue.clearOwner(ownerId)) {
         this.#contexts.delete(removed.id);
+      }
+      if (pttOffConfirmed) {
+        this.#dekeyBlocked = false;
       }
       this.#emitQueue();
       await this.#ensureActive();
@@ -317,7 +334,7 @@ export class DigitalRadioController {
     this.#session?.stop(this.#now());
     this.#activeTransmission?.abort.abort();
     await this.#worker.stopTransmission().catch(() => undefined);
-    await this.#dekeyActiveTransmission();
+    await this.#dekeyActiveTransmission().catch(() => undefined);
     await this.#worker.close();
   }
 
@@ -340,7 +357,7 @@ export class DigitalRadioController {
   }
 
   async #ensureActive(): Promise<void> {
-    if (this.#session !== null || this.#workerFaulted) {
+    if (this.#session !== null || this.#workerFaulted || this.#dekeyBlocked) {
       return;
     }
     await this.#activateEntry(this.#queue.activateNext());
@@ -377,7 +394,12 @@ export class DigitalRadioController {
   async #prepareNextTransmission(): Promise<void> {
     const session = this.#session;
     const snapshot = session?.snapshot();
-    if (session === null || snapshot === undefined || snapshot.outboundMessage === null) {
+    if (
+      session === null ||
+      snapshot === undefined ||
+      snapshot.outboundMessage === null ||
+      this.#dekeyBlocked
+    ) {
       return;
     }
     const generation = ++this.#preparedGeneration;
@@ -400,7 +422,8 @@ export class DigitalRadioController {
     if (
       generation !== this.#preparedGeneration ||
       latest?.queueEntryId !== snapshot.queueEntryId ||
-      latest.outboundMessage !== snapshot.outboundMessage
+      latest.outboundMessage !== snapshot.outboundMessage ||
+      this.#dekeyBlocked
     ) {
       return;
     }
@@ -432,7 +455,8 @@ export class DigitalRadioController {
       generation !== this.#preparedGeneration ||
       snapshot.queueEntryId !== queueEntryId ||
       snapshot.outboundMessage !== prepared.message ||
-      this.#activeTransmission !== null
+      this.#activeTransmission !== null ||
+      this.#dekeyBlocked
     ) {
       return;
     }
@@ -485,7 +509,10 @@ export class DigitalRadioController {
       if (heartbeatFailure !== null) {
         throw heartbeatFailure;
       }
-      await this.#dekeyActiveTransmission();
+      const dekey = await this.#dekeyActiveTransmission();
+      if (dekey?.kind !== "offConfirmed") {
+        throw dekeyOutcomeError(dekey);
+      }
       this.#lastTransmissionSlotMs = slotStartMs;
       const state = session.recordTransmission(slotStartMs, this.#now());
       this.#emitQso();
@@ -505,7 +532,7 @@ export class DigitalRadioController {
       }
     } catch (error) {
       await this.#worker.stopTransmission().catch(() => undefined);
-      await this.#dekeyActiveTransmission();
+      await this.#dekeyActiveTransmission().catch(() => undefined);
       const latest = this.#session?.snapshot();
       if (
         latest?.queueEntryId === queueEntryId &&
@@ -519,7 +546,7 @@ export class DigitalRadioController {
         clearInterval(heartbeatTimer);
       }
       if (transmitToken !== null && this.#activeTransmission?.transmitToken === transmitToken) {
-        await this.#dekeyActiveTransmission();
+        await this.#dekeyActiveTransmission().catch(() => undefined);
       }
       this.#onEvent({
         t: "digital.tx.stopped",
@@ -533,6 +560,7 @@ export class DigitalRadioController {
   async #stopCurrentSession(
     reason: string,
     disposition: "keep" | "requeue" | "remove",
+    pttOffConfirmed = false,
   ): Promise<AutoQsoSnapshot | null> {
     const session = this.#session;
     if (session === null) {
@@ -542,7 +570,11 @@ export class DigitalRadioController {
     this.#scheduler.cancel();
     this.#activeTransmission?.abort.abort();
     await this.#worker.stopTransmission().catch(() => undefined);
-    await this.#dekeyActiveTransmission();
+    if (pttOffConfirmed) {
+      this.#activeTransmission = null;
+    } else {
+      await this.#dekeyActiveTransmission().catch(() => undefined);
+    }
     const stopped = session.stop(this.#now());
     this.#emitQso();
     const entryId = stopped.queueEntryId;
@@ -587,7 +619,7 @@ export class DigitalRadioController {
     this.#scheduler.cancel();
     this.#activeTransmission?.abort.abort();
     await this.#worker.stopTransmission().catch(() => undefined);
-    await this.#dekeyActiveTransmission();
+    await this.#dekeyActiveTransmission().catch(() => undefined);
     const session = this.#session;
     if (session !== null) {
       session.workerFailed(errorMessage(error), this.#now());
@@ -599,19 +631,28 @@ export class DigitalRadioController {
     this.#emitError("digital_worker_failed", error);
   }
 
-  async #dekeyActiveTransmission(): Promise<void> {
+  async #dekeyActiveTransmission(): Promise<DeKeyOutcome | null> {
     const active = this.#activeTransmission;
     if (active === null) {
-      return;
+      return null;
     }
     this.#activeTransmission = null;
     try {
       const runtime = await this.#runtime();
-      await runtime.stopTransmit(active.ownerId, active.transmitToken);
-    } catch (error) {
-      if (!(error instanceof InvalidLeaseError)) {
-        this.#emitError("digital_ptt_off_failed", error);
+      const outcome = await runtime.stopTransmitOutcome(active.ownerId, active.transmitToken);
+      if (outcome.kind !== "offConfirmed") {
+        this.#dekeyBlocked = true;
+        this.#scheduler.cancel();
+        await this.#worker.stopTransmission().catch(() => undefined);
+        this.#emitError("digital_ptt_off_failed", dekeyOutcomeError(outcome));
       }
+      return outcome;
+    } catch (error) {
+      this.#dekeyBlocked = true;
+      this.#scheduler.cancel();
+      await this.#worker.stopTransmission().catch(() => undefined);
+      this.#emitError("digital_ptt_off_failed", error);
+      throw error;
     }
   }
 
@@ -705,4 +746,18 @@ function boundedInteger(value: unknown, field: string, minimum: number, maximum:
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function dekeyOutcomeError(outcome: Exclude<DeKeyOutcome, { kind: "offConfirmed" }> | null): Error {
+  if (outcome === null) {
+    return new Error("digital PTT OFF could not be attributed to an active transmission");
+  }
+  if (outcome.kind === "recoveryPending") {
+    return new Error(
+      `digital PTT OFF remains unconfirmed; recovery generation ${outcome.generation} is pending`,
+    );
+  }
+  return new Error(
+    `digital stop caller is not responsible for PTT state in generation ${outcome.generation}`,
+  );
 }

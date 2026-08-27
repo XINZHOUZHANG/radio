@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import type { PublicUser } from "../auth/user-store.ts";
 import type { RadioConfigFile, RadioProfile } from "../config/types.ts";
 import { ControlLeaseManager, type ControlAcquireResult } from "../control/control-lease.ts";
+import type { DeKeyOutcome } from "../safety/dekey.ts";
 import {
   TransmitInterlock,
   type TransmitDriver,
@@ -206,6 +207,10 @@ export class RadioRuntime {
 
   async stopTransmit(ownerId: string, transmitToken: string): Promise<void> {
     await this.interlock.stop(ownerId, transmitToken);
+  }
+
+  stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
+    return this.interlock.stopOutcome(ownerId, transmitToken);
   }
 
   async ownerDisconnected(ownerId: string): Promise<void> {

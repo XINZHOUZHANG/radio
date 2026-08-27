@@ -131,25 +131,22 @@ export class RadioLiteService {
       }),
       now: this.#now,
       stopVoiceTransmit: async ({ radioId, ownerId, transmitToken, reason }) => {
-        let stopped = false;
         try {
           const runtime = await this.#runtimes.get(radioId);
-          await runtime.stopTransmit(ownerId, transmitToken);
-          stopped = true;
-        } catch (error) {
-          if (!(error instanceof InvalidLeaseError)) {
-            await this.#audit.append({
-              occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "failure",
-              targetId: radioId, metadata: { reason },
-            }).catch(() => undefined);
-            return;
-          }
-        }
-        if (stopped) {
+          const outcome = await runtime.stopTransmitOutcome(ownerId, transmitToken);
           await this.#audit.append({
-            occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "success",
+            occurredAtMs: this.#now(), action: "radio.ptt-stop",
+            result: outcome.kind === "offConfirmed" ? "success" : "failure",
+            targetId: radioId,
+            metadata: { reason, outcome: outcome.kind, generation: outcome.generation },
+          }).catch(() => undefined);
+          return outcome;
+        } catch (error) {
+          await this.#audit.append({
+            occurredAtMs: this.#now(), action: "radio.ptt-stop", result: "failure",
             targetId: radioId, metadata: { reason },
           }).catch(() => undefined);
+          throw error;
         }
       },
     });
@@ -471,8 +468,8 @@ export class RadioLiteService {
       if (channel === "media") {
         void this.#media.disconnect(connectionOwnerId).catch(() => undefined);
       } else {
-        this.#media.revokeOwner(connectionOwnerId);
         void (async () => {
+          await this.#media.revokeOwner(connectionOwnerId).catch(() => undefined);
           await this.#digital.ownerDisconnected(connectionOwnerId).catch(() => undefined);
           await this.#runtimes.ownerDisconnected(connectionOwnerId).catch(() => undefined);
         })();
@@ -601,8 +598,15 @@ export class RadioLiteService {
         }
         const result = await runtime.acquireControl(ownerId, user, message.force === true);
         if (result.displacedOwnerId !== null) {
-          this.#media.revokeOwner(result.displacedOwnerId);
-          await this.#digital.ownerDisconnected(result.displacedOwnerId);
+          if (runtime.interlock.snapshot().dekeyRequired) {
+            await this.#media.revokeOwner(result.displacedOwnerId).catch(() => undefined);
+            await this.#digital.ownerDisconnected(result.displacedOwnerId)
+              .catch(() => undefined);
+          } else {
+            this.#media.ownerStoppedWithProof(result.displacedOwnerId);
+            await this.#digital.ownerStoppedWithProof(result.displacedOwnerId)
+              .catch(() => undefined);
+          }
         }
         sendWebSocketJson(webSocket, {
           t: "control.acquired",
@@ -628,12 +632,12 @@ export class RadioLiteService {
       }
       if (message.t === "control.release") {
         exactMessageKeys(message, ["t", "radioId", "controlToken"]);
-        await this.#digital.ownerDisconnected(ownerId);
+        await this.#media.revokeOwner(ownerId).catch(() => undefined);
+        await this.#digital.ownerDisconnected(ownerId).catch(() => undefined);
         await runtime.releaseControl(
           ownerId,
           messageText(message.controlToken, "controlToken", 128),
         );
-        this.#media.revokeOwner(ownerId);
         sendWebSocketJson(webSocket, { t: "control.released", radioId });
         return;
       }
@@ -834,16 +838,18 @@ export class RadioLiteService {
           );
         }
         const lease = await runtime.startTransmit(ownerId, user, controlToken(), message.mode);
-        this.#media.registerTransmit({
-          radioId,
-          ownerId,
-          principalId,
-          userId: user.id,
-          transmitToken: lease.leaseToken,
-          mode: message.mode,
-          heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
-          hardDeadlineMs: lease.hardDeadlineMs,
-        });
+        if (message.mode === "voice") {
+          this.#media.registerTransmit({
+            radioId,
+            ownerId,
+            principalId,
+            userId: user.id,
+            transmitToken: lease.leaseToken,
+            mode: message.mode,
+            heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
+            hardDeadlineMs: lease.hardDeadlineMs,
+          });
+        }
         await this.#audit.append({
           occurredAtMs: this.#now(), action: "radio.ptt-start", result: "success",
           actorUserId: user.id, targetId: radioId, metadata: { mode: message.mode },

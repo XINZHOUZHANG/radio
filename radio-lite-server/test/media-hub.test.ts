@@ -9,8 +9,10 @@ import {
   type MediaWorker,
   type MediaWorkerFactory,
   type MediaWorkerOutput,
+  type StopVoiceTransmitRequest,
 } from "../src/media/media-hub.ts";
 import { decodeSpectrumPayload } from "../src/media/spectrum-payload.ts";
+import type { DeKeyOutcome } from "../src/safety/dekey.ts";
 
 test("voice transmit token binds only to the matching authenticated principal", async (context) => {
   const fixture = createFixture();
@@ -71,6 +73,111 @@ test("media disconnect immediately de-keys its bound voice transmission", async 
     transmitToken: "tx-token",
     reason: "media_disconnected",
   }]);
+});
+
+test("media automatic stop reports ptt_stop_failed when recovery is not confirmed", async (context) => {
+  const fixture = createFixture(
+    () => 1_000,
+    3_000,
+    undefined,
+    async () => ({ kind: "recoveryPending", generation: 3 }),
+  );
+  context.after(() => fixture.hub.close());
+  const transport = fixture.connect("media-a", "device:a", "user-a");
+  await fixture.hub.subscribe("media-a", "main", true);
+  fixture.hub.registerTransmit({
+    radioId: "main",
+    ownerId: "control-a",
+    principalId: "device:a",
+    userId: "user-a",
+    transmitToken: "tx-token",
+    mode: "voice",
+    heartbeatDeadlineMs: 8_000,
+    hardDeadlineMs: 180_000,
+  });
+  await fixture.hub.bindUplink("media-a", "main", "tx-token");
+
+  await fixture.hub.disconnect("media-a");
+
+  assert.equal((transport.json.at(-1) as { code?: string } | undefined)?.code, "ptt_stop_failed");
+  assert.equal(
+    (transport.json.at(-1) as { message?: string } | undefined)?.message?.includes("generation 3"),
+    true,
+  );
+});
+
+test("media stop accepts recoveryPending without ending the safety event", async (context) => {
+  let resolveStop!: (outcome: DeKeyOutcome) => void;
+  const pendingStop = new Promise<DeKeyOutcome>((resolve) => { resolveStop = resolve; });
+  const fixture = createFixture(
+    () => 1_000,
+    3_000,
+    undefined,
+    async () => pendingStop,
+  );
+  context.after(() => fixture.hub.close());
+  const transport = fixture.connect("media-a", "device:a", "user-a");
+  await fixture.hub.subscribe("media-a", "main", true);
+  fixture.hub.registerTransmit({
+    radioId: "main",
+    ownerId: "control-a",
+    principalId: "device:a",
+    userId: "user-a",
+    transmitToken: "tx-token",
+    mode: "voice",
+    heartbeatDeadlineMs: 8_000,
+    hardDeadlineMs: 180_000,
+  });
+  await fixture.hub.bindUplink("media-a", "main", "tx-token");
+
+  const revoking = fixture.hub.revokeOwner("control-a");
+  const disconnecting = fixture.hub.disconnect("media-a");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fixture.stops.length, 1, "concurrent stop triggers share one callback");
+  assert.equal(transport.json.length, 0, "binding remains active until the stop outcome settles");
+  assert.throws(
+    () => fixture.hub.receiveUplink("media-a", uplinkFrame(0, 1, [1])),
+    /stop is pending/u,
+  );
+
+  resolveStop({ kind: "recoveryPending", generation: 7 });
+  await assert.doesNotReject(Promise.all([revoking, disconnecting]));
+  assert.equal((transport.json.at(-1) as { code?: string } | undefined)?.code, "ptt_stop_failed");
+  assert.equal(
+    transport.json.some((value) =>
+      (value as { t?: string }).t === "media.uplink.ended"
+    ),
+    false,
+    "media cleanup must not claim that the server safety latch recovered",
+  );
+});
+
+test("confirmed upstream stop cleans voice ownership without requesting a second dekey", async (context) => {
+  const fixture = createFixture();
+  context.after(() => fixture.hub.close());
+  const transport = fixture.connect("media-a", "device:a", "user-a");
+  await fixture.hub.subscribe("media-a", "main", true);
+  fixture.hub.registerTransmit({
+    radioId: "main",
+    ownerId: "control-a",
+    principalId: "device:a",
+    userId: "user-a",
+    transmitToken: "tx-token",
+    mode: "voice",
+    heartbeatDeadlineMs: 8_000,
+    hardDeadlineMs: 180_000,
+  });
+  await fixture.hub.bindUplink("media-a", "main", "tx-token");
+
+  fixture.hub.ownerStoppedWithProof("control-a");
+
+  assert.equal(fixture.stops.length, 0);
+  assert.deepEqual(transport.json.at(-1), {
+    t: "media.uplink.ended",
+    radioId: "main",
+    transmitToken: "tx-token",
+    reason: "transmit_ended",
+  });
 });
 
 test("voice PTT without a timely microphone binding is automatically de-keyed", async (context) => {
@@ -418,7 +525,12 @@ type FakeSpectrumCapability = {
 function createFixture(
   now: () => number = () => 1_000,
   uplinkBindTimeoutMs = 3_000,
-  spectrumCapability: FakeSpectrumCapability = {
+  spectrumCapability: FakeSpectrumCapability | undefined = undefined,
+  stopVoiceTransmit: (
+    request: StopVoiceTransmitRequest,
+  ) => Promise<DeKeyOutcome> = async () => ({ kind: "offConfirmed", generation: 1 }),
+) {
+  const normalizedSpectrumCapability: FakeSpectrumCapability = spectrumCapability ?? {
     available: true,
     source: "audio-fft",
     simulated: false,
@@ -426,13 +538,12 @@ function createFixture(
     maxBins: 512,
     maxFps: 5,
     spanHz: 8_000,
-  },
-) {
+  };
   let worker: FakeMediaWorker | undefined;
   let output: MediaWorkerOutput | undefined;
   const factory: MediaWorkerFactory = async (_profile, _radioSlot, sink) => {
     output = sink;
-    worker = new FakeMediaWorker(spectrumCapability);
+    worker = new FakeMediaWorker(normalizedSpectrumCapability);
     return worker;
   };
   const stops: Array<{
@@ -459,7 +570,10 @@ function createFixture(
     workerFactory: factory,
     now,
     uplinkBindTimeoutMs,
-    stopVoiceTransmit: async (request) => { stops.push(request); },
+    stopVoiceTransmit: async (request) => {
+      stops.push(request);
+      return stopVoiceTransmit(request);
+    },
   });
   const clients = new Map<string, FakeTransport>();
   return {

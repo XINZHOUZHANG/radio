@@ -106,6 +106,16 @@ export class DigitalRadioHub {
     }));
   }
 
+  async ownerStoppedWithProof(ownerId: string): Promise<void> {
+    await Promise.all([...this.#controllers.values()].map(async (controller) => {
+      try {
+        await (await controller).ownerStoppedWithProof(ownerId);
+      } catch {
+        // A confirmed hardware stop remains authoritative if local DSP cleanup fails.
+      }
+    }));
+  }
+
   async close(): Promise<void> {
     if (this.#closed) {
       return;

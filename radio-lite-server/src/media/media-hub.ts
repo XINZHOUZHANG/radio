@@ -1,4 +1,5 @@
 import type { RadioConfigFile, RadioProfile } from "../config/types.ts";
+import type { DeKeyOutcome } from "../safety/dekey.ts";
 import type { TransmitMode } from "../safety/transmit-interlock.ts";
 import { type MediaPolicy, AdaptiveMediaPolicy, type NetworkReport } from "./adaptive-policy.ts";
 import { encodeMediaFrame, MediaKind, type MediaFrame } from "./frame.ts";
@@ -82,7 +83,7 @@ export type StopVoiceTransmitRequest = {
   radioId: string;
   ownerId: string;
   transmitToken: string;
-  reason: "media_disconnected" | "media_unsubscribed" | "transmit_expired" | "uplink_bind_timeout" | "audio_uplink_failed" | "media_worker_failed" | "media_configuration_changed";
+  reason: "media_disconnected" | "media_unsubscribed" | "transmit_expired" | "uplink_bind_timeout" | "audio_uplink_failed" | "media_worker_failed" | "media_configuration_changed" | "control_owner_revoked";
 };
 
 export type RegisteredTransmit = {
@@ -99,7 +100,7 @@ export type RegisteredTransmit = {
 export type MediaHubOptions = {
   radios: () => RadioConfigFile;
   workerFactory: MediaWorkerFactory;
-  stopVoiceTransmit(request: StopVoiceTransmitRequest): Promise<void>;
+  stopVoiceTransmit(request: StopVoiceTransmitRequest): Promise<DeKeyOutcome>;
   now?: () => number;
   maxBufferedBytes?: number;
   uplinkBindTimeoutMs?: number;
@@ -131,6 +132,7 @@ type MediaClient = {
 type TransmitBinding = RegisteredTransmit & {
   boundClientId: string | null;
   bindTimer: ReturnType<typeof setTimeout> | null;
+  pendingStop: Promise<DeKeyOutcome> | null;
 };
 
 type WorkerEntry = {
@@ -153,7 +155,9 @@ const MAX_OPUS_PACKET_BYTES = 1_500;
 export class MediaHub {
   readonly #radios: () => RadioConfigFile;
   readonly #workerFactory: MediaWorkerFactory;
-  readonly #stopVoiceTransmit: (request: StopVoiceTransmitRequest) => Promise<void>;
+  readonly #stopVoiceTransmit: (
+    request: StopVoiceTransmitRequest,
+  ) => Promise<DeKeyOutcome>;
   readonly #now: () => number;
   readonly #maxBufferedBytes: number;
   readonly #uplinkBindTimeoutMs: number;
@@ -285,12 +289,17 @@ export class MediaHub {
     }
     validateDeadline(value.heartbeatDeadlineMs, "heartbeatDeadlineMs");
     validateDeadline(value.hardDeadlineMs, "hardDeadlineMs");
-    const transmit: TransmitBinding = { ...value, boundClientId: null, bindTimer: null };
+    const transmit: TransmitBinding = {
+      ...value,
+      boundClientId: null,
+      bindTimer: null,
+      pendingStop: null,
+    };
     if (value.mode === "voice") {
       const remaining = Math.max(1, value.heartbeatDeadlineMs - this.#now());
       transmit.bindTimer = setTimeout(() => {
         void this.#stopBoundTransmit(value.transmitToken, "uplink_bind_timeout")
-          .catch((error) => this.#notifyStopFailure(value.radioId, error));
+          .catch(() => undefined);
       }, Math.min(this.#uplinkBindTimeoutMs, remaining));
       transmit.bindTimer.unref();
     }
@@ -412,6 +421,9 @@ export class MediaHub {
     if (transmit === undefined || transmit.radioId !== radioId || transmit.mode !== "voice") {
       throw new Error("active voice transmit token is invalid");
     }
+    if (transmit.pendingStop !== null) {
+      throw new Error("voice transmit token is already stopping");
+    }
     if (transmit.principalId !== client.principalId || transmit.userId !== client.userId) {
       throw new Error("voice transmit and media must use the same authenticated principal");
     }
@@ -448,6 +460,9 @@ export class MediaHub {
     }
     const token = client.boundTransmitToken;
     const transmit = token === null ? undefined : this.#transmits.get(token);
+    if (transmit?.pendingStop !== null && transmit?.pendingStop !== undefined) {
+      throw new Error("voice PTT stop is pending; microphone uplink is disabled");
+    }
     if (
       token === null ||
       transmit === undefined ||
@@ -459,7 +474,7 @@ export class MediaHub {
     }
     if (this.#expired(transmit)) {
       void this.#stopBoundTransmit(token, "transmit_expired")
-        .catch((error) => this.#notifyStopFailure(transmit.radioId, error));
+        .catch(() => undefined);
       throw new Error("voice transmit token has expired");
     }
     if (
@@ -471,7 +486,7 @@ export class MediaHub {
     const worker = this.#workers.get(transmit.radioId)?.worker;
     if (worker === undefined) {
       void this.#stopBoundTransmit(token, "media_worker_failed")
-        .catch((error) => this.#notifyStopFailure(transmit.radioId, error));
+        .catch(() => undefined);
       throw new Error("media worker is unavailable");
     }
     client.lastUplinkSequence = frame.sequence;
@@ -479,7 +494,7 @@ export class MediaHub {
       return worker.writeAudioUplink(frame);
     } catch (error) {
       void this.#stopBoundTransmit(token, "audio_uplink_failed")
-        .catch((stopError) => this.#notifyStopFailure(transmit.radioId, stopError));
+        .catch(() => undefined);
       throw error;
     }
   }
@@ -508,10 +523,26 @@ export class MediaHub {
     }
   }
 
-  revokeOwner(ownerId: string): void {
+  async revokeOwner(ownerId: string): Promise<void> {
+    const active = [...this.#transmits.values()].filter(
+      (transmit) => transmit.ownerId === ownerId && transmit.mode === "voice",
+    );
+    await Promise.all(active.map((transmit) =>
+      this.#stopBoundTransmit(transmit.transmitToken, "control_owner_revoked")
+        .then(() => undefined)
+    ));
+  }
+
+  /** Remove voice bindings only after an upstream runtime confirmed physical PTT OFF. */
+  ownerStoppedWithProof(ownerId: string): void {
     for (const transmit of [...this.#transmits.values()]) {
-      if (transmit.ownerId === ownerId) {
-        this.endTransmit(transmit.transmitToken);
+      if (transmit.ownerId === ownerId && transmit.mode === "voice") {
+        try {
+          this.endTransmit(transmit.transmitToken);
+        } catch {
+          // The upstream physical OFF proof remains authoritative if the old
+          // media socket cannot receive its local binding cleanup notice.
+        }
       }
     }
   }
@@ -521,13 +552,16 @@ export class MediaHub {
     if (client === undefined) {
       return;
     }
-    this.#clients.delete(clientId);
     const radioId = client.radioId;
-    if (client.boundTransmitToken !== null) {
-      await this.#stopBoundTransmit(client.boundTransmitToken, "media_disconnected");
-    }
-    if (radioId !== null) {
-      this.#updateWorkerPolicy(radioId);
+    try {
+      if (client.boundTransmitToken !== null) {
+        await this.#stopBoundTransmit(client.boundTransmitToken, "media_disconnected");
+      }
+    } finally {
+      this.#clients.delete(clientId);
+      if (radioId !== null) {
+        this.#updateWorkerPolicy(radioId);
+      }
     }
   }
 
@@ -550,7 +584,7 @@ export class MediaHub {
       await this.#stopBoundTransmit(
         transmit.transmitToken,
         "media_configuration_changed",
-      ).catch((error) => this.#notifyStopFailure(radioId, error));
+      ).catch(() => undefined);
     }));
 
     const error = new Error("radio media configuration changed");
@@ -814,46 +848,72 @@ export class MediaHub {
     );
     await Promise.all(active.map(async (transmit) => {
       await this.#stopBoundTransmit(transmit.transmitToken, "media_worker_failed")
-        .catch((stopError) => this.#notifyStopFailure(radioId, stopError));
+        .catch(() => undefined);
     }));
     await worker?.worker.close().catch(() => undefined);
   }
 
-  #notifyStopFailure(radioId: string, error: unknown): void {
+  #notifyStopFailure(radioId: string, failure: unknown): void {
     for (const client of this.#subscribers(radioId)) {
-      client.transport.sendJson({
-        t: "media.error",
-        code: "ptt_stop_failed",
-        message: error instanceof Error ? error.message : "failed to confirm PTT off",
-      });
+      try {
+        client.transport.sendJson({
+          t: "media.error",
+          code: "ptt_stop_failed",
+          message: dekeyFailureMessage(failure),
+        });
+      } catch {
+        // Hardware recovery remains authoritative if a disconnected client
+        // cannot receive the advisory notification.
+      }
     }
   }
 
   async #stopBoundTransmit(
     transmitToken: string,
     reason: StopVoiceTransmitRequest["reason"],
-  ): Promise<void> {
+  ): Promise<DeKeyOutcome | undefined> {
     const transmit = this.#transmits.get(transmitToken);
     if (transmit === undefined) {
       return;
     }
-    this.#transmits.delete(transmitToken);
+    if (transmit.pendingStop !== null) {
+      return transmit.pendingStop;
+    }
     if (transmit.bindTimer !== null) {
       clearTimeout(transmit.bindTimer);
+      transmit.bindTimer = null;
     }
-    if (transmit.boundClientId !== null) {
-      const client = this.#clients.get(transmit.boundClientId);
-      if (client?.boundTransmitToken === transmitToken) {
-        client.boundTransmitToken = null;
-        client.lastUplinkSequence = null;
+
+    const pending = Promise.resolve().then(async (): Promise<DeKeyOutcome> => {
+      try {
+        const outcome = await this.#stopVoiceTransmit({
+          radioId: transmit.radioId,
+          ownerId: transmit.ownerId,
+          transmitToken,
+          reason,
+        });
+        if (outcome.kind !== "offConfirmed") {
+          this.#notifyStopFailure(transmit.radioId, outcome);
+        }
+        return outcome;
+      } catch (error) {
+        this.#notifyStopFailure(transmit.radioId, error);
+        throw error;
+      } finally {
+        if (this.#transmits.get(transmitToken) === transmit) {
+          this.#transmits.delete(transmitToken);
+          if (transmit.boundClientId !== null) {
+            const client = this.#clients.get(transmit.boundClientId);
+            if (client?.boundTransmitToken === transmitToken) {
+              client.boundTransmitToken = null;
+              client.lastUplinkSequence = null;
+            }
+          }
+        }
       }
-    }
-    await this.#stopVoiceTransmit({
-      radioId: transmit.radioId,
-      ownerId: transmit.ownerId,
-      transmitToken,
-      reason,
     });
+    transmit.pendingStop = pending;
+    return pending;
   }
 
   #expired(transmit: TransmitBinding): boolean {
@@ -884,6 +944,30 @@ function validateDeadline(value: number, field: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${field} must be a non-negative safe integer`);
   }
+}
+
+function dekeyFailureMessage(failure: unknown): string {
+  if (failure instanceof Error) {
+    return failure.message;
+  }
+  if (failure === undefined) {
+    return "runtime returned no physical PTT OFF confirmation";
+  }
+  if (
+    typeof failure === "object" &&
+    failure !== null &&
+    "kind" in failure &&
+    "generation" in failure
+  ) {
+    const outcome = failure as DeKeyOutcome;
+    if (outcome.kind === "recoveryPending") {
+      return `physical PTT OFF recovery remains pending (generation ${outcome.generation})`;
+    }
+    if (outcome.kind === "notResponsible") {
+      return `stop caller was not responsible for PTT state (generation ${outcome.generation})`;
+    }
+  }
+  return "failed to confirm physical PTT OFF";
 }
 
 function positiveInteger(value: number, field: string): number {

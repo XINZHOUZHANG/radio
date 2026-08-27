@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type {
   DeKeyAttempt,
   DeKeyMode,
+  DeKeyOutcome,
   DeKeyTransport,
 } from "./dekey.ts";
 
@@ -206,6 +207,44 @@ export class TransmitInterlock {
     if (!recovery.confirmed) {
       throw new DeKeyUnconfirmedError(recovery);
     }
+  }
+
+  /**
+   * Outcome-bearing stop adapter for automatic media and digital cleanup.
+   *
+   * A stale caller token is not physical OFF evidence. If another stop already
+   * owns an unresolved de-key episode, report that recovery as pending. If no
+   * latch remains, the caller is no longer responsible for the current radio
+   * state (for example, a concurrent stop already confirmed OFF).
+   */
+  async stopOutcome(ownerId: string, leaseToken: string): Promise<DeKeyOutcome> {
+    const prepared = await this.#serialize(async () => {
+      const lease = this.#lease;
+      if (
+        lease === null ||
+        lease.ownerId !== ownerId ||
+        lease.leaseToken !== leaseToken
+      ) {
+        return {
+          kind: "existing" as const,
+          outcome: {
+            kind: this.#dekeyRequired ? "recoveryPending" : "notResponsible",
+            generation: this.#recoveryGeneration,
+          } satisfies DeKeyOutcome,
+        };
+      }
+      return {
+        kind: "attempt" as const,
+        attempt: this.#beginDeKey("released by owner", lease.mode),
+      };
+    });
+    if (prepared.kind === "existing") {
+      return prepared.outcome;
+    }
+    const recovery = await this.#completeDeKey(prepared.attempt, this.#driver);
+    return recovery.confirmed
+      ? { kind: "offConfirmed", generation: recovery.generation }
+      : { kind: "recoveryPending", generation: recovery.generation };
   }
 
   async ownerDisconnected(ownerId: string): Promise<boolean> {

@@ -160,6 +160,52 @@ test("PTT OFF write without OFF readback retains the dekey latch", async () => {
   ]);
 });
 
+test("automatic stop outcomes carry physical OFF evidence from the exact recovery generation", async () => {
+  const driver = new RecordingDriver();
+  const interlock = new TransmitInterlock(driver, {
+    tokenFactory: () => "lease-outcome-confirmed",
+  });
+  interlock.advanceRecoveryGeneration(4);
+  const lease = await interlock.start("device-a", "voice");
+
+  assert.deepEqual(
+    await interlock.stopOutcome("device-a", lease.leaseToken),
+    { kind: "offConfirmed", generation: 4 },
+  );
+  assert.equal(interlock.snapshot().dekeyRequired, false);
+});
+
+test("automatic stop reports pending recovery and stale tokens cannot clear its latch", async () => {
+  const driver = new RecordingDriver();
+  driver.readPttValue = true;
+  const interlock = new TransmitInterlock(driver, {
+    tokenFactory: () => "lease-outcome-pending",
+  });
+  interlock.advanceRecoveryGeneration(5);
+  const lease = await interlock.start("device-a", "digital");
+
+  assert.deepEqual(
+    await interlock.stopOutcome("device-a", lease.leaseToken),
+    { kind: "recoveryPending", generation: 5 },
+  );
+  assert.deepEqual(
+    await interlock.stopOutcome("device-a", lease.leaseToken),
+    { kind: "recoveryPending", generation: 5 },
+  );
+  assert.equal(interlock.snapshot().dekeyRequired, true);
+
+  const recovery = new RecordingDriver();
+  interlock.advanceRecoveryGeneration(6);
+  assert.deepEqual(await interlock.attemptDeKey(recovery, 6), {
+    confirmed: true,
+    generation: 6,
+  });
+  assert.deepEqual(
+    await interlock.stopOutcome("device-a", lease.leaseToken),
+    { kind: "notResponsible", generation: 6 },
+  );
+});
+
 test("only same-generation OFF readback atomically recovers a latched interlock", async () => {
   const driver = new RecordingDriver();
   driver.readPttValue = true;
