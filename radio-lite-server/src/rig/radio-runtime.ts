@@ -4,7 +4,10 @@ import type { PublicUser } from "../auth/user-store.ts";
 import type { RadioConfigFile, RadioProfile } from "../config/types.ts";
 import { ControlLeaseManager, type ControlAcquireResult } from "../control/control-lease.ts";
 import type { DeKeyOutcome } from "../safety/dekey.ts";
+import { SafetyEventHub } from "../safety/safety-event-hub.ts";
 import {
+  DeKeyUnconfirmedError,
+  InvalidLeaseError,
   TransmitInterlock,
   type TransmitDriver,
   type TransmitLease,
@@ -18,6 +21,11 @@ import {
 } from "./hamlib-rig.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
+import {
+  RigRuntimeSupervisor,
+  RigRuntimeSupervisorCleanupUncertainError,
+  type ManagedRigctldExit,
+} from "./runtime-supervisor.ts";
 import { RigctldTransport, RigReportError } from "./transport.ts";
 
 export type RigControl = {
@@ -40,12 +48,21 @@ export class ManagedSerialDeviceBusyError extends Error {}
 export class RadioRuntimeRegistryClosedError extends Error {}
 export class RadioRuntimeCleanupUncertainError extends Error {}
 
+export type RadioRuntimeOptions = {
+  safetyEvents?: SafetyEventHub;
+  startManaged?: () => Promise<void>;
+  restartManaged?: (
+    recoveryGeneration: number,
+    exit: ManagedRigctldExit,
+  ) => Promise<void>;
+};
+
 export class RadioRuntime {
   readonly profile: RadioProfile;
   readonly control: ControlLeaseManager;
   readonly interlock: TransmitInterlock;
+  readonly supervisor: RigRuntimeSupervisor;
   readonly #rig: RigControl;
-  readonly #closeDependencies: () => Promise<void>;
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
   #tail: Promise<void> = Promise.resolve();
@@ -55,10 +72,10 @@ export class RadioRuntime {
     rig: RigControl,
     closeDependencies: () => Promise<void> = async () => undefined,
     now: () => number = Date.now,
+    options: RadioRuntimeOptions = {},
   ) {
     this.profile = profile;
     this.#rig = rig;
-    this.#closeDependencies = closeDependencies;
     this.control = new ControlLeaseManager({ now });
     const driver: TransmitDriver = {
       activate: async (mode) => {
@@ -81,15 +98,27 @@ export class RadioRuntime {
       },
     };
     this.interlock = new TransmitInterlock(driver, { now });
+    const safetyEvents = options.safetyEvents ?? new SafetyEventHub({
+      configuredRadioIds: () => [profile.id],
+    });
+    this.supervisor = new RigRuntimeSupervisor({
+      radioId: profile.id,
+      interlock: this.interlock,
+      safetyEvents,
+      recoveryTransport: () => driver,
+      startManaged: options.startManaged,
+      restartManaged: options.restartManaged,
+      closeManaged: closeDependencies,
+      now,
+    });
     this.#safetyTimer = setInterval(() => {
       void this.#checkSafety();
     }, 250);
-    this.#safetyTimer.unref();
   }
 
   async initialize(): Promise<void> {
     try {
-      await this.interlock.startupObserve();
+      await this.supervisor.startupObserve();
     } catch (error) {
       if (
         !this.profile.hardwareTxEnabled &&
@@ -122,7 +151,10 @@ export class RadioRuntime {
         force,
       });
       if (result.displacedOwnerId !== null) {
-        await this.interlock.ownerDisconnected(result.displacedOwnerId);
+        await this.supervisor.ownerDisconnected(
+          result.displacedOwnerId,
+          "control force takeover",
+        );
       }
       return result;
     });
@@ -135,8 +167,13 @@ export class RadioRuntime {
   async releaseControl(ownerId: string, token: string): Promise<boolean> {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, token);
-      await this.interlock.ownerDisconnected(ownerId);
-      return this.control.release(ownerId, token);
+      let released = false;
+      try {
+        await this.supervisor.ownerDisconnected(ownerId, "control released");
+      } finally {
+        released = this.control.release(ownerId, token);
+      }
+      return released;
     });
   }
 
@@ -164,7 +201,7 @@ export class RadioRuntime {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, controlToken);
       if (
-        this.interlock.snapshot().lease !== null &&
+        this.supervisor.snapshot().lease !== null &&
         isTransmitLockedRigControlId(controlId)
       ) {
         throw new RigControlTransmitLockedError(
@@ -182,17 +219,23 @@ export class RadioRuntime {
     mode: TransmitMode,
   ): Promise<TransmitLease> {
     return this.#serialize(async () => {
-      const controlLease = this.control.assertValid(ownerId, controlToken);
-      if (controlLease.userId !== user.id) {
-        throw new TransmitPermissionError("control lease belongs to a different account");
+      const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
+      const permit = await this.supervisor.reserveTransmitStart({
+        radioId: this.profile.id,
+        ownerId,
+        userId: user.id,
+        mode,
+        controlLeaseRevision: controlLease.acquiredAtMs,
+        profileRevision: 1,
+      });
+      try {
+        return await this.supervisor.commitTransmitStart(permit, () => {
+          this.#assertTransmitAdmission(ownerId, user, controlToken);
+        });
+      } catch (error) {
+        this.supervisor.abandonTransmitStart(permit, "transmit start failed");
+        throw error;
       }
-      if (!user.canTransmit) {
-        throw new TransmitPermissionError("account is not permitted to transmit");
-      }
-      if (!this.profile.hardwareTxEnabled && this.profile.hamlibModelId !== 1) {
-        throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
-      }
-      return this.interlock.start(ownerId, mode);
     });
   }
 
@@ -202,20 +245,35 @@ export class RadioRuntime {
     transmitToken: string,
   ): Promise<TransmitLease> {
     this.control.heartbeat(ownerId, controlToken);
-    return this.interlock.heartbeat(ownerId, transmitToken);
+    return this.supervisor.heartbeat(ownerId, transmitToken);
   }
 
   async stopTransmit(ownerId: string, transmitToken: string): Promise<void> {
-    await this.interlock.stop(ownerId, transmitToken);
+    const outcome = await this.supervisor.stop(ownerId, transmitToken, "released by owner");
+    if (outcome.kind === "offConfirmed") {
+      return;
+    }
+    if (outcome.kind === "recoveryPending") {
+      const fault = this.supervisor.snapshot().faultReason ?? "PTT OFF remains unconfirmed";
+      throw new DeKeyUnconfirmedError({
+        confirmed: false,
+        generation: outcome.generation,
+        reason: `${fault}; PTT OFF read-back remained ON or unavailable`,
+      });
+    }
+    throw new InvalidLeaseError("invalid transmit lease");
   }
 
   stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
-    return this.interlock.stopOutcome(ownerId, transmitToken);
+    return this.supervisor.stop(ownerId, transmitToken, "automatic transmit stop");
   }
 
   async ownerDisconnected(ownerId: string): Promise<void> {
-    await this.interlock.ownerDisconnected(ownerId);
-    this.control.release(ownerId);
+    try {
+      await this.supervisor.ownerDisconnected(ownerId, "control owner disconnected");
+    } finally {
+      this.control.release(ownerId);
+    }
   }
 
   async close(): Promise<void> {
@@ -225,21 +283,16 @@ export class RadioRuntime {
     }
     clearInterval(this.#safetyTimer);
     const closing = (async () => {
-      const failures: unknown[] = [];
       try {
-        await this.interlock.trip("radio runtime stopped");
+        await this.supervisor.close();
       } catch (error) {
-        failures.push(error);
-      }
-      try {
-        await this.#closeDependencies();
-      } catch (error) {
-        failures.push(error);
-      }
-      if (failures.length > 0) {
         throw new RadioRuntimeCleanupUncertainError(
           "radio de-key or dependency cleanup could not be confirmed",
-          { cause: new AggregateError(failures) },
+          {
+            cause: error instanceof RigRuntimeSupervisorCleanupUncertainError
+              ? error
+              : new AggregateError([error]),
+          },
         );
       }
     })();
@@ -248,12 +301,33 @@ export class RadioRuntime {
   }
 
   async #checkSafety(): Promise<void> {
-    await this.interlock.checkDeadlines().catch(() => undefined);
-    const transmitOwner = this.interlock.snapshot().lease?.ownerId;
+    await this.supervisor.checkDeadlines().catch(() => undefined);
+    const transmitOwner = this.supervisor.snapshot().lease?.ownerId;
     const controlOwner = this.control.snapshot()?.ownerId;
     if (transmitOwner !== undefined && transmitOwner !== controlOwner) {
-      await this.interlock.ownerDisconnected(transmitOwner).catch(() => undefined);
+      await this.supervisor.ownerDisconnected(
+        transmitOwner,
+        "transmit owner lost control authority",
+      ).catch(() => undefined);
     }
+  }
+
+  #assertTransmitAdmission(
+    ownerId: string,
+    user: PublicUser,
+    controlToken: string,
+  ) {
+    const controlLease = this.control.assertValid(ownerId, controlToken);
+    if (!user.enabled || controlLease.userId !== user.id) {
+      throw new TransmitPermissionError("control lease belongs to a disabled or different account");
+    }
+    if (!user.canTransmit) {
+      throw new TransmitPermissionError("account is not permitted to transmit");
+    }
+    if (!this.profile.hardwareTxEnabled && this.profile.hamlibModelId !== 1) {
+      throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
+    }
+    return controlLease;
   }
 
   #serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -281,6 +355,7 @@ type RuntimeSerialDeviceClaim = {
 };
 
 export class RadioRuntimeRegistry {
+  readonly safetyEvents: SafetyEventHub;
   readonly #profiles: () => RadioConfigFile;
   readonly #factory: RadioRuntimeFactory;
   readonly #resolveSerialDevice: ManagedSerialDeviceResolver;
@@ -294,11 +369,15 @@ export class RadioRuntimeRegistry {
 
   constructor(
     profiles: () => RadioConfigFile,
-    factory: RadioRuntimeFactory = createDefaultRadioRuntime,
+    factory?: RadioRuntimeFactory,
     resolveSerialDevice: ManagedSerialDeviceResolver = canonicalManagedSerialDevice,
   ) {
     this.#profiles = profiles;
-    this.#factory = factory;
+    this.safetyEvents = new SafetyEventHub({
+      configuredRadioIds: () => this.#profiles().radios.map((profile) => profile.id),
+    });
+    this.#factory = factory ?? ((profile, managedPort) =>
+      createDefaultRadioRuntime(profile, managedPort, this.safetyEvents));
     this.#resolveSerialDevice = resolveSerialDevice;
   }
 
@@ -587,26 +666,22 @@ function cleanupUncertainError(error: unknown, message: string): RadioRuntimeCle
 async function createDefaultRadioRuntime(
   profile: RadioProfile,
   managedPort: number,
+  safetyEvents: SafetyEventHub,
 ): Promise<RadioRuntime> {
   const target = rigctldTarget(profile, managedPort);
-  const managed = target.command === undefined ? null : new ManagedRigctldProcess(target.command);
-  if (managed !== null) {
-    try {
-      await managed.start();
-    } catch (error) {
-      try {
-        await managed.close();
-      } catch (cleanupError) {
-        throw new RadioRuntimeCleanupUncertainError(
-          "managed rigctld cleanup could not be confirmed after startup failure",
-          { cause: new AggregateError([error, cleanupError]) },
-        );
-      }
-      throw error;
-    }
-  }
   const transport = new RigctldTransport(target.host, target.port);
-  const runtime = new RadioRuntime(
+  let runtime: RadioRuntime | null = null;
+  const managed = target.command === undefined
+    ? null
+    : new ManagedRigctldProcess(target.command, {
+        onUnexpectedExit: (exit) => {
+          const activeRuntime = runtime;
+          if (activeRuntime !== null) {
+            void activeRuntime.supervisor.notifyManagedExit(exit).catch(() => undefined);
+          }
+        },
+      });
+  runtime = new RadioRuntime(
     profile,
     new HamlibRig(transport, {
       pttMethod: profile.ptt.method,
@@ -629,6 +704,12 @@ async function createDefaultRadioRuntime(
           { cause: new AggregateError(failures) },
         );
       }
+    },
+    Date.now,
+    {
+      safetyEvents,
+      startManaged: async () => { await managed?.start(); },
+      restartManaged: async () => { await managed?.start(); },
     },
   );
   try {

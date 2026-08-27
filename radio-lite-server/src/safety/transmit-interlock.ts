@@ -78,6 +78,7 @@ export class TransmitInterlock {
     generation: number;
     promise: Promise<DeKeyAttempt>;
   } | null = null;
+  #activation: ActivationRef | null = null;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(driver: TransmitDriver, options: TransmitInterlockOptions = {}) {
@@ -127,36 +128,93 @@ export class TransmitInterlock {
     return "advanced";
   }
 
+  /**
+   * Synchronously claim software responsibility for PTT OFF.
+   *
+   * This intentionally bypasses the async state tail: a CAT activation may be
+   * stuck while the managed link has already failed. The new latch invalidates
+   * that activation and lets a replacement transport perform OFF/read-back.
+   */
+  requireDeKey(reason: string, mode: TransmitMode | null = null): boolean {
+    if (!reason.trim()) {
+      throw new Error("fault reason is required");
+    }
+    const activeMode = this.#lease?.mode
+      ?? this.#activation?.mode
+      ?? this.#dekeyMode
+      ?? mode;
+    if (activeMode === null && !this.#dekeyRequired) {
+      return false;
+    }
+    this.#beginDeKey(reason, activeMode);
+    return true;
+  }
+
   async start(ownerId: string, mode: TransmitMode): Promise<TransmitLease> {
     if (!ownerId) {
       throw new Error("transmit owner is required");
     }
-    const outcome = await this.#serialize(async () => {
-      if (this.#state !== "idle" || this.#dekeyRequired) {
+    const activation = await this.#serialize(async () => {
+      if (this.#state !== "idle" || this.#dekeyRequired || this.#activation !== null) {
         throw new InterlockConflictError(`cannot start ${mode} while state is ${this.#state}`);
       }
       const now = this.#now();
       const leaseToken = this.#tokenFactory();
-      try {
-        await this.#driver.activate(mode);
-      } catch (error) {
+      const prepared: ActivationRef = {
+        lease: {
+          leaseToken,
+          ownerId,
+          mode,
+          startedAtMs: now,
+          heartbeatDeadlineMs: now + this.#heartbeatTimeoutMs,
+          hardDeadlineMs: now + this.#hardLimitsMs[mode],
+        },
+        mode,
+        cancelled: false,
+      };
+      this.#activation = prepared;
+      return prepared;
+    });
+
+    let activationError: unknown = null;
+    try {
+      await this.#driver.activate(mode);
+    } catch (error) {
+      activationError = error;
+    }
+
+    const outcome = await this.#serialize(async () => {
+      const activationCurrent = this.#activation === activation;
+      const activationCancelled = activation.cancelled;
+      if (activationCurrent) {
+        this.#activation = null;
+      }
+      if (
+        !activationCurrent ||
+        activationCancelled ||
+        this.#dekeyRequired ||
+        this.#state !== "idle"
+      ) {
         return {
-          kind: "activation_failed" as const,
-          error,
+          kind: "activation_cancelled" as const,
+          error: activationError,
           attempt: this.#beginDeKey(
-            `failed to start ${mode}: ${errorMessage(error)}`,
+            "transmit activation completed after it was cancelled",
             mode,
           ),
         };
       }
-      const lease: TransmitLease = {
-        leaseToken,
-        ownerId,
-        mode,
-        startedAtMs: now,
-        heartbeatDeadlineMs: now + this.#heartbeatTimeoutMs,
-        hardDeadlineMs: now + this.#hardLimitsMs[mode],
-      };
+      if (activationError !== null) {
+        return {
+          kind: "activation_failed" as const,
+          error: activationError,
+          attempt: this.#beginDeKey(
+            `failed to start ${mode}: ${errorMessage(activationError)}`,
+            mode,
+          ),
+        };
+      }
+      const lease = activation.lease;
       this.#state = mode;
       this.#lease = lease;
       this.#faultReason = null;
@@ -169,7 +227,10 @@ export class TransmitInterlock {
     if (!recovery.confirmed) {
       throw new DeKeyUnconfirmedError(recovery, { cause: outcome.error });
     }
-    throw outcome.error;
+    if (outcome.kind === "activation_failed") {
+      throw outcome.error;
+    }
+    throw new InterlockConflictError("transmit activation was cancelled");
   }
 
   async heartbeat(ownerId: string, leaseToken: string): Promise<TransmitLease> {
@@ -300,7 +361,7 @@ export class TransmitInterlock {
       throw new Error("fault reason is required");
     }
     const attempt = await this.#serialize(async () => {
-      const activeMode = this.#lease?.mode ?? this.#dekeyMode;
+      const activeMode = this.#lease?.mode ?? this.#activation?.mode ?? this.#dekeyMode;
       if (activeMode === null && !this.#dekeyRequired) {
         this.#state = "fault";
         this.#faultReason = reason;
@@ -428,6 +489,9 @@ export class TransmitInterlock {
       this.#dekeyMode = mode;
     }
     this.#state = "fault";
+    if (this.#activation !== null) {
+      this.#activation.cancelled = true;
+    }
     this.#lease = null;
     this.#faultReason = `${reason}; PTT OFF unconfirmed`;
     this.#latchRevision += 1;
@@ -475,6 +539,14 @@ export class TransmitInterlock {
       };
     }
 
+    if (this.#activation?.cancelled === true) {
+      return {
+        confirmed: false,
+        generation: ref.generation,
+        reason: "transmit activation cancellation is still pending",
+      };
+    }
+
     this.#state = "idle";
     this.#lease = null;
     this.#faultReason = null;
@@ -498,6 +570,12 @@ type DeKeyAttemptRef = {
   generation: number;
   mode: TransmitMode | null;
   reason: string;
+};
+
+type ActivationRef = {
+  lease: TransmitLease;
+  mode: TransmitMode;
+  cancelled: boolean;
 };
 
 type DeKeyStepFailure = {

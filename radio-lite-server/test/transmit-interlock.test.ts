@@ -18,12 +18,14 @@ class RecordingDriver implements TransmitDriver {
   readPttError: Error | null = null;
   readPttValue = false;
   readPttHandler: (() => Promise<boolean>) | null = null;
+  activateHandler: (() => Promise<void>) | null = null;
 
   async activate(mode: TransmitMode): Promise<void> {
     this.events.push(`on:${mode}`);
     if (this.failActivate !== null) {
       throw this.failActivate;
     }
+    await this.activateHandler?.();
   }
 
   async deactivate(mode: TransmitMode): Promise<void> {
@@ -472,6 +474,71 @@ test("replacement recovery can dekey while an old normal readback is stuck", asy
   assert.deepEqual(replacement.events, ["off:voice", "emergency-off", "read-ptt"]);
   oldRead.resolve(false);
   await assert.rejects(stopping, /episode|superseded/u);
+});
+
+test("replacement OFF cannot clear the latch before a cancelled activation settles", async () => {
+  const activationEntered = deferred<void>();
+  const beforeOn = deferred<void>();
+  const onWritten = deferred<void>();
+  const afterOn = deferred<void>();
+  let ptt = false;
+  const events: string[] = [];
+  const driver: TransmitDriver = {
+    async activate(mode) {
+      activationEntered.resolve();
+      await beforeOn.promise;
+      events.push(`on:${mode}`);
+      ptt = true;
+      onWritten.resolve();
+      await afterOn.promise;
+    },
+    async deactivate(mode) {
+      events.push(`off:${mode}`);
+      ptt = false;
+    },
+    async emergencyOff() {
+      events.push("emergency-off");
+      ptt = false;
+    },
+    async readPtt() {
+      events.push("read-ptt");
+      return ptt;
+    },
+  };
+  const interlock = new TransmitInterlock(driver, {
+    tokenFactory: () => "lease-stuck-activation",
+  });
+  const starting = interlock.start("device-a", "voice");
+  await activationEntered.promise;
+
+  interlock.requireDeKey("managed link exited", "voice");
+  interlock.advanceRecoveryGeneration(40);
+  const replacement = new RecordingDriver();
+  assert.deepEqual(await interlock.attemptDeKey(replacement, 40), {
+    confirmed: false,
+    generation: 40,
+    reason: "transmit activation cancellation is still pending",
+  });
+  assert.equal(interlock.snapshot().dekeyRequired, true);
+
+  // The cancelled CAT activation can still write ON after replacement OFF.
+  // Its fence must keep the latch set until activation settles and the
+  // original path performs another OFF plus real read-back.
+  beforeOn.resolve();
+  await onWritten.promise;
+  assert.equal(ptt, true);
+  assert.equal(interlock.snapshot().dekeyRequired, true);
+
+  afterOn.resolve();
+  await assert.rejects(starting, /cancelled|invalidated|superseded/u);
+  assert.equal(ptt, false);
+  assert.equal(interlock.snapshot().dekeyRequired, false);
+  assert.deepEqual(events, [
+    "on:voice",
+    "off:voice",
+    "emergency-off",
+    "read-ptt",
+  ]);
 });
 
 test("same-generation recovery attempts are single-flight", async () => {

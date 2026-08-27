@@ -384,7 +384,7 @@ test("force takeover preserves a pre-existing unconfirmed dekey latch", async (c
   rig.readPttOverride = true;
   assert.deepEqual(await runtime.stopTransmitOutcome("device-a", tx.leaseToken), {
     kind: "recoveryPending",
-    generation: 0,
+    generation: 1,
   });
 
   const takeover = await runtime.acquireControl("device-admin", admin, true);
