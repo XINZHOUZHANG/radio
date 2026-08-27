@@ -7,6 +7,8 @@ import { test } from "node:test";
 import type { PublicUser } from "../src/auth/user-store.ts";
 import { parseRadioProfile } from "../src/config/types.ts";
 import { ControlBusyError } from "../src/control/control-lease.ts";
+import type { RigResponse } from "../src/rig/extended-protocol.ts";
+import { HamlibRig } from "../src/rig/hamlib-rig.ts";
 import {
   HardwareTransmitDisabledError,
   ManagedSerialDeviceBusyError,
@@ -18,12 +20,14 @@ import {
   TransmitPermissionError,
   type RigControl,
 } from "../src/rig/radio-runtime.ts";
+import { RigReportError } from "../src/rig/transport.ts";
 
 class FakeRig implements RigControl {
   frequencyHz = 14_074_000;
   mode = "USB";
   passbandHz = 3_000;
   ptt = false;
+  readPttOverride: boolean | null = null;
   tuner = false;
   controls = new Map<string, number>([
     ["level:RFPOWER", 0.5],
@@ -34,7 +38,20 @@ class FakeRig implements RigControl {
   async readState() { return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
   async setFrequency(value: number) { this.frequencyHz = value; this.events.push(`frequency:${value}`); return value; }
   async setMode(value: string, passband = 0) { this.mode = value; this.passbandHz = passband || 2_400; this.events.push(`mode:${value}`); return { mode: this.mode, passbandHz: this.passbandHz }; }
-  async setPtt(value: boolean) { this.ptt = value; this.events.push(`ptt:${value}`); return value; }
+  async setPtt(value: boolean) {
+    await this.writePtt(value);
+    return this.readPtt();
+  }
+  async writePtt(value: boolean) { this.ptt = value; this.events.push(`ptt-write:${value}`); }
+  async readPtt() {
+    const observed = this.readPttOverride ?? this.ptt;
+    this.events.push(`ptt-read:${observed}`);
+    return observed;
+  }
+  async writeInternalTuner(value: boolean) {
+    this.tuner = value;
+    this.events.push(`tuner-write:${value}`);
+  }
   async setInternalTuner(value: boolean) { this.tuner = value; this.events.push(`tuner:${value}`); return value; }
   async readControls() {
     return [...this.controls].map(([id, value]) => ({
@@ -77,18 +94,262 @@ class DeferredControlRig extends FakeRig {
 
 class FailingDeKeyRig extends FakeRig {
   failDeKey = false;
+  failPttRead = false;
   deKeyAttempts = 0;
 
-  async setPtt(value: boolean) {
+  async writePtt(value: boolean) {
     if (!value) {
       this.deKeyAttempts += 1;
       if (this.failDeKey) {
+        this.events.push("ptt-write:false");
         throw new Error("PTT off failed");
       }
     }
-    return super.setPtt(value);
+    await super.writePtt(value);
+  }
+
+  async readPtt() {
+    if (this.failPttRead) {
+      this.events.push("ptt-read:error");
+      throw new Error("PTT read failed");
+    }
+    return super.readPtt();
   }
 }
+
+class RecordingHamlibRequester {
+  readonly commands: string[] = [];
+  ptt = false;
+  tuner = false;
+  pttUnavailable = false;
+
+  async request(command: string): Promise<RigResponse> {
+    this.commands.push(command);
+    const name = command.slice(1).split(" ")[0] ?? "unknown";
+    if (this.pttUnavailable && (name === "set_ptt" || name === "get_ptt")) {
+      throw new RigReportError(name, -11);
+    }
+    if (name === "set_ptt") {
+      this.ptt = command.endsWith(" 1");
+      return rigResponse(name);
+    }
+    if (name === "get_ptt") {
+      return rigResponse(name, { PTT: this.ptt ? "1" : "0" });
+    }
+    if (name === "set_func") {
+      this.tuner = command.endsWith(" 1");
+      return rigResponse(name);
+    }
+    if (name === "get_func") {
+      return rigResponse(name, { TUNER: this.tuner ? "1" : "0" });
+    }
+    throw new Error(`unexpected test CAT command: ${command}`);
+  }
+
+  clear(): void {
+    this.commands.length = 0;
+  }
+}
+
+test("runtime initialization observes PTT without writing OFF", async () => {
+  const rig = new FakeRig();
+  rig.ptt = true;
+  const runtime = new RadioRuntime(profile(true), rig);
+
+  await runtime.initialize();
+
+  assert.equal(rig.ptt, true);
+  assert.deepEqual(rig.events, ["ptt-read:true"]);
+  assert.equal(runtime.interlock.snapshot().state, "idle");
+  await runtime.close();
+  assert.deepEqual(rig.events, ["ptt-read:true"]);
+});
+
+test("startup observation failure closes dependencies without writing PTT OFF", async () => {
+  const rig = new FailingDeKeyRig();
+  rig.ptt = true;
+  rig.failPttRead = true;
+  let dependencyCloseCount = 0;
+  const runtime = new RadioRuntime(profile(true), rig, async () => {
+    dependencyCloseCount += 1;
+  });
+
+  await assert.rejects(runtime.initialize(), /PTT read failed/u);
+  await runtime.close();
+
+  assert.equal(dependencyCloseCount, 1);
+  assert.equal(rig.ptt, true);
+  assert.deepEqual(rig.events, ["ptt-read:error"]);
+});
+
+test("receive-only PTT None runtime starts without treating display cache as evidence", async () => {
+  const requester = new RecordingHamlibRequester();
+  requester.pttUnavailable = true;
+  const receiveOnlyProfile = {
+    ...profile(false),
+    ptt: { method: "None" as const },
+  };
+  const runtime = new RadioRuntime(
+    receiveOnlyProfile,
+    new HamlibRig(requester, { pttMethod: "None" }),
+  );
+
+  await runtime.initialize();
+
+  assert.deepEqual(requester.commands, ["\\get_ptt"]);
+  const operator = user("receive-only", "operator", true);
+  const control = await runtime.acquireControl("receive-device", operator);
+  await assert.rejects(
+    runtime.startTransmit("receive-device", operator, control.lease.token, "voice"),
+    HardwareTransmitDisabledError,
+  );
+  await runtime.close();
+  assert.deepEqual(requester.commands, ["\\get_ptt"]);
+});
+
+test("runtime voice dekey sends one OFF write and one strict PTT read", async () => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+  const transmit = await runtime.startTransmit(
+    "device-a",
+    operator,
+    control.lease.token,
+    "voice",
+  );
+  rig.events.length = 0;
+
+  await runtime.stopTransmit("device-a", transmit.leaseToken);
+
+  assert.deepEqual(rig.events, ["ptt-write:false", "ptt-read:false"]);
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
+  await runtime.close();
+});
+
+test("runtime transmit start retains PTT ON readback", async () => {
+  const requester = new RecordingHamlibRequester();
+  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+  requester.clear();
+
+  const transmit = await runtime.startTransmit(
+    "device-a",
+    operator,
+    control.lease.token,
+    "voice",
+  );
+
+  assert.deepEqual(requester.commands, ["\\set_ptt 1", "\\get_ptt"]);
+  await runtime.stopTransmit("device-a", transmit.leaseToken);
+  await runtime.close();
+});
+
+test("runtime voice and digital dekey use one OFF write and one strict PTT read", async () => {
+  for (const mode of ["voice", "digital"] as const) {
+    const requester = new RecordingHamlibRequester();
+    const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+    await runtime.initialize();
+    const operator = user(`operator-${mode}`, "operator", true);
+    const control = await runtime.acquireControl(`device-${mode}`, operator);
+    const transmit = await runtime.startTransmit(
+      `device-${mode}`,
+      operator,
+      control.lease.token,
+      mode,
+    );
+    requester.clear();
+
+    await runtime.stopTransmit(`device-${mode}`, transmit.leaseToken);
+
+    assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"], mode);
+    await runtime.close();
+  }
+});
+
+test("runtime tuning dekey uses tuner OFF, PTT OFF, and one strict PTT read", async () => {
+  const requester = new RecordingHamlibRequester();
+  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  await runtime.initialize();
+  const operator = user("tuner-operator", "operator", true);
+  const control = await runtime.acquireControl("device-tuner", operator);
+  const transmit = await runtime.startTransmit(
+    "device-tuner",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+  requester.clear();
+
+  await runtime.stopTransmit("device-tuner", transmit.leaseToken);
+
+  assert.deepEqual(requester.commands, [
+    "\\set_func TUNER 0",
+    "\\set_ptt 0",
+    "\\get_ptt",
+  ]);
+  await runtime.close();
+});
+
+test("PTT None command cache cannot clear a runtime dekey latch", async (context) => {
+  const requester = new RecordingHamlibRequester();
+  requester.pttUnavailable = true;
+  const runtime = new RadioRuntime(
+    profile(true),
+    new HamlibRig(requester, { pttMethod: "None" }),
+  );
+  context.after(() => runtime.close().catch(() => undefined));
+  const operator = user("ptt-none-operator", "operator", true);
+  const control = await runtime.acquireControl("device-ptt-none", operator);
+  const transmit = await runtime.startTransmit(
+    "device-ptt-none",
+    operator,
+    control.lease.token,
+    "voice",
+  );
+  requester.clear();
+
+  await assert.rejects(
+    runtime.stopTransmit("device-ptt-none", transmit.leaseToken),
+    /read-back|RPRT -11/u,
+  );
+
+  assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"]);
+  assert.equal(runtime.interlock.snapshot().state, "fault");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, true);
+});
+
+test("OFF write followed by ON readback retains the runtime dekey latch", async () => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+  const transmit = await runtime.startTransmit(
+    "device-a",
+    operator,
+    control.lease.token,
+    "voice",
+  );
+  rig.readPttOverride = true;
+  rig.events.length = 0;
+
+  try {
+    await assert.rejects(
+      runtime.stopTransmit("device-a", transmit.leaseToken),
+      /read-back.*ON/u,
+    );
+    assert.deepEqual(rig.events, ["ptt-write:false", "ptt-read:true"]);
+    assert.equal(runtime.interlock.snapshot().state, "fault");
+    assert.equal(runtime.interlock.snapshot().dekeyRequired, true);
+  } finally {
+    rig.readPttOverride = false;
+    await runtime.close();
+  }
+});
 
 test("runtime requires one control lease for writes and force takeover de-keys old owner", async (context) => {
   const rig = new FakeRig();
@@ -237,10 +498,11 @@ test("runtime de-keys immediately when an allowed control write is stalled", asy
 test("runtime close still cleans dependencies and reports an uncertain de-key", async () => {
   const rig = new FailingDeKeyRig();
   let dependencyCloseCount = 0;
-  const runtime = new RadioRuntime(rigProfile(false), rig, async () => {
+  const runtime = new RadioRuntime(rigProfile(true), rig, async () => {
     dependencyCloseCount += 1;
   });
   await runtime.initialize();
+  await runtime.interlock.start("cleanup-test", "voice");
   rig.failDeKey = true;
 
   await assert.rejects(runtime.close(), RadioRuntimeCleanupUncertainError);
@@ -477,6 +739,7 @@ test("runtime invalidation quarantines a serial device when de-key cannot be con
       const rig = new FailingDeKeyRig();
       const runtime = new RadioRuntime(runtimeProfile, rig);
       await runtime.initialize();
+      await runtime.interlock.start("cleanup-test", "voice");
       rig.failDeKey = true;
       return runtime;
     },
@@ -633,4 +896,16 @@ function deferred<T = void>(): {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function rigResponse(
+  command: string,
+  fields: Readonly<Record<string, string>> = {},
+): RigResponse {
+  return {
+    command,
+    fields: new Map(Object.entries(fields)),
+    values: [],
+    report: 0,
+  };
 }

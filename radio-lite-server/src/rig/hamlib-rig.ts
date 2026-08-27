@@ -143,7 +143,7 @@ export function isTransmitLockedRigControlId(id: string): boolean {
 export class HamlibRig {
   readonly #transport: RigRequester;
   readonly #unavailablePttIsSafe: boolean;
-  #lastCommandedPtt = false;
+  #lastCommandedPttForDisplayOnly = false;
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
 
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
@@ -155,7 +155,7 @@ export class HamlibRig {
     const [frequency, mode, ptt] = await Promise.all([
       this.#transport.request("\\get_freq"),
       this.#transport.request("\\get_mode"),
-      this.#readPtt(),
+      this.#readPttForDisplay(),
     ]);
     return {
       frequencyHz: integerField(frequency, "Frequency"),
@@ -252,34 +252,55 @@ export class HamlibRig {
   }
 
   async setPtt(enabled: boolean): Promise<boolean> {
-    if (typeof enabled !== "boolean") {
-      throw new Error("PTT state must be boolean");
-    }
-    try {
-      await this.#transport.request(`\\set_ptt ${enabled ? 1 : 0}`);
-    } catch (error) {
-      if (!this.#isUnavailablePtt(error)) {
-        throw error;
-      }
-      this.#lastCommandedPtt = enabled;
+    const commandAccepted = await this.#writePttCommand(enabled);
+    this.#lastCommandedPttForDisplayOnly = enabled;
+    if (!commandAccepted) {
       return enabled;
     }
-    this.#lastCommandedPtt = enabled;
-    const confirmed = await this.#readPtt();
+    const confirmed = await this.#readPttForDisplay();
     if (confirmed !== enabled) {
       throw new Error("PTT read-back mismatch");
     }
     return confirmed;
   }
 
-  async #readPtt(): Promise<boolean> {
+  /**
+   * Send a PTT command without claiming that the physical state changed.
+   * Safety callers must follow this with readPtt() in the same recovery attempt.
+   */
+  async writePtt(enabled: boolean): Promise<void> {
+    await this.#writePttCommand(enabled);
+    this.#lastCommandedPttForDisplayOnly = enabled;
+  }
+
+  /** Read physical PTT evidence directly from Hamlib; command cache is never evidence. */
+  async readPtt(): Promise<boolean> {
+    const confirmed = booleanField(await this.#transport.request("\\get_ptt"), "PTT");
+    this.#lastCommandedPttForDisplayOnly = confirmed;
+    return confirmed;
+  }
+
+  async #readPttForDisplay(): Promise<boolean> {
     try {
-      const confirmed = booleanField(await this.#transport.request("\\get_ptt"), "PTT");
-      this.#lastCommandedPtt = confirmed;
-      return confirmed;
+      return await this.readPtt();
     } catch (error) {
       if (this.#isUnavailablePtt(error)) {
-        return this.#lastCommandedPtt;
+        return this.#lastCommandedPttForDisplayOnly;
+      }
+      throw error;
+    }
+  }
+
+  async #writePttCommand(enabled: boolean): Promise<boolean> {
+    if (typeof enabled !== "boolean") {
+      throw new Error("PTT state must be boolean");
+    }
+    try {
+      await this.#transport.request(`\\set_ptt ${enabled ? 1 : 0}`);
+      return true;
+    } catch (error) {
+      if (this.#isUnavailablePtt(error)) {
+        return false;
       }
       throw error;
     }
@@ -292,10 +313,7 @@ export class HamlibRig {
   }
 
   async setInternalTuner(enabled: boolean): Promise<boolean> {
-    if (typeof enabled !== "boolean") {
-      throw new Error("tuner state must be boolean");
-    }
-    await this.#transport.request(`\\set_func TUNER ${enabled ? 1 : 0}`);
+    await this.writeInternalTuner(enabled);
     const response = await this.#transport.request("\\get_func TUNER");
     const raw = response.values[0] ?? response.fields.get("TUNER");
     if (raw !== "0" && raw !== "1") {
@@ -306,6 +324,14 @@ export class HamlibRig {
       throw new Error("tuner read-back mismatch");
     }
     return confirmed;
+  }
+
+  /** Send a tuner command without adding a read-back CAT round trip. */
+  async writeInternalTuner(enabled: boolean): Promise<void> {
+    if (typeof enabled !== "boolean") {
+      throw new Error("tuner state must be boolean");
+    }
+    await this.#transport.request(`\\set_func TUNER ${enabled ? 1 : 0}`);
   }
 
   async #discoverControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {

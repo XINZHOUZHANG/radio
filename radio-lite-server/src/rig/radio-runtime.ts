@@ -17,7 +17,7 @@ import {
 } from "./hamlib-rig.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
-import { RigctldTransport } from "./transport.ts";
+import { RigctldTransport, RigReportError } from "./transport.ts";
 
 export type RigControl = {
   readState(): Promise<HamlibRigState>;
@@ -26,6 +26,9 @@ export type RigControl = {
   setMode(mode: string, passbandHz?: number): Promise<{ mode: string; passbandHz: number }>;
   setControl(id: string, value: number): Promise<HamlibRigControl>;
   setPtt(enabled: boolean): Promise<boolean>;
+  writePtt(enabled: boolean): Promise<void>;
+  readPtt(): Promise<boolean>;
+  writeInternalTuner(enabled: boolean): Promise<void>;
   setInternalTuner(enabled: boolean): Promise<boolean>;
 };
 
@@ -66,12 +69,14 @@ export class RadioRuntime {
       },
       deactivate: async (mode) => {
         if (mode === "tuning") {
-          await this.#rig.setInternalTuner(false);
+          await this.#rig.writeInternalTuner(false);
         }
-        await this.#rig.setPtt(false);
       },
       emergencyOff: async () => {
-        await this.#rig.setPtt(false);
+        await this.#rig.writePtt(false);
+      },
+      readPtt: async () => {
+        return this.#rig.readPtt();
       },
     };
     this.interlock = new TransmitInterlock(driver, { now });
@@ -82,7 +87,19 @@ export class RadioRuntime {
   }
 
   async initialize(): Promise<void> {
-    await this.interlock.startupSafe();
+    try {
+      await this.interlock.startupObserve();
+    } catch (error) {
+      if (
+        !this.profile.hardwareTxEnabled &&
+        this.profile.ptt.method === "None" &&
+        error instanceof RigReportError &&
+        error.report === -11
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 
   readState(): Promise<HamlibRigState> {

@@ -95,10 +95,9 @@ test("automatic digital controller uses the interlock and logs one completed FT8
   assert.equal(log.list()[0].source, "FT8_AUTO");
   assert.equal(log.list()[0].call, "JA1ABC");
   assert.deepEqual(rig.pttEvents, [
-    false,
-    true, false, false,
-    true, false, false,
-    true, false, false,
+    true, false,
+    true, false,
+    true, false,
   ]);
   assert.equal(events.filter((event) => event === "digital.log.created").length, 1);
 });
@@ -274,6 +273,12 @@ class DigitalFakeRig implements RigControl {
     this.pttEvents.push(value);
     return value;
   }
+  async writePtt(value: boolean) {
+    this.ptt = value;
+    this.pttEvents.push(value);
+  }
+  async readPtt() { return this.ptt; }
+  async writeInternalTuner(_value: boolean) {}
   async setInternalTuner(_value: boolean) { return true; }
   async readControls() { return []; }
   async setControl(_id: string, _value: number): Promise<never> {

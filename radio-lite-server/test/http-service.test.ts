@@ -834,6 +834,9 @@ class ApiFakeRig implements RigControl {
     return { mode: this.mode, passbandHz: this.passbandHz };
   }
   async setPtt(value: boolean) { this.ptt = value; return value; }
+  async writePtt(value: boolean) { this.ptt = value; }
+  async readPtt() { return this.ptt; }
+  async writeInternalTuner(value: boolean) { this.tuner = value; }
   async setInternalTuner(value: boolean) { this.tuner = value; return value; }
   async readControls() {
     return [...this.controls].map(([id, value]) => ({

@@ -138,6 +138,81 @@ test("PTT None caches commanded state when Hamlib rejects get_ptt and set_ptt", 
   assert.ok(commands.includes("\\set_ptt 1"));
 });
 
+test("strict PTT read never falls back to the PTT None command cache", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_freq") return response("get_freq", { Frequency: "14074000" });
+      if (command === "\\get_mode") return response("get_mode", { Mode: "USB", Passband: "3000" });
+      throw new RigReportError(command.slice(1).split(" ")[0], -11);
+    },
+  }, { pttMethod: "None" });
+
+  assert.equal(await rig.setPtt(true), true);
+  assert.equal(await rig.setPtt(false), false);
+  assert.equal((await rig.readState()).ptt, false, "display state keeps compatibility cache");
+  await assert.rejects(rig.readPtt(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -11,
+  );
+  assert.equal(commands.at(-1), "\\get_ptt");
+});
+
+test("PTT OFF command is not physical OFF evidence", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.writePtt(false);
+  assert.deepEqual(commands, ["\\set_ptt 0"]);
+});
+
+test("raw PTT write plus strict read uses exactly two CAT commands", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_ptt") return response("get_ptt", { PTT: "0" });
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.writePtt(false);
+  assert.equal(await rig.readPtt(), false);
+  assert.deepEqual(commands, ["\\set_ptt 0", "\\get_ptt"]);
+});
+
+test("raw internal tuner write sends exactly one CAT command", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.writeInternalTuner(false);
+  assert.deepEqual(commands, ["\\set_func TUNER 0"]);
+});
+
+test("ordinary internal tuner setter retains read-back confirmation", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\get_func TUNER") return responseValues("get_func", ["1"]);
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  assert.equal(await rig.setInternalTuner(true), true);
+  assert.deepEqual(commands, ["\\set_func TUNER 1", "\\get_func TUNER"]);
+});
+
 test("real rigs still surface unavailable PTT read-back from Hamlib", async () => {
   const rig = new HamlibRig({
     request: async (command: string) => {
@@ -147,6 +222,9 @@ test("real rigs still surface unavailable PTT read-back from Hamlib", async () =
     },
   }, { pttMethod: "RIG" });
   await assert.rejects(rig.readState(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -11,
+  );
+  await assert.rejects(rig.readPtt(), (error: unknown) =>
     error instanceof RigReportError && error.report === -11,
   );
   await assert.rejects(rig.setPtt(true), (error: unknown) =>
