@@ -9,7 +9,12 @@ import {
   normalizeHamlibMode,
   RigModeError,
 } from "../src/rig/hamlib-rig.ts";
-import { RigctldTransport, RigReportError } from "../src/rig/transport.ts";
+import {
+  RigctldTransport,
+  RigQueueBusyError,
+  RigReportError,
+  RigTelemetryDroppedError,
+} from "../src/rig/transport.ts";
 
 test("extended protocol parser handles fragmented fields and report framing", () => {
   const parser = new ExtendedResponseParser();
@@ -34,6 +39,87 @@ test("unfinished ordinary request remains observable in DeferredSocket", async (
   fixture.socket.reply("Frequency: 14074000");
   assert.equal((await pending).fields.get("Frequency"), "14074000");
   assert.equal(fixture.socket.pendingCommands(), 0);
+});
+
+test("safety OFF runs before queued telemetry while preserving normal FIFO", async (context) => {
+  const fixture = deferredTransportFixture();
+  context.after(async () => fixture.transport.close());
+
+  const ordinary = fixture.transport.request("\\get_freq", { source: "telemetry" });
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  const queued = fixture.transport.request("\\get_mode", { source: "telemetry" });
+  const off = fixture.transport.request("\\set_ptt 0", {
+    priority: "safety",
+    source: "ptt-off",
+  });
+
+  fixture.socket.replyActive("Frequency: 14074000");
+  await ordinary;
+  await fixture.socket.waitForWrite("\\set_ptt 0\n");
+  assert.equal(fixture.socket.writes.at(-1), "\\set_ptt 0\n");
+  fixture.socket.replyActive();
+  await off;
+  await fixture.socket.waitForWrite("\\get_mode\n");
+  fixture.socket.replyActive("Mode: USB", "Passband: 3000");
+  await queued;
+
+  assert.deepEqual(
+    fixture.transport.commandTrace().map(({ command, priority, source }) => ({
+      command,
+      priority,
+      source,
+    })),
+    [
+      { command: "\\get_freq", priority: "normal", source: "telemetry" },
+      { command: "\\set_ptt 0", priority: "safety", source: "ptt-off" },
+      { command: "\\get_mode", priority: "normal", source: "telemetry" },
+    ],
+  );
+});
+
+test("a stuck ordinary command destroys the socket after 250 ms before recovery OFF", async (context) => {
+  const fixture = reconnectingTransportFixture();
+  context.after(async () => fixture.transport.close());
+
+  const blocker = fixture.transport.request("\\get_freq", { source: "telemetry" });
+  const first = await fixture.waitForSocket(1);
+  await first.waitForWrite("\\get_freq\n");
+  const blockerRejected = assert.rejects(blocker, /interrupted for safety recovery/u);
+  const off = fixture.transport.request("\\set_ptt 0", {
+    priority: "safety",
+    source: "ptt-off",
+  });
+
+  await blockerRejected;
+  const replacement = await fixture.waitForSocket(2);
+  await replacement.waitForWrite("\\set_ptt 0\n");
+  assert.equal(first.destroyed, true);
+  replacement.replyActive();
+  await off;
+});
+
+test("normal queue rejects explicit control at 32 entries and drops telemetry", async () => {
+  const fixture = deferredTransportFixture();
+  const blocker = fixture.transport.request("\\get_freq", { source: "telemetry" });
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  const queued = Array.from({ length: 32 }, (_, index) =>
+    fixture.transport.request(`\\set_freq ${7_074_000 + index}`, { source: "control" }));
+
+  await assert.rejects(
+    fixture.transport.request("\\set_freq 14074000", { source: "control" }),
+    RigQueueBusyError,
+  );
+  await assert.rejects(
+    fixture.transport.request("\\get_mode", { source: "telemetry" }),
+    RigTelemetryDroppedError,
+  );
+
+  const blockerRejected = assert.rejects(blocker, /transport closed/u);
+  const queuedRejected = Promise.all(queued.map((request) =>
+    assert.rejects(request, /transport closed/u)));
+  await fixture.transport.close();
+  await blockerRejected;
+  await queuedRejected;
 });
 
 test("persistent rigctld transport serializes commands and HamlibRig confirms read-back", async (context) => {
@@ -408,6 +494,7 @@ function responseValues(command: string, values: string[]) {
 }
 
 class DeferredSocket extends Duplex {
+  readonly writes: string[] = [];
   readonly #commands: string[] = [];
   readonly #commandWaiters = new Set<() => void>();
   #input = "";
@@ -420,6 +507,16 @@ class DeferredSocket extends Duplex {
     while (this.#commands.length < count) {
       await new Promise<void>((resolve) => this.#commandWaiters.add(resolve));
     }
+  }
+
+  async waitForWrite(expected: string): Promise<void> {
+    while (!this.writes.includes(expected)) {
+      await new Promise<void>((resolve) => this.#commandWaiters.add(resolve));
+    }
+  }
+
+  replyActive(...fields: string[]): void {
+    this.reply(...fields);
   }
 
   reply(...fields: string[]): void {
@@ -448,7 +545,9 @@ class DeferredSocket extends Duplex {
       const newline = this.#input.indexOf("\n");
       const wire = this.#input.slice(0, newline);
       this.#input = this.#input.slice(newline + 1);
-      this.#commands.push(wire.startsWith("|") ? wire.slice(1) : wire);
+      const command = wire.startsWith("|") ? wire.slice(1) : wire;
+      this.#commands.push(command);
+      this.writes.push(`${command}\n`);
       for (const resolve of this.#commandWaiters) resolve();
       this.#commandWaiters.clear();
     }
@@ -473,6 +572,33 @@ function deferredTransportFixture(): {
   return {
     socket,
     transport: new RigctldTransport("deferred.test", 4_532, { connect }),
+  };
+}
+
+function reconnectingTransportFixture(): {
+  transport: RigctldTransport;
+  waitForSocket(count: number): Promise<DeferredSocket>;
+} {
+  const sockets: DeferredSocket[] = [];
+  const waiters = new Set<() => void>();
+  const connect = (() => {
+    const socket = new DeferredSocket();
+    sockets.push(socket);
+    for (const resolve of waiters) resolve();
+    waiters.clear();
+    queueMicrotask(() => socket.emit("connect"));
+    return socket as unknown as Socket;
+  }) as typeof createConnection;
+  return {
+    transport: new RigctldTransport("reconnecting.test", 4_532, { connect }),
+    async waitForSocket(count) {
+      while (sockets.length < count) {
+        await new Promise<void>((resolve) => waiters.add(resolve));
+      }
+      const socket = sockets[count - 1];
+      if (socket === undefined) throw new Error("expected DeferredSocket was not created");
+      return socket;
+    },
   };
 }
 
