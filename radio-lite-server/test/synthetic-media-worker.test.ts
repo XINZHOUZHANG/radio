@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { SyntheticMediaWorker } from "../src/media/synthetic-media-worker.ts";
 
-test("synthetic worker advertises and emits the 4 kHz spectrum span", async (context) => {
+test("synthetic worker advertises and emits the 3 kHz spectrum span", async (context) => {
   const frames: Array<{ spanHz: number }> = [];
   const worker = new SyntheticMediaWorker({
     audioDownlink: () => undefined,
@@ -12,8 +12,8 @@ test("synthetic worker advertises and emits the 4 kHz spectrum span", async (con
   });
   context.after(() => worker.close());
 
-  assert.equal(worker.spectrumCapability.spanHz, 4_000);
+  assert.equal(worker.spectrumCapability.spanHz, 3_000);
   await new Promise((resolve) => setTimeout(resolve, 220));
   assert.equal(frames.length, 1);
-  assert.equal(frames[0].spanHz, 4_000);
+  assert.equal(frames[0].spanHz, 3_000);
 });

@@ -187,7 +187,48 @@ assert(session.includes('audio.armPTTInterruptionFailSafe()'));
 assert(operationEpoch.includes('case audioInterruption'));
 assert(operationEpoch.includes('case .connectionLoss, .audioInterruption: return false'));
 assert(operationEpoch.includes('struct RadioLiteVoicePTTReleaseState'));
-assert(session.includes('onDispatchCompleted:'));
+assert(operationEpoch.includes('struct RadioLiteVoicePTTStartReleaseState'));
+assert(operationEpoch.includes('enum RadioLiteVoicePTTStartedDisposition'));
+const beginVoicePTT = session.slice(
+  session.indexOf('func beginVoicePTT()'),
+  session.indexOf('func endVoicePTT()'),
+);
+const startDispatchOwnership = beginVoicePTT.indexOf('markStartDispatched');
+const startRequest = beginVoicePTT.indexOf('self.control.request');
+const startedDisposition = beginVoicePTT.indexOf('receiveStarted');
+const lateStartedStop = beginVoicePTT.indexOf(
+  'await self.stopRemoteTransmit',
+  startedDisposition,
+);
+const uplinkBind = beginVoicePTT.indexOf(
+  'let uplinkOwnership = try await self.media.bindUplink',
+  startedDisposition,
+);
+assert(startDispatchOwnership >= 0);
+assert(startRequest > startDispatchOwnership);
+assert(startedDisposition > startRequest);
+assert(lateStartedStop > startedDisposition);
+assert(uplinkBind > lateStartedStop);
+const endVoicePTT = session.slice(
+  session.indexOf('private func endVoicePTT(reason:'),
+  session.indexOf('func beginTuning()'),
+);
+assert(!endVoicePTT.includes('onDispatchCompleted:'));
+const localTransmitStop = endVoicePTT.indexOf(
+  '_ = stopLocalTransmit(resumeMonitoringAfterCapture: false)',
+);
+const localPlaybackResume = endVoicePTT.indexOf(
+  'audio.resumeAfterLocalTransmitRelease()',
+);
+const receiveRestoreTask = endVoicePTT.indexOf(
+  'self.voicePTTReceiveResumeTask = Task',
+);
+const remoteTransmitStop = endVoicePTT.indexOf('stopRemoteTransmit');
+assert(localTransmitStop >= 0);
+assert(localPlaybackResume > localTransmitStop);
+assert(receiveRestoreTask < 0 || localPlaybackResume < receiveRestoreTask);
+assert(remoteTransmitStop >= 0);
+assert(localPlaybackResume < remoteTransmitStop);
 assert(socket.includes('onDispatchCompleted?(.success(()))'));
 assert(media.includes('struct RadioLiteMediaLivenessState'));
 assert(microphonePolicy.includes('struct RadioLiteMicrophoneProcessor'));

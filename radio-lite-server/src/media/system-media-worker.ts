@@ -124,7 +124,7 @@ export class SystemMediaWorker implements MediaWorker {
   readonly #spawnProcess: typeof spawn;
   readonly #readCenterFrequencyHz: () => Promise<number>;
   readonly #now: () => number;
-  readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 2_048 });
+  readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 4_096 });
   readonly #uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
   readonly #expectedExit = new WeakSet<ChildProcessWithoutNullStreams>();
   readonly #diagnostics = new WeakMap<ChildProcessWithoutNullStreams, string[]>();

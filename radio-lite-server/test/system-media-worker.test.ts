@@ -81,7 +81,7 @@ test("Opus decoder disables stdin and stdout buffering with exact argv", () => {
   });
 });
 
-test("system worker advertises a 4 kHz spectrum span", async (context) => {
+test("system worker advertises a 3 kHz spectrum span with 512 bins", async (context) => {
   const processes: FakeProcess[] = [];
   const spawnProcess = (() => {
     const child = new FakeProcess();
@@ -96,12 +96,13 @@ test("system worker advertises a 4 kHz spectrum span", async (context) => {
   }, { spawnProcess });
   context.after(() => worker.close());
 
-  assert.equal(worker.spectrumCapability.spanHz, 4_000);
+  assert.equal(worker.spectrumCapability.spanHz, 3_000);
+  assert.equal(worker.spectrumCapability.maxBins, 512);
 });
 
-test("system worker emits spectrum frames with a 4 kHz span", async (context) => {
+test("system worker emits 512-bin spectrum frames with a 3 kHz span", async (context) => {
   const processes: FakeProcess[] = [];
-  const frames: Array<{ spanHz: number }> = [];
+  const frames: Array<{ spanHz: number; bins: Uint8Array }> = [];
   const spawnProcess = (() => {
     const child = new FakeProcess();
     processes.push(child);
@@ -115,10 +116,11 @@ test("system worker emits spectrum frames with a 4 kHz span", async (context) =>
   }, { spawnProcess, now: () => 5_000 });
   context.after(() => worker.close());
 
-  processes[0].stdout.write(Buffer.alloc(2_048 * 2));
+  processes[0].stdout.write(Buffer.alloc(4_096 * 2));
   await delay(240);
   assert.equal(frames.length, 1);
-  assert.equal(frames[0].spanHz, 4_000);
+  assert.equal(frames[0].spanHz, 3_000);
+  assert.equal(frames[0].bins.length, 512);
 });
 
 test("system worker routes capture, Opus packets and playback through bounded child pipes", async (context) => {

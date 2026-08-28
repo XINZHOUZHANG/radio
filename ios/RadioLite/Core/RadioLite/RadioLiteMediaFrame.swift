@@ -61,7 +61,7 @@ struct RadioLiteSpectrumHistory: Equatable, Sendable {
     private(set) var rows: [[UInt8]] = []
     private var axis: Axis?
 
-    init(maxRows: Int = 32, maxColumns: Int = 96) {
+    init(maxRows: Int = 96, maxColumns: Int = 256) {
         self.maxRows = max(1, maxRows)
         self.maxColumns = max(1, maxColumns)
     }

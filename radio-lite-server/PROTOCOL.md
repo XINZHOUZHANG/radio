@@ -401,7 +401,7 @@ unrelated subscribe or uplink-bind request.
   "radioId":"main",
   "radioSlot":0,
   "policy":{"tier":"normal","opusBitrate":20000,"opusFrameMs":20,"spectrumBins":512,"spectrumFps":5},
-  "spectrum":{"available":true,"source":"audio-fft","simulated":false,"supportsWaterfall":true,"maxBins":512,"maxFps":5,"spanHz":4000}
+  "spectrum":{"available":true,"source":"audio-fft","simulated":false,"supportsWaterfall":true,"maxBins":512,"maxFps":5,"spanHz":3000}
 }
 ```
 
@@ -444,7 +444,7 @@ rejected. The server never enables WebSocket compression for binary media.
 
 The spectrum payload begins with another 16-byte header. For the `audio-fft`
 source, `center frequency` is the tuned radio reference and the FFT bins cover
-the receive-audio baseband from 0 Hz through the advertised 4 kHz `span`; it is
+the receive-audio baseband from 0 Hz through the advertised 3 kHz `span`; it is
 not presented as a calibrated wideband SDR panadapter. Opus and digital PCM stay
 at 16 kHz; only out-of-band spectrum bins are omitted:
 

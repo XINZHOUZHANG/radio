@@ -2,11 +2,13 @@ import Foundation
 
 struct RadioLiteSpectrumAGC: Equatable, Sendable {
     let smoothingFactor: Double
+    let minimumInputRange: Double
     private(set) var floor: Double?
     private(set) var ceiling: Double?
 
-    init(smoothingFactor: Double = 0.25) {
+    init(smoothingFactor: Double = 0.25, minimumInputRange: Double = 48) {
         self.smoothingFactor = min(1, max(0, smoothingFactor))
+        self.minimumInputRange = max(1, minimumInputRange)
     }
 
     mutating func normalize(_ bins: [UInt8]) -> [UInt8] {
@@ -24,7 +26,7 @@ struct RadioLiteSpectrumAGC: Equatable, Sendable {
         }
 
         let activeFloor = floor ?? measuredFloor
-        let activeCeiling = max(activeFloor + 1, ceiling ?? measuredCeiling)
+        let activeCeiling = max(activeFloor + minimumInputRange, ceiling ?? measuredCeiling)
         return bins.map { value in
             let normalized = min(1, max(0, (Double(value) - activeFloor) / (activeCeiling - activeFloor)))
             return UInt8((normalized * 255).rounded())

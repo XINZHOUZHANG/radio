@@ -125,4 +125,22 @@ final class RadioLiteMediaFrameTests: XCTestCase {
 
         XCTAssertEqual(history.rows, [[9, 7]])
     }
+
+    func testSpectrumHistoryDefaultsRetainIOSDepthAndFullHorizontalDetail() {
+        var history = RadioLiteSpectrumHistory()
+        XCTAssertEqual(history.maxRows, 96)
+        XCTAssertEqual(history.maxColumns, 256)
+
+        for row in 0..<100 {
+            history.append(RadioLiteSpectrumFrame(
+                centerFrequencyHz: 14_074_000,
+                spanHz: 3_000,
+                noiseFloorTenthsDBm: -1_000,
+                bins: (0..<512).map { UInt8(truncatingIfNeeded: $0 + row) }
+            ))
+        }
+
+        XCTAssertEqual(history.rows.count, 96)
+        XCTAssertEqual(history.rows.first?.count, 256)
+    }
 }

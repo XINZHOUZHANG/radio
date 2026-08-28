@@ -446,6 +446,57 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
         ))
     }
 
+    func testReleaseAfterStartDispatchStopsALateStartedTokenExactlyOnce() {
+        var starts = RadioLiteVoicePTTStartReleaseState()
+        let ownership = starts.begin()
+
+        XCTAssertTrue(starts.markStartDispatched(ownership))
+        starts.release(ownership)
+
+        XCTAssertEqual(starts.receiveStarted(ownership), .stop)
+        XCTAssertEqual(
+            starts.receiveStarted(ownership),
+            .ignore,
+            "a duplicated late callback must not send a second tx.stop"
+        )
+    }
+
+    func testOldLateStartedTokenStopsWithoutTakingOwnershipFromNewPTT() {
+        var starts = RadioLiteVoicePTTStartReleaseState()
+        let old = starts.begin()
+        XCTAssertTrue(starts.markStartDispatched(old))
+        starts.release(old)
+
+        let replacement = starts.begin()
+        XCTAssertTrue(starts.markStartDispatched(replacement))
+
+        XCTAssertEqual(starts.receiveStarted(old), .stop)
+        XCTAssertEqual(starts.receiveStarted(replacement), .bind)
+    }
+
+    func testReleaseBeforeStartDispatchCannotCreateARemoteStopOwner() {
+        var starts = RadioLiteVoicePTTStartReleaseState()
+        let ownership = starts.begin()
+
+        starts.release(ownership)
+
+        XCTAssertFalse(starts.markStartDispatched(ownership))
+        XCTAssertEqual(starts.receiveStarted(ownership), .ignore)
+    }
+
+    func testFailedOldStartDoesNotInvalidateReplacementOwnership() {
+        var starts = RadioLiteVoicePTTStartReleaseState()
+        let old = starts.begin()
+        XCTAssertTrue(starts.markStartDispatched(old))
+        starts.release(old)
+        let replacement = starts.begin()
+        XCTAssertTrue(starts.markStartDispatched(replacement))
+
+        starts.failStart(old)
+
+        XCTAssertEqual(starts.receiveStarted(replacement), .bind)
+    }
+
     func testPTTStopReasonRestoresReceiveExceptDuringConnectionLoss() {
         XCTAssertTrue(RadioLiteVoicePTTStopReason.userRelease.restoresReceiveMonitoring)
         XCTAssertTrue(RadioLiteVoicePTTStopReason.transmitFailure.restoresReceiveMonitoring)

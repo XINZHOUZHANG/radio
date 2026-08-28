@@ -3,7 +3,7 @@ export type SpectrumAnalysis = {
   noiseFloorTenthsDbm: number;
 };
 
-export const SPECTRUM_SPAN_HZ = 4_000;
+export const SPECTRUM_SPAN_HZ = 3_000;
 
 export class PcmSpectrumAnalyzer {
   readonly #sampleRate: number;
@@ -12,7 +12,7 @@ export class PcmSpectrumAnalyzer {
 
   constructor(options: { sampleRate?: number; fftSize?: number } = {}) {
     this.#sampleRate = positiveInteger(options.sampleRate ?? 16_000, "sample rate");
-    this.#fftSize = positivePowerOfTwo(options.fftSize ?? 2_048, "FFT size");
+    this.#fftSize = positivePowerOfTwo(options.fftSize ?? 4_096, "FFT size");
     if (this.#fftSize < 256 || this.#fftSize > 8_192) {
       throw new Error("FFT size must be in 256..8192");
     }

@@ -95,6 +95,8 @@ final class RadioLiteSession: ObservableObject {
     private var receiveAudioStartupTask: Task<Void, Never>?
     private var receiveAudioStartupOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTReceiveRestoreState = RadioLiteVoicePTTReceiveRestoreState()
+    private var voicePTTStartReleaseState = RadioLiteVoicePTTStartReleaseState()
+    private var voicePTTStartOwnership: RadioLiteVoicePTTStartOwnership?
     private var voicePTTReleaseState = RadioLiteVoicePTTReleaseState()
     private var voicePTTReceiveResumeTask: Task<Void, Never>?
     private var audioInterruptionReceiveRestore: RadioLiteReceiveMonitoringOwnership?
@@ -899,6 +901,8 @@ final class RadioLiteSession: ObservableObject {
         audioInterruptionRecoveryTask = nil
         audio.armPTTInterruptionFailSafe()
         voicePTTStartupTask?.cancel()
+        let startOwnership = voicePTTStartReleaseState.begin()
+        voicePTTStartOwnership = startOwnership
         let generation = transmitEpoch.begin()
         voicePTTGeneration = generation
         isVoicePTTHeld = true
@@ -944,6 +948,10 @@ final class RadioLiteSession: ObservableObject {
                 self.activeCaptureOwnership = captureOwnership
 
                 let commandId = UUID().uuidString
+                guard self.voicePTTStartReleaseState.markStartDispatched(startOwnership) else {
+                    self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
+                    return
+                }
                 let reply = try await self.control.request(
                     .object([
                         "t": .string("tx.start"),
@@ -959,7 +967,18 @@ final class RadioLiteSession: ObservableObject {
                     throw RadioLiteHTTPError.invalidResponse
                 }
                 startedToken = transmitToken
-                guard !Task.isCancelled,
+                // The request continuation can finish after release cancelled this startup Task.
+                // Consume ownership before checking cancellation so the late token is de-keyed.
+                let disposition = self.voicePTTStartReleaseState.receiveStarted(startOwnership)
+                if self.voicePTTStartOwnership == startOwnership {
+                    self.voicePTTStartOwnership = nil
+                }
+                guard disposition != .ignore else {
+                    self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
+                    return
+                }
+                guard disposition == .bind,
+                      !Task.isCancelled,
                       self.isVoicePTTHeld,
                       self.transmitEpoch.owns(generation) else {
                     self.audio.stopMicrophoneCapture(epoch: captureOwnership.epoch)
@@ -994,6 +1013,10 @@ final class RadioLiteSession: ObservableObject {
                     self.voicePTTStartupTask = nil
                 }
             } catch {
+                self.voicePTTStartReleaseState.failStart(startOwnership)
+                if self.voicePTTStartOwnership == startOwnership {
+                    self.voicePTTStartOwnership = nil
+                }
                 if let uplink {
                     self.media.stopUplink(transmitToken: uplink.transmitToken, epoch: uplink.epoch)
                     if self.activeUplinkOwnership == uplink { self.activeUplinkOwnership = nil }
@@ -1103,52 +1126,43 @@ final class RadioLiteSession: ObservableObject {
         }
         _ = stopLocalTransmit(resumeMonitoringAfterCapture: false)
         let releaseOwnership = voicePTTReleaseState.beginRelease()
-        let resumeAfterDispatch: @MainActor () -> Void = { [weak self] in
-            guard let self, self.isAppActive, reason.restoresReceiveMonitoring,
-                  self.voicePTTReleaseState.mayResume(
-                      releaseOwnership,
-                      voicePTTHeld: self.isVoicePTTHeld,
-                      tuning: self.isTuning,
-                      capturingMicrophone: self.audio.isCapturingMicrophone
-                  ) else { return }
-            self.voicePTTReceiveResumeTask?.cancel()
-            self.voicePTTReceiveResumeTask = Task { [weak self] in
-                guard let self,
-                      self.voicePTTReleaseState.mayResume(
-                          releaseOwnership,
-                          voicePTTHeld: self.isVoicePTTHeld,
-                          tuning: self.isTuning,
-                          capturingMicrophone: self.audio.isCapturingMicrophone
-                      ) else { return }
-                if let receiveRestore {
+        if isAppActive, reason.restoresReceiveMonitoring,
+           voicePTTReleaseState.mayResume(
+               releaseOwnership,
+               voicePTTHeld: isVoicePTTHeld,
+               tuning: isTuning,
+               capturingMicrophone: audio.isCapturingMicrophone
+           ) {
+            audio.resumeAfterLocalTransmitRelease()
+            voicePTTReceiveResumeTask?.cancel()
+            voicePTTReceiveResumeTask = nil
+            if let receiveRestore {
+                voicePTTReceiveResumeTask = Task { [weak self] in
+                    guard let self,
+                          self.voicePTTReleaseState.mayResume(
+                              releaseOwnership,
+                              voicePTTHeld: self.isVoicePTTHeld,
+                              tuning: self.isTuning,
+                              capturingMicrophone: self.audio.isCapturingMicrophone
+                          ) else { return }
                     await self.restoreOrRetryReceiveAudioAfterVoicePTT(receiveRestore)
-                } else if self.audioInterruptionReceiveRestore != nil {
-                    self.resumeReceiveAudioAfterInterruption()
-                } else {
-                    self.audio.resumeMonitoringAfterCapture()
+                    if self.voicePTTReleaseState.mayResume(
+                        releaseOwnership,
+                        voicePTTHeld: self.isVoicePTTHeld,
+                        tuning: self.isTuning,
+                        capturingMicrophone: self.audio.isCapturingMicrophone
+                    ) {
+                        self.voicePTTReceiveResumeTask = nil
+                    }
                 }
-                if self.voicePTTReleaseState.mayResume(
-                    releaseOwnership,
-                    voicePTTHeld: self.isVoicePTTHeld,
-                    tuning: self.isTuning,
-                    capturingMicrophone: self.audio.isCapturingMicrophone
-                ) {
-                    self.voicePTTReceiveResumeTask = nil
-                }
+            } else if audioInterruptionReceiveRestore != nil {
+                resumeReceiveAudioAfterInterruption()
             }
         }
         if let transmitToken, let radioId {
             Task { [weak self] in
-                await self?.stopRemoteTransmit(
-                    radioId: radioId,
-                    transmitToken: transmitToken,
-                    onDispatchCompleted: { result in
-                        if case .success = result { resumeAfterDispatch() }
-                    }
-                )
+                await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
             }
-        } else {
-            resumeAfterDispatch()
         }
     }
 
@@ -1917,8 +1931,7 @@ final class RadioLiteSession: ObservableObject {
 
     private func stopRemoteTransmit(
         radioId: String,
-        transmitToken: String,
-        onDispatchCompleted: (@MainActor (Result<Void, Error>) -> Void)? = nil
+        transmitToken: String
     ) async {
         let commandId = UUID().uuidString
         _ = try? await control.request(
@@ -1929,8 +1942,7 @@ final class RadioLiteSession: ObservableObject {
                 "commandId": .string(commandId),
             ]),
             expecting: ["tx.stopped"],
-            commandId: commandId,
-            onDispatchCompleted: onDispatchCompleted
+            commandId: commandId
         )
     }
 
@@ -1951,6 +1963,10 @@ final class RadioLiteSession: ObservableObject {
         resumeMonitoringAfterCapture: Bool = true
     ) -> Bool {
         if let expectedEpoch, !transmitEpoch.owns(expectedEpoch) { return false }
+        if let startOwnership = voicePTTStartOwnership {
+            voicePTTStartReleaseState.release(startOwnership)
+            voicePTTStartOwnership = nil
+        }
         voicePTTReleaseState.beginTransmit()
         voicePTTReceiveResumeTask?.cancel()
         voicePTTReceiveResumeTask = nil

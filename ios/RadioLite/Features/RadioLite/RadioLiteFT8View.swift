@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RadioLiteFT8View: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @EnvironmentObject private var media: RadioLiteMediaClient
     @State private var decodeFeed = RadioLiteDecodeFeedState()
     @State private var manualCall = ""
     @State private var manualGrid = ""
@@ -10,6 +11,7 @@ struct RadioLiteFT8View: View {
     @FocusState private var focusedField: Field?
 
     private enum Field { case call, grid, audio }
+    private enum DecodeHistoryAnchor: Hashable { case latest }
 
     var body: some View {
         ScrollView {
@@ -17,6 +19,14 @@ struct RadioLiteFT8View: View {
                 modeAndSlotPanel
                 if let qso = session.automaticQSO { qsoPanel(qso) }
                 decodePanel
+                RadioLiteSpectrumView(
+                    spectrum: media.spectrum,
+                    capability: media.spectrumCapability,
+                    history: media.spectrumHistory,
+                    policy: media.policy,
+                    compact: true,
+                    selectedAudioFrequencyHz: selectedDecode?.audioFrequencyHz
+                )
                 queuePanel
                 manualPanel
             }
@@ -43,9 +53,9 @@ struct RadioLiteFT8View: View {
                 selectedActionBar(selectedDecode)
             }
         }
-        .onAppear { decodeFeed.receive(latestBatch) }
-        .onChange(of: latestBatch?.id) { _, _ in
-            decodeFeed.receive(latestBatch)
+        .onAppear { decodeFeed.receive(session.decodeBatches) }
+        .onChange(of: session.decodeBatches) { _, batches in
+            decodeFeed.receive(batches)
         }
     }
 
@@ -59,20 +69,19 @@ struct RadioLiteFT8View: View {
                 .pickerStyle(.segmented)
                 slotClockPanel
                 HStack {
-                    Label("整时隙批次", systemImage: "clock.badge.checkmark")
+                    Label("UTC 解码历史", systemImage: "clock.badge.checkmark")
                         .foregroundStyle(RadioPalette.accent)
                     Spacer()
-                    if let batch = decodeFeed.displayedBatch {
-                        Text(slotDate(batch.slotStartMs), style: .time)
-                            .monospacedDigit()
-                        Text("· \(batch.decodes.count) 条")
-                    } else {
+                    if decodeFeed.displayedBatches.isEmpty {
                         Text("等待解码")
+                    } else {
+                        Text("\(decodeFeed.displayedBatches.count) 个时隙")
+                            .monospacedDigit()
                     }
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(RadioPalette.muted)
-                Text("列表只在一个 UTC 时隙完成后整体更新；选中一条消息时会冻结当前批次，避免跳动。")
+                Text("保留当前模式最近的完整时隙；选中消息或浏览旧时隙时，新批次不会推动当前内容。")
                     .font(.caption)
                     .foregroundStyle(RadioPalette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -118,29 +127,57 @@ struct RadioLiteFT8View: View {
         RadioPanel {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label("解码消息", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    Label("解码历史", systemImage: "text.line.first.and.arrowtriangle.forward")
                         .font(.headline)
+                    Spacer()
+                    if !decodeFeed.isFollowingLatest {
+                        Button("回到最新") { decodeFeed.resume() }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(RadioPalette.accent)
+                            .buttonStyle(.plain)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Text(decodeFeed.cqOnly ? "仅显示 CQ" : "显示全部消息")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(RadioPalette.muted)
                     Spacer()
                     Toggle("仅 CQ", isOn: cqOnlyBinding)
                         .labelsHidden()
                         .tint(RadioPalette.accent)
-                    Text("CQ")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(RadioPalette.muted)
                 }
-                if filteredDecodes.isEmpty {
+                if decodeFeed.displayedBatches.isEmpty {
                     ContentUnavailableView(
-                        decodeFeed.cqOnly ? "本时隙没有 CQ" : "本时隙没有解码",
+                        "暂无 \(decodeFeed.mode) 解码",
                         systemImage: "waveform.badge.magnifyingglass"
                     )
                     .frame(minHeight: 130)
                 } else {
-                    LazyVStack(spacing: 7) {
-                        ForEach(filteredDecodes) { decode in
-                            Button { decodeFeed.select(decodeId: decode.id) } label: {
-                                decodeRow(decode)
+                    ScrollViewReader { proxy in
+                        ScrollView(.vertical) {
+                            VStack(spacing: 0) {
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id(DecodeHistoryAnchor.latest)
+                                LazyVStack(spacing: 12) {
+                                    ForEach(decodeFeed.displayedBatches) { batch in
+                                        decodeBatchSection(batch)
+                                    }
+                                }
+                                .padding(.vertical, 2)
                             }
-                            .buttonStyle(.plain)
+                        }
+                        .frame(minHeight: 280, maxHeight: 480)
+                        .scrollIndicators(.visible)
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 4).onChanged { _ in
+                                decodeFeed.pauseFollowingLatest()
+                            }
+                        )
+                        .onChange(of: decodeFeed.latestScrollRequestRevision) { _, _ in
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(DecodeHistoryAnchor.latest, anchor: .top)
+                            }
                         }
                     }
                 }
@@ -148,35 +185,100 @@ struct RadioLiteFT8View: View {
         }
     }
 
-    private func decodeRow(_ decode: RadioLiteDigitalDecode) -> some View {
-        let selected = decodeFeed.selectedDecodeId == decode.id
-        return HStack(spacing: 10) {
-            Text(String(format: "%+.0f", decode.snrDb))
-                .font(.caption.monospacedDigit().weight(.bold))
-                .foregroundStyle(decode.snrDb >= -10 ? RadioPalette.accent : RadioPalette.muted)
-                .frame(width: 34, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(decode.message)
-                    .font(.subheadline.monospaced().weight(isCQ(decode.message) ? .semibold : .regular))
-                    .foregroundStyle(isCQ(decode.message) ? Color.white : Color.white.opacity(0.82))
-                    .lineLimit(2)
-                Text("\(decode.audioFrequencyHz) Hz · Δt \(String(format: "%+.1f", decode.deltaTimeSeconds)) s")
+    private func decodeBatchSection(_ batch: RadioLiteDigitalDecodeBatch) -> some View {
+        let decodes = decodeFeed.filteredDecodes(in: batch)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(Self.utcSlotFormatter.string(from: slotDate(batch.slotStartMs)))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.66))
+                Text("UTC")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(RadioPalette.muted)
+                Rectangle()
+                    .fill(Color.white.opacity(0.09))
+                    .frame(height: 1)
+                Text("\(decodes.count)/\(batch.decodes.count)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(RadioPalette.muted)
             }
+            if decodes.isEmpty {
+                Text("此时隙没有符合筛选条件的消息")
+                    .font(.caption)
+                    .foregroundStyle(RadioPalette.muted.opacity(0.72))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(decodes) { decode in
+                    Button { decodeFeed.select(decodeId: decode.id) } label: {
+                        decodeRow(decode)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RadioPalette.panelRaised.opacity(0.38),
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.045))
+        }
+    }
+
+    private func decodeRow(_ decode: RadioLiteDigitalDecode) -> some View {
+        let selected = decodeFeed.selectedDecodeId == decode.id
+        let message = RadioLiteFTMessage.parse(decode.message)
+        let emphasis = message.emphasis(myCallsign: stationCallsign)
+        let tint = decodeTint(emphasis)
+        let country = message.sender.map {
+            RadioLiteCallsignCountryResolver.offline.countryLabel(for: $0)
+        }
+        let distance = RadioLiteMaidenheadDistance.kilometers(
+            from: stationGrid,
+            to: message.grid
+        )
+        let metadata: [String] = [
+            message.sender,
+            country,
+            message.grid,
+            distance.map { "\($0) km 大圆" },
+        ].compactMap { $0 }
+        return HStack(alignment: .top, spacing: 10) {
+            Text(String(format: "%+.0f", decode.snrDb))
+                .font(.caption.monospacedDigit().weight(.bold))
+                .foregroundStyle(tint.opacity(decode.snrDb >= -10 ? 1 : 0.7))
+                .frame(width: 34, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(decode.message)
+                    .font(.subheadline.monospaced().weight(emphasis == .normal ? .regular : .semibold))
+                    .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.82) : Color.white)
+                    .lineLimit(2)
+                if !metadata.isEmpty {
+                    Text(metadata.joined(separator: " · "))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(tint.opacity(emphasis == .normal ? 0.68 : 0.9))
+                        .lineLimit(2)
+                }
+                Text("\(decode.audioFrequencyHz) Hz · Δt \(String(format: "%+.1f", decode.deltaTimeSeconds)) s")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(RadioPalette.muted.opacity(0.78))
+            }
             Spacer(minLength: 4)
             Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
-                .foregroundStyle(selected ? RadioPalette.accent : RadioPalette.muted)
+                .foregroundStyle(selected ? tint : RadioPalette.muted)
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 10)
         .background(
-            selected ? RadioPalette.accent.opacity(0.13) : RadioPalette.panelRaised.opacity(0.7),
+            decodeBackground(emphasis, selected: selected),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(selected ? RadioPalette.accent.opacity(0.5) : Color.white.opacity(0.04))
+                .strokeBorder(selected ? tint.opacity(0.58) : tint.opacity(emphasis == .normal ? 0.04 : 0.22))
         }
     }
 
@@ -198,7 +300,7 @@ struct RadioLiteFT8View: View {
                         .transition(.opacity)
                 }
                 if session.callQueue?.entries.isEmpty != false {
-                    Text("队列为空。选择一条 CQ 或在下方手动输入呼号。")
+                    Text("队列为空。选择一条解码消息或在下方手动输入呼号。")
                         .font(.subheadline)
                         .foregroundStyle(RadioPalette.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -206,7 +308,7 @@ struct RadioLiteFT8View: View {
                     ForEach(session.callQueue?.entries ?? []) { entry in
                         HStack(spacing: 10) {
                             Image(systemName: entry.status == "active" ? "antenna.radiowaves.left.and.right" : "clock")
-                                .foregroundStyle(entry.status == "active" ? RadioPalette.transmit : RadioPalette.cyan)
+                                .foregroundStyle(entry.status == "active" ? RadioPalette.transmit : RadioPalette.accent)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(entry.targetCallsign)
                                     .font(.headline.monospaced())
@@ -304,7 +406,7 @@ struct RadioLiteFT8View: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(qso.targetCallsign)
                         .font(.title2.monospaced().bold())
-                    if let grid = qso.targetGrid { Text(grid).foregroundStyle(RadioPalette.cyan) }
+                    if let grid = qso.targetGrid { Text(grid).foregroundStyle(RadioPalette.muted) }
                     Spacer()
                     Text(qso.mode).font(.headline).foregroundStyle(RadioPalette.accent)
                 }
@@ -335,7 +437,7 @@ struct RadioLiteFT8View: View {
                 Text(decode.message)
                     .font(.caption.monospaced().weight(.semibold))
                     .lineLimit(1)
-                Text("已冻结当前时隙")
+                Text("已锁定解码历史")
                     .font(.caption2)
                     .foregroundStyle(RadioPalette.muted)
             }
@@ -358,23 +460,23 @@ struct RadioLiteFT8View: View {
         .overlay(alignment: .top) { Divider().opacity(0.25) }
     }
 
-    private var latestBatch: RadioLiteDigitalDecodeBatch? {
-        latestBatch(for: decodeFeed.mode)
-    }
-
-    private var filteredDecodes: [RadioLiteDigitalDecode] {
-        decodeFeed.filteredDecodes
-    }
-
     private var selectedDecode: RadioLiteDigitalDecode? {
         decodeFeed.selectedDecode
+    }
+
+    private var stationCallsign: String? {
+        session.selectedRadio?.station.callsign
+    }
+
+    private var stationGrid: String? {
+        session.selectedRadio?.station.grid
     }
 
     private var modeBinding: Binding<String> {
         Binding(
             get: { decodeFeed.mode },
             set: { value in
-                decodeFeed.changeMode(to: value, latestBatch: latestBatch(for: value))
+                decodeFeed.changeMode(to: value, batches: session.decodeBatches)
             }
         )
     }
@@ -386,17 +488,30 @@ struct RadioLiteFT8View: View {
         )
     }
 
-    private func latestBatch(for mode: String) -> RadioLiteDigitalDecodeBatch? {
-        session.decodeBatches.first { $0.mode == mode }
-    }
-
-    private func isCQ(_ message: String) -> Bool {
-        let normalized = message.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized == "CQ" || normalized.hasPrefix("CQ ")
-    }
-
     private func slotDate(_ milliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+    }
+
+    private func decodeTint(_ emphasis: RadioLiteFTMessageEmphasis) -> Color {
+        switch emphasis {
+        case .normal: RadioPalette.muted
+        case .cq: RadioPalette.accent
+        case .addressedToMe: RadioPalette.transmit
+        }
+    }
+
+    private func decodeBackground(
+        _ emphasis: RadioLiteFTMessageEmphasis,
+        selected: Bool
+    ) -> Color {
+        switch emphasis {
+        case .normal:
+            selected ? Color.white.opacity(0.09) : RadioPalette.panelRaised.opacity(0.5)
+        case .cq:
+            RadioPalette.accent.opacity(selected ? 0.18 : 0.09)
+        case .addressedToMe:
+            RadioPalette.transmit.opacity(selected ? 0.22 : 0.13)
+        }
     }
 
     private func parityLabel(_ parity: RadioLiteDigitalSlotClock.Parity) -> String {
@@ -421,9 +536,17 @@ struct RadioLiteFT8View: View {
 
     private func displayColor(_ state: RadioLiteDigitalSlotClock.DisplayState) -> Color {
         switch state {
-        case .receiving: RadioPalette.cyan
+        case .receiving: RadioPalette.accent
         case .waitingToTransmit: RadioPalette.warning
         case .transmitting: RadioPalette.transmit
         }
     }
+
+    private static let utcSlotFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }

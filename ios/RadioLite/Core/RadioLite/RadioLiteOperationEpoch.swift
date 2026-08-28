@@ -138,6 +138,90 @@ struct RadioLiteVoicePTTReceiveRestoreState: Equatable, Sendable {
     }
 }
 
+struct RadioLiteVoicePTTStartOwnership: Equatable, Sendable {
+    let epoch: UInt64
+}
+
+enum RadioLiteVoicePTTStartedDisposition: Equatable, Sendable {
+    case bind
+    case stop
+    case ignore
+}
+
+private enum RadioLiteVoicePTTStartPhase: Equatable, Sendable {
+    case pendingDispatch
+    case dispatchedHolding
+    case dispatchedReleased
+}
+
+struct RadioLiteVoicePTTStartReleaseState: Equatable, Sendable {
+    private var epoch = RadioLiteOperationEpoch()
+    private var attempts: [UInt64: RadioLiteVoicePTTStartPhase] = [:]
+    private var current: RadioLiteVoicePTTStartOwnership?
+
+    mutating func begin() -> RadioLiteVoicePTTStartOwnership {
+        if let current {
+            release(current)
+        }
+        let ownership = RadioLiteVoicePTTStartOwnership(epoch: epoch.begin())
+        attempts[ownership.epoch] = .pendingDispatch
+        current = ownership
+        return ownership
+    }
+
+    @discardableResult
+    mutating func markStartDispatched(_ ownership: RadioLiteVoicePTTStartOwnership) -> Bool {
+        guard current == ownership,
+              attempts[ownership.epoch] == .pendingDispatch else {
+            return false
+        }
+        attempts[ownership.epoch] = .dispatchedHolding
+        return true
+    }
+
+    mutating func release(_ ownership: RadioLiteVoicePTTStartOwnership) {
+        guard let phase = attempts[ownership.epoch] else { return }
+        if current == ownership {
+            current = nil
+        }
+        switch phase {
+        case .pendingDispatch:
+            attempts.removeValue(forKey: ownership.epoch)
+        case .dispatchedHolding:
+            attempts[ownership.epoch] = .dispatchedReleased
+        case .dispatchedReleased:
+            break
+        }
+    }
+
+    mutating func receiveStarted(
+        _ ownership: RadioLiteVoicePTTStartOwnership
+    ) -> RadioLiteVoicePTTStartedDisposition {
+        guard let phase = attempts.removeValue(forKey: ownership.epoch) else {
+            return .ignore
+        }
+        let wasCurrent = current == ownership
+        if wasCurrent {
+            current = nil
+        }
+        switch phase {
+        case .pendingDispatch:
+            return .ignore
+        case .dispatchedHolding:
+            return wasCurrent ? .bind : .stop
+        case .dispatchedReleased:
+            return .stop
+        }
+    }
+
+    mutating func failStart(_ ownership: RadioLiteVoicePTTStartOwnership) {
+        attempts.removeValue(forKey: ownership.epoch)
+        if current == ownership {
+            current = nil
+        }
+    }
+}
+
 struct RadioLiteVoicePTTReleaseOwnership: Equatable, Sendable {
     let epoch: UInt64
 }

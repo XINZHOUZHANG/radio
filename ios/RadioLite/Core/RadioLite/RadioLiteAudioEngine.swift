@@ -236,7 +236,7 @@ struct RadioLitePlaybackSuspensionState: Equatable, Sendable {
         isSuspended = !resumeImmediately
     }
 
-    mutating func resumeAfterTransmitStopDispatch() {
+    mutating func resumeAfterLocalTransmitRelease() {
         isSuspended = false
     }
 
@@ -494,9 +494,9 @@ final class RadioLiteAudioEngine: ObservableObject {
         return true
     }
 
-    func resumeMonitoringAfterCapture() {
+    func resumeAfterLocalTransmitRelease() {
         guard !isCapturingMicrophone else { return }
-        playbackSuspension.resumeAfterTransmitStopDispatch()
+        playbackSuspension.resumeAfterLocalTransmitRelease()
         resumePlaybackAfterCaptureIfNeeded()
     }
 

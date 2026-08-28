@@ -42,4 +42,37 @@ final class RadioLiteSpectrumAGCTests: XCTestCase {
         XCTAssertNil(agc.floor)
         XCTAssertNil(agc.ceiling)
     }
+
+    func testWeakSignalsRemainVisibleWithoutClippingToStrongSignals() {
+        var agc = RadioLiteSpectrumAGC(smoothingFactor: 0.25)
+        let bins = [UInt8](repeating: 80, count: 96) + [96, 96, 180, 180]
+
+        let normalized = agc.normalize(bins)
+        let noise = normalized[0]
+        let weak = normalized[96]
+        let strong = normalized[98]
+
+        XCTAssertLessThanOrEqual(noise, 8)
+        XCTAssertGreaterThan(weak, noise + 40)
+        XCTAssertLessThan(weak, strong)
+        XCTAssertGreaterThanOrEqual(strong, 250)
+    }
+
+    func testSpectrumAxisPlacesFiveTicksAtQuarterIntervals() {
+        let axis = RadioLiteSpectrumAxis(spanHz: 3_000)
+
+        XCTAssertEqual(axis.ticks.map(\.frequencyHz), [0, 750, 1_500, 2_250, 3_000])
+        XCTAssertEqual(axis.ticks.map(\.normalizedPosition), [0, 0.25, 0.5, 0.75, 1])
+    }
+
+    func testSpectrumAxisOnlyReturnsMarkerPositionsInsideTheDisplayedSpan() {
+        let axis = RadioLiteSpectrumAxis(spanHz: 3_000)
+
+        XCTAssertEqual(axis.marker(for: 1_500), .visible(frequencyHz: 1_500, normalizedPosition: 0.5))
+        XCTAssertEqual(axis.marker(for: -20), .belowRange(frequencyHz: -20))
+        XCTAssertEqual(axis.marker(for: 3_100), .aboveRange(frequencyHz: 3_100))
+        XCTAssertEqual(axis.marker(for: nil), .none)
+        XCTAssertNil(axis.marker(for: 3_100).normalizedPosition)
+        XCTAssertEqual(axis.marker(for: 3_100).outOfRangeFrequencyHz, 3_100)
+    }
 }

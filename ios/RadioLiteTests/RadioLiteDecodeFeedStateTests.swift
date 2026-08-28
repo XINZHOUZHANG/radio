@@ -2,6 +2,109 @@ import XCTest
 @testable import RadioLite
 
 final class RadioLiteDecodeFeedStateTests: XCTestCase {
+    func testFeedShowsEveryRecentBatchForCurrentModeNewestFirst() {
+        let oldFT8 = batch(
+            mode: "FT8",
+            slotStartMs: 15_000,
+            decodes: [decode(id: "old", message: "JA1ABC BG2TEST -10")]
+        )
+        let ft4 = batch(
+            mode: "FT4",
+            slotStartMs: 22_500,
+            decodes: [decode(id: "ft4", message: "CQ PA3ABC JO21")]
+        )
+        let newFT8 = batch(
+            mode: "FT8",
+            slotStartMs: 30_000,
+            decodes: [decode(id: "new", message: "CQ HL2ABC PM37")]
+        )
+        var feed = RadioLiteDecodeFeedState(mode: "FT8")
+
+        feed.receive([oldFT8, ft4, newFT8])
+
+        XCTAssertEqual(feed.displayedBatches.map(\.id), [newFT8.id, oldFT8.id])
+        XCTAssertEqual(feed.filteredDecodes.map(\.id), ["new", "old"])
+    }
+
+    func testBrowsingHistoryFreezesVisibleBatchesUntilResume() {
+        let old = batch(
+            mode: "FT8",
+            slotStartMs: 15_000,
+            decodes: [decode(id: "old", message: "CQ JA1ABC PM95")]
+        )
+        let latest = batch(
+            mode: "FT8",
+            slotStartMs: 30_000,
+            decodes: [decode(id: "latest", message: "CQ BH4ABC OM89")]
+        )
+        var feed = RadioLiteDecodeFeedState(mode: "FT8")
+
+        feed.receive([old])
+        feed.pauseFollowingLatest()
+        feed.receive([latest, old])
+
+        XCTAssertFalse(feed.isFollowingLatest)
+        XCTAssertEqual(feed.displayedBatches.map(\.id), [old.id])
+
+        feed.resume()
+
+        XCTAssertTrue(feed.isFollowingLatest)
+        XCTAssertEqual(feed.displayedBatches.map(\.id), [latest.id, old.id])
+    }
+
+    func testResumingHistoryIssuesANewScrollToLatestRequest() {
+        var feed = RadioLiteDecodeFeedState(mode: "FT8")
+
+        XCTAssertEqual(feed.latestScrollRequestRevision, 0)
+
+        feed.pauseFollowingLatest()
+        feed.resume()
+
+        XCTAssertEqual(feed.latestScrollRequestRevision, 1)
+
+        feed.pauseFollowingLatest()
+        feed.resume()
+
+        XCTAssertEqual(feed.latestScrollRequestRevision, 2)
+    }
+
+    func testFeedDefaultsToAllMessagesInsteadOfCQOnly() throws {
+        let directed = decode(id: "directed", message: "BG2TEST JA1ABC -10")
+        let cq = decode(id: "cq", message: "CQ PA3ABC JO21")
+        let current = batch(mode: "FT8", slotStartMs: 15_000, decodes: [directed, cq])
+        var feed = RadioLiteDecodeFeedState(mode: "FT8")
+
+        feed.receive([current])
+
+        XCTAssertFalse(feed.cqOnly)
+        XCTAssertEqual(feed.filteredDecodes.map(\.id), ["directed", "cq"])
+        XCTAssertEqual(feed.filteredDecodes(in: try XCTUnwrap(feed.displayedBatches.first)).map(\.id), [
+            "directed", "cq",
+        ])
+    }
+
+    func testFeedMatchesServerRetentionAndKeepsEveryVisibleDecodeSelectable() {
+        let batches = (0..<23).map { index in
+            batch(
+                mode: "FT8",
+                slotStartMs: Int64(index) * 15_000,
+                decodes: [decode(id: "decode-\(index)", message: "CQ JQ1ABC PM95")]
+            )
+        }
+        var feed = RadioLiteDecodeFeedState(mode: "FT8")
+
+        feed.receive(batches)
+
+        XCTAssertEqual(feed.displayedBatches.count, 16)
+        XCTAssertEqual(feed.displayedBatches.first?.slotStartMs, 22 * 15_000)
+        XCTAssertEqual(feed.displayedBatches.last?.slotStartMs, 7 * 15_000)
+
+        for decode in feed.filteredDecodes {
+            feed.select(decodeId: decode.id)
+            XCTAssertEqual(feed.selectedDecode?.id, decode.id, decode.id)
+        }
+    }
+
     func testIncomingBatchReplacesLiveFeedButKeepsSelectedBatchFrozenUntilResume() {
         let first = batch(
             mode: "FT8",
@@ -99,6 +202,7 @@ final class RadioLiteDecodeFeedStateTests: XCTestCase {
 
         XCTAssertEqual(feed.mode, "FT4")
         XCTAssertNil(feed.selectedDecodeId)
+        XCTAssertEqual(feed.latestScrollRequestRevision, 1)
         XCTAssertEqual(feed.displayedBatch, ft4)
         XCTAssertEqual(feed.filteredDecodes.map(\.id), ["ft4"])
     }
