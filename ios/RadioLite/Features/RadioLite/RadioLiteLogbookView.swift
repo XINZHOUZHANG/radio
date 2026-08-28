@@ -219,7 +219,18 @@ struct RadioLiteManualQSOView: View {
     @State private var endedAt = Date()
     @State private var includeEnd = true
     @State private var saving = false
-    @FocusState private var focused: Bool
+    @State private var formError: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case call
+        case grid
+        case frequencyMHz
+        case rstSent
+        case rstReceived
+        case power
+        case comment
+    }
 
     var body: some View {
         NavigationStack {
@@ -228,15 +239,16 @@ struct RadioLiteManualQSOView: View {
                     TextField("呼号", text: $call)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
-                        .focused($focused)
+                        .focused($focusedField, equals: .call)
                     TextField("网格（可选）", text: $grid)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .grid)
                 }
                 Section("电台") {
                     TextField("频率 MHz", text: $frequencyMHz)
                         .keyboardType(.decimalPad)
-                        .focused($focused)
+                        .focused($focusedField, equals: .frequencyMHz)
                     Picker("模式", selection: $mode) {
                         ForEach(["SSB", "CW", "AM", "FM", "DIGITAL"], id: \.self) { Text($0) }
                     }
@@ -247,12 +259,14 @@ struct RadioLiteManualQSOView: View {
                         }
                     }
                     HStack {
-                        TextField("发送报告", text: $rstSent).focused($focused)
-                        TextField("接收报告", text: $rstReceived).focused($focused)
+                        TextField("发送报告", text: $rstSent)
+                            .focused($focusedField, equals: .rstSent)
+                        TextField("接收报告", text: $rstReceived)
+                            .focused($focusedField, equals: .rstReceived)
                     }
                     TextField("功率 W（可选）", text: $power)
                         .keyboardType(.decimalPad)
-                        .focused($focused)
+                        .focused($focusedField, equals: .power)
                 }
                 Section("时间") {
                     DatePicker("开始", selection: $startedAt)
@@ -262,21 +276,43 @@ struct RadioLiteManualQSOView: View {
                 Section("备注") {
                     TextEditor(text: $comment)
                         .frame(minHeight: 90)
-                        .focused($focused)
+                        .focused($focusedField, equals: .comment)
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let formError {
+                        Label(formError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(RadioPalette.transmit)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Spacer()
+                        Button {
+                            focusedField = nil
+                        } label: {
+                            Label("收起键盘", systemImage: "keyboard.chevron.compact.down")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(focusedField == nil)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) { Divider().opacity(0.35) }
+            }
             .navigationTitle("手动记录语音 QSO")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(saving ? "保存中" : "保存") { Task { await save() } }
-                        .disabled(!valid || saving)
-                }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("完成") { focused = false }
+                    Button(saving ? "保存中" : "保存") {
+                        focusedField = nil
+                        Task { await save() }
+                    }
+                    .disabled(saving)
                 }
             }
         }
@@ -294,35 +330,41 @@ struct RadioLiteManualQSOView: View {
         }
     }
 
-    private var valid: Bool {
-        !call.trimmingCharacters(in: .whitespaces).isEmpty
-            && (Double(frequencyMHz.replacingOccurrences(of: ",", with: ".")) ?? 0) > 0
+    private var form: RadioLiteManualQSOForm {
+        RadioLiteManualQSOForm(
+            radioId: session.selectedRadioId,
+            call: call,
+            grid: grid,
+            frequencyMHz: frequencyMHz,
+            mode: mode,
+            submode: submode,
+            rstSent: rstSent,
+            rstReceived: rstReceived,
+            powerWatts: power,
+            comment: comment,
+            startedAt: startedAt,
+            endedAt: includeEnd ? endedAt : nil
+        )
     }
 
     private func save() async {
-        guard let radioId = session.selectedRadioId,
-              let mhz = Double(frequencyMHz.replacingOccurrences(of: ",", with: ".")) else { return }
+        focusedField = nil
+        formError = nil
+        let request: RadioLiteManualQSO
+        do {
+            request = try form.makeRequest()
+        } catch {
+            formError = error.localizedDescription
+            return
+        }
+
         saving = true
         defer { saving = false }
         do {
-            try await session.addManualQSO(.init(
-                radioId: radioId,
-                call: call.uppercased(),
-                startedAtMs: Int64(startedAt.timeIntervalSince1970 * 1_000),
-                endedAtMs: includeEnd ? Int64(endedAt.timeIntervalSince1970 * 1_000) : nil,
-                frequencyHz: Int64((mhz * 1_000_000).rounded()),
-                band: nil,
-                mode: mode,
-                submode: submode.isEmpty ? nil : submode,
-                rstSent: rstSent.isEmpty ? nil : rstSent,
-                rstReceived: rstReceived.isEmpty ? nil : rstReceived,
-                grid: grid.isEmpty ? nil : grid.uppercased(),
-                txPowerWatts: Double(power),
-                comment: comment.isEmpty ? nil : comment
-            ))
+            try await session.addManualQSO(request)
             dismiss()
         } catch {
-            session.errorMessage = error.localizedDescription
+            formError = "保存失败：\(error.localizedDescription)"
         }
     }
 }

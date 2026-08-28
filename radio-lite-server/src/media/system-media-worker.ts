@@ -97,8 +97,8 @@ export function opusEncoderCommand(bitrate: number): MediaCommand {
 
 export function opusDecoderCommand(): MediaCommand {
   return {
-    file: "opusdec",
-    args: ["--quiet", "--rate", String(SAMPLE_RATE), "-", "-"],
+    file: "stdbuf",
+    args: ["-i0", "-o0", "opusdec", "--quiet", "--rate", String(SAMPLE_RATE), "-", "-"],
   };
 }
 

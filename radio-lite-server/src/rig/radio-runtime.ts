@@ -15,6 +15,7 @@ import {
 } from "../safety/transmit-interlock.ts";
 import {
   HamlibRig,
+  InternalTunerUnsupportedError,
   isTransmitLockedRigControlId,
   type HamlibRigControl,
   type HamlibRigState,
@@ -37,8 +38,9 @@ export type RigControl = {
   setPtt(enabled: boolean): Promise<boolean>;
   writePtt(enabled: boolean): Promise<void>;
   readPtt(): Promise<boolean>;
+  supportsInternalTuner(): Promise<boolean>;
+  startInternalTuner(): Promise<void>;
   writeInternalTuner(enabled: boolean): Promise<void>;
-  setInternalTuner(enabled: boolean): Promise<boolean>;
 };
 
 export class HardwareTransmitDisabledError extends Error {}
@@ -80,7 +82,7 @@ export class RadioRuntime {
     const driver: TransmitDriver = {
       activate: async (mode) => {
         if (mode === "tuning") {
-          await this.#rig.setInternalTuner(true);
+          await this.#rig.startInternalTuner();
         } else {
           await this.#rig.setPtt(true);
         }
@@ -138,6 +140,10 @@ export class RadioRuntime {
 
   readControls(): Promise<HamlibRigControl[]> {
     return this.#rig.readControls();
+  }
+
+  supportsInternalTuner(): Promise<boolean> {
+    return this.#rig.supportsInternalTuner();
   }
 
   async acquireControl(
@@ -220,6 +226,11 @@ export class RadioRuntime {
   ): Promise<TransmitLease> {
     return this.#serialize(async () => {
       const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
+      if (mode === "tuning" && !(await this.#rig.supportsInternalTuner())) {
+        throw new InternalTunerUnsupportedError(
+          "radio does not support internal tuning via Hamlib TUNE",
+        );
+      }
       const permit = await this.supervisor.reserveTransmitStart({
         radioId: this.profile.id,
         ownerId,

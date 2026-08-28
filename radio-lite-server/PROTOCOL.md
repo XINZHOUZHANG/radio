@@ -250,6 +250,12 @@ or `text/plain`.
 radio commands require the per-radio `controlToken` returned by
 `control.acquire`. `tx.start` returns a separate high-entropy `transmitToken`.
 
+`rig.state.get` returns the normal frequency/mode/passband/PTT readback plus
+`supportsInternalTuner`. The latter requires both a `TUNE` operation and a
+writable `TUNER` function in Hamlib's cached `vfo_op ?` and `set_func ?`
+results, so clients can disable a tuner that cannot also be stopped without
+adding capability queries to every steady-state CAT poll.
+
 `rig.mode.set` carries a Hamlib mode token. Operator-facing DATA-U/DATA-L labels
 map to `PKTUSB`/`PKTLSB` on the wire; the service also accepts the finite legacy
 aliases `DATA-U`, `USB-DATA`, `DIGU`, `DATA-L`, `LSB-DATA`, and `DIGL` and
@@ -298,8 +304,9 @@ Voice transmit startup is deliberately ordered as follows:
 4. Send `media.uplink.bind` with the returned `transmitToken` within three
    seconds.
 5. Send one `tx.heartbeat` about every two seconds while transmitting.
-6. Send `tx.stop` when the PTT button is released, then immediately stop and
-   release the iOS audio session.
+6. On PTT release, synchronously stop the local microphone/uplink, send
+   `tx.stop`, and resume receive audio as soon as the WebSocket send completes;
+   the UI does not wait for a slow CAT readback before restoring the speaker.
 
 When a bound voice transmission ends, the media channel emits
 `{"t":"media.uplink.ended","radioId":"main","transmitToken":"...","reason":"transmit_ended"}`.

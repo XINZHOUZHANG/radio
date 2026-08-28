@@ -46,6 +46,8 @@ export type HamlibRigOptions = {
 
 export type RigModeErrorReason = "rejected" | "unconfirmed";
 
+export class InternalTunerUnsupportedError extends Error {}
+
 export class RigModeError extends Error {
   readonly requestedMode: string;
   readonly hamlibMode: string;
@@ -155,6 +157,8 @@ export class HamlibRig {
   readonly #unavailablePttIsSafe: boolean;
   #lastCommandedPttForDisplayOnly = false;
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
+  #vfoOperations: Promise<ReadonlySet<string>> | null = null;
+  #writableFunctions: Promise<ReadonlySet<string>> | null = null;
 
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
     this.#transport = transport;
@@ -333,18 +337,21 @@ export class HamlibRig {
       error.report === -11;
   }
 
-  async setInternalTuner(enabled: boolean): Promise<boolean> {
-    await this.writeInternalTuner(enabled);
-    const response = await this.#transport.request("\\get_func TUNER");
-    const raw = response.values[0] ?? response.fields.get("TUNER");
-    if (raw !== "0" && raw !== "1") {
-      throw new Error("tuner read-back is malformed");
+  async supportsInternalTuner(): Promise<boolean> {
+    const vfoOperations = await this.#discoverVfoOperations();
+    if (!vfoOperations.has("TUNE")) {
+      return false;
     }
-    const confirmed = raw === "1";
-    if (confirmed !== enabled) {
-      throw new Error("tuner read-back mismatch");
+    return (await this.#discoverWritableFunctions()).has("TUNER");
+  }
+
+  async startInternalTuner(): Promise<void> {
+    if (!(await this.supportsInternalTuner())) {
+      throw new InternalTunerUnsupportedError(
+        "radio does not support internal tuning via Hamlib TUNE",
+      );
     }
-    return confirmed;
+    await this.#transport.request("\\vfo_op TUNE");
   }
 
   /** Send a tuner command without adding a read-back CAT round trip. */
@@ -352,10 +359,37 @@ export class HamlibRig {
     if (typeof enabled !== "boolean") {
       throw new Error("tuner state must be boolean");
     }
+    if (enabled) {
+      await this.startInternalTuner();
+      return;
+    }
     await this.#transport.request(
-      `\\set_func TUNER ${enabled ? 1 : 0}`,
-      enabled ? undefined : PTT_OFF_REQUEST,
+      "\\set_func TUNER 0",
+      PTT_OFF_REQUEST,
     );
+  }
+
+  async #discoverVfoOperations(): Promise<ReadonlySet<string>> {
+    this.#vfoOperations ??= this.#queryCapabilityTokens(
+      "\\vfo_op ?",
+      "Mem/VFO Op",
+    ).catch((error) => {
+      this.#vfoOperations = null;
+      throw error;
+    });
+    return this.#vfoOperations;
+  }
+
+  async #discoverWritableFunctions(): Promise<ReadonlySet<string>> {
+    this.#writableFunctions ??= this.#queryCapabilityTokens(
+      "\\set_func ?",
+      "Func",
+      TELEMETRY_REQUEST,
+    ).catch((error) => {
+      this.#writableFunctions = null;
+      throw error;
+    });
+    return this.#writableFunctions;
   }
 
   async #discoverControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
@@ -372,7 +406,7 @@ export class HamlibRig {
         this.#queryCapabilityTokens("\\get_level ?", "Level", TELEMETRY_REQUEST),
         this.#queryCapabilityTokens("\\set_level ?", "Level", TELEMETRY_REQUEST),
         this.#queryCapabilityTokens("\\get_func ?", "Func", TELEMETRY_REQUEST),
-        this.#queryCapabilityTokens("\\set_func ?", "Func", TELEMETRY_REQUEST),
+        this.#discoverWritableFunctions(),
       ]);
     const levelIntersection = intersection(readableLevels, writableLevels);
     const functionIntersection = intersection(readableFunctions, writableFunctions);

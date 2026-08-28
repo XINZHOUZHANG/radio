@@ -134,7 +134,8 @@ test("persistent rigctld transport serializes commands and HamlibRig confirms re
   assert.equal(await rig.setFrequency(7_074_000), 7_074_000);
   assert.deepEqual(await rig.setMode("usb", 2_400), { mode: "USB", passbandHz: 2_400 });
   assert.equal(await rig.setPtt(true), true);
-  assert.equal(await rig.setInternalTuner(true), true);
+  assert.equal(await rig.supportsInternalTuner(), true);
+  await rig.startInternalTuner();
   assert.deepEqual(await rig.readState(), {
     frequencyHz: 7_074_000,
     mode: "USB",
@@ -317,18 +318,81 @@ test("raw internal tuner write sends exactly one CAT command", async () => {
   assert.deepEqual(commands, ["\\set_func TUNER 0"]);
 });
 
-test("ordinary internal tuner setter retains read-back confirmation", async () => {
+test("internal tuner start discovers TUNE once and sends the stateless VFO action", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({
     request: async (command: string) => {
       commands.push(command);
-      if (command === "\\get_func TUNER") return responseValues("get_func", ["1"]);
+      if (command === "\\vfo_op ?") {
+        return response("vfo_op", { "Mem/VFO Op": "CPY TUNE TOGGLE" });
+      }
+      if (command === "\\set_func ?") {
+        return response("set_func", { Func: "NB NR TUNER" });
+      }
       return response(command.slice(1).split(" ")[0], {});
     },
   });
 
-  assert.equal(await rig.setInternalTuner(true), true);
-  assert.deepEqual(commands, ["\\set_func TUNER 1", "\\get_func TUNER"]);
+  assert.equal(await rig.supportsInternalTuner(), true);
+  assert.equal(await rig.supportsInternalTuner(), true);
+  await rig.startInternalTuner();
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+});
+
+test("internal tuner reports an unsupported VFO action without trying to tune", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      throw new RigReportError("vfo_op", -11);
+    },
+  });
+
+  assert.equal(await rig.supportsInternalTuner(), false);
+  assert.equal(await rig.supportsInternalTuner(), false);
+  await assert.rejects(rig.startInternalTuner(), /does not support internal tuning/u);
+  assert.deepEqual(commands, ["\\vfo_op ?"]);
+});
+
+test("internal tuner requires both TUNE and a writable TUNER function", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["CPY TUNE TOGGLE"]);
+      }
+      if (command === "\\set_func ?") {
+        return responseValues("set_func", ["NB NR"]);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  assert.equal(await rig.supportsInternalTuner(), false);
+  await assert.rejects(rig.startInternalTuner(), /does not support internal tuning/u);
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?"]);
+});
+
+test("internal tuner surfaces a rejected TUNE action without a function fallback", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["CPY TUNE TOGGLE"]);
+      }
+      if (command === "\\set_func ?") {
+        return responseValues("set_func", ["NB NR TUNER"]);
+      }
+      throw new RigReportError("vfo_op", -1);
+    },
+  });
+
+  await assert.rejects(rig.startInternalTuner(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -1,
+  );
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
 });
 
 test("real rigs still surface unavailable PTT read-back from Hamlib", async () => {
@@ -663,7 +727,8 @@ async function startFakeRigctld(): Promise<{
         if (name === "\\set_mode") { mode = args[0]; passband = Number(args[1]) || 2_400; }
         if (name === "\\set_ptt") ptt = args[0] === "1";
         if (name === "\\set_func" && args[0] === "TUNER") tuner = args[1] === "1";
-        const response = responseFor(name, { frequency, mode, passband, ptt, tuner });
+        if (name === "\\vfo_op" && args[0] === "TUNE") tuner = true;
+        const response = responseFor(name, args, { frequency, mode, passband, ptt, tuner });
         const split = Math.max(1, Math.floor(response.length / 2));
         socket.write(response.slice(0, split));
         setImmediate(() => socket.write(response.slice(split)));
@@ -681,6 +746,7 @@ async function startFakeRigctld(): Promise<{
 
 function responseFor(
   command: string,
+  args: readonly string[],
   state: { frequency: number; mode: string; passband: number; ptt: boolean; tuner: boolean },
 ): string {
   const header = command.slice(1);
@@ -688,6 +754,8 @@ function responseFor(
   if (command === "\\get_mode") return `${header}:|Mode: ${state.mode}|Passband: ${state.passband}|RPRT 0|\n`;
   if (command === "\\get_ptt") return `${header}:|PTT: ${state.ptt ? 1 : 0}|RPRT 0|\n`;
   if (command === "\\get_func") return `${header}:|${state.tuner ? 1 : 0}|RPRT 0|\n`;
+  if (command === "\\set_func" && args[0] === "?") return `${header}:|Func: NB NR TUNER|RPRT 0|\n`;
+  if (command === "\\vfo_op") return `${header}:|Mem/VFO Op: TUNE TOGGLE|RPRT 0|\n`;
   return `${header}:|RPRT 0|\n`;
 }
 

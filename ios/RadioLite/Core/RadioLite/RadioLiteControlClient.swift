@@ -62,13 +62,15 @@ final class RadioLiteControlClient: ObservableObject {
     func request(
         _ value: JSONValue,
         expecting: Set<String>,
-        commandId: String? = nil
+        commandId: String? = nil,
+        onDispatchCompleted: (@MainActor (Result<Void, Error>) -> Void)? = nil
     ) async throws -> JSONValue {
         try await channel.request(
             value,
             expecting: expecting,
             commandId: commandId,
-            requestType: value["t"]?.stringValue
+            requestType: value["t"]?.stringValue,
+            onDispatchCompleted: onDispatchCompleted
         )
     }
 

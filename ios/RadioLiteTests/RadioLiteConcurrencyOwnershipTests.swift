@@ -401,6 +401,51 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
         XCTAssertEqual(transfers.take(transmitGeneration: 21), replacement)
     }
 
+    func testNewPTTInvalidatesPendingReleaseAudioResume() {
+        var releases = RadioLiteVoicePTTReleaseState()
+        let oldRelease = releases.beginRelease()
+
+        XCTAssertTrue(releases.mayResume(
+            oldRelease,
+            voicePTTHeld: false,
+            tuning: false,
+            capturingMicrophone: false
+        ))
+
+        releases.beginTransmit()
+
+        XCTAssertFalse(releases.mayResume(
+            oldRelease,
+            voicePTTHeld: false,
+            tuning: false,
+            capturingMicrophone: false
+        ))
+    }
+
+    func testReleaseAudioResumeIsBlockedByEveryTransmitActivity() {
+        var releases = RadioLiteVoicePTTReleaseState()
+        let release = releases.beginRelease()
+
+        XCTAssertFalse(releases.mayResume(
+            release,
+            voicePTTHeld: true,
+            tuning: false,
+            capturingMicrophone: false
+        ))
+        XCTAssertFalse(releases.mayResume(
+            release,
+            voicePTTHeld: false,
+            tuning: true,
+            capturingMicrophone: false
+        ))
+        XCTAssertFalse(releases.mayResume(
+            release,
+            voicePTTHeld: false,
+            tuning: false,
+            capturingMicrophone: true
+        ))
+    }
+
     func testPTTStopReasonRestoresReceiveExceptDuringConnectionLoss() {
         XCTAssertTrue(RadioLiteVoicePTTStopReason.userRelease.restoresReceiveMonitoring)
         XCTAssertTrue(RadioLiteVoicePTTStopReason.transmitFailure.restoresReceiveMonitoring)

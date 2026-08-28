@@ -673,7 +673,13 @@ export class RadioLiteService {
       if (message.t === "rig.state.get") {
         exactMessageKeys(message, ["t", "radioId", "commandId"], ["commandId"]);
         const state = await runtime.readState();
-        sendWebSocketJson(webSocket, { t: "rig.state", radioId, commandId, state });
+        const supportsInternalTuner = await runtime.supportsInternalTuner();
+        sendWebSocketJson(webSocket, {
+          t: "rig.state",
+          radioId,
+          commandId,
+          state: { ...state, supportsInternalTuner },
+        });
         return;
       }
       if (message.t === "rig.controls.get") {

@@ -377,6 +377,15 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.t, "control.acquired");
   const controlToken = reply.controlToken;
 
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.state.get",
+    radioId: "main",
+    commandId: "state-with-capabilities",
+  });
+  assert.equal(reply.t, "rig.state");
+  assert.equal(reply.commandId, "state-with-capabilities");
+  assert.equal(reply.state.supportsInternalTuner, true);
+
   const preflightCallsBeforeBusyCheck = testedProfiles.length;
   response = await postJson(
     `${base}/api/v1/hardware/test`,
@@ -904,8 +913,9 @@ class ApiFakeRig implements RigControl {
   async setPtt(value: boolean) { this.ptt = value; return value; }
   async writePtt(value: boolean) { this.ptt = value; }
   async readPtt() { return this.ptt; }
+  async supportsInternalTuner() { return true; }
+  async startInternalTuner() { this.tuner = true; }
   async writeInternalTuner(value: boolean) { this.tuner = value; }
-  async setInternalTuner(value: boolean) { this.tuner = value; return value; }
   async readControls() {
     return [...this.controls].map(([id, value]) => ({
       id,

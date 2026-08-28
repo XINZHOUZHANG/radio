@@ -117,7 +117,8 @@ final class RadioLiteWebSocketChannel {
         }
     }
 
-    func disconnect(notify: Bool = false) {
+    func disconnect(notify: Bool = false, reason: Error? = nil) {
+        let disconnectError = reason ?? RadioLiteSocketError.closed("连接已关闭")
         generation += 1
         receiveTask?.cancel()
         receiveTask = nil
@@ -126,28 +127,45 @@ final class RadioLiteWebSocketChannel {
         urlSession?.invalidateAndCancel()
         urlSession = nil
         state = .disconnected
-        failAllPending(RadioLiteSocketError.closed("连接已关闭"))
-        if notify { onDisconnect?(RadioLiteSocketError.closed("连接已关闭")) }
+        failAllPending(disconnectError)
+        if notify { onDisconnect?(disconnectError) }
     }
 
     func send(_ value: JSONValue) async throws {
         guard let socket, state == .ready else { throw RadioLiteSocketError.notConnected }
+        let activeGeneration = generation
         let outbound = value.addingMediaRequestCorrelation().value
-        try await socket.send(.string(outbound.encodedText))
+        do {
+            try await socket.send(.string(outbound.encodedText))
+        } catch {
+            failTransportIfCurrent(error, socket: socket, generation: activeGeneration)
+            throw error
+        }
     }
 
     func send(_ data: Data) async throws {
         guard let socket, state == .ready else { throw RadioLiteSocketError.notConnected }
-        try await socket.send(.data(data))
+        let activeGeneration = generation
+        do {
+            try await socket.send(.data(data))
+        } catch {
+            failTransportIfCurrent(error, socket: socket, generation: activeGeneration)
+            throw error
+        }
     }
 
     func request(
         _ value: JSONValue,
         expecting expectedTypes: Set<String>,
         commandId: String? = nil,
-        requestType: String? = nil
+        requestType: String? = nil,
+        onDispatchCompleted: (@MainActor (Result<Void, Error>) -> Void)? = nil
     ) async throws -> JSONValue {
-        guard socket != nil, state == .ready else { throw RadioLiteSocketError.notConnected }
+        guard socket != nil, state == .ready else {
+            let error = RadioLiteSocketError.notConnected
+            onDispatchCompleted?(.failure(error))
+            throw error
+        }
         let id = UUID()
         let correlated = value.addingMediaRequestCorrelation()
         let resolvedRequestType = requestType ?? correlated.requestType ?? value["t"]?.stringValue
@@ -167,10 +185,15 @@ final class RadioLiteWebSocketChannel {
             }
             pending[id]?.timeoutTask = timeoutTask
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self else {
+                    onDispatchCompleted?(.failure(CancellationError()))
+                    return
+                }
                 do {
                     try await self.send(correlated.value)
+                    onDispatchCompleted?(.success(()))
                 } catch {
+                    onDispatchCompleted?(.failure(error))
                     self.failPending(id, error: error)
                 }
             }
@@ -196,12 +219,26 @@ final class RadioLiteWebSocketChannel {
                 }
             }
         } catch {
-            guard activeGeneration == generation, socket === task else { return }
-            socket = nil
-            state = .failed(error.localizedDescription)
-            failAllPending(error)
-            onDisconnect?(error)
+            failTransportIfCurrent(error, socket: task, generation: activeGeneration)
         }
+    }
+
+    private func failTransportIfCurrent(
+        _ error: Error,
+        socket task: URLSessionWebSocketTask,
+        generation activeGeneration: Int
+    ) {
+        guard activeGeneration == generation, socket === task else { return }
+        generation += 1
+        receiveTask?.cancel()
+        receiveTask = nil
+        task.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
+        state = .failed(error.localizedDescription)
+        failAllPending(error)
+        onDisconnect?(error)
     }
 
     private func dispatch(_ value: JSONValue) {

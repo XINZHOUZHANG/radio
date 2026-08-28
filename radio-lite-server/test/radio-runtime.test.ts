@@ -48,11 +48,15 @@ class FakeRig implements RigControl {
     this.events.push(`ptt-read:${observed}`);
     return observed;
   }
+  async supportsInternalTuner() { return true; }
+  async startInternalTuner() {
+    this.tuner = true;
+    this.events.push("tuner:true");
+  }
   async writeInternalTuner(value: boolean) {
     this.tuner = value;
     this.events.push(`tuner-write:${value}`);
   }
-  async setInternalTuner(value: boolean) { this.tuner = value; this.events.push(`tuner:${value}`); return value; }
   async readControls() {
     return [...this.controls].map(([id, value]) => ({
       id,
@@ -122,6 +126,7 @@ class RecordingHamlibRequester {
   ptt = false;
   tuner = false;
   pttUnavailable = false;
+  vfoOperations = "TUNE TOGGLE";
 
   async request(command: string): Promise<RigResponse> {
     this.commands.push(command);
@@ -135,6 +140,16 @@ class RecordingHamlibRequester {
     }
     if (name === "get_ptt") {
       return rigResponse(name, { PTT: this.ptt ? "1" : "0" });
+    }
+    if (command === "\\vfo_op ?") {
+      return rigResponse(name, { "Mem/VFO Op": this.vfoOperations });
+    }
+    if (command === "\\vfo_op TUNE") {
+      this.tuner = true;
+      return rigResponse(name);
+    }
+    if (command === "\\set_func ?") {
+      return rigResponse(name, { Func: "NB NR TUNER" });
     }
     if (name === "set_func") {
       this.tuner = command.endsWith(" 1");
@@ -270,18 +285,22 @@ test("runtime voice and digital dekey use one OFF write and one strict PTT read"
   }
 });
 
-test("runtime tuning dekey uses tuner OFF, PTT OFF, and one strict PTT read", async () => {
+test("runtime tuning starts with the cached Hamlib TUNE action and dekeys safely", async (context) => {
   const requester = new RecordingHamlibRequester();
   const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  context.after(() => runtime.close().catch(() => undefined));
   await runtime.initialize();
   const operator = user("tuner-operator", "operator", true);
   const control = await runtime.acquireControl("device-tuner", operator);
+  requester.clear();
   const transmit = await runtime.startTransmit(
     "device-tuner",
     operator,
     control.lease.token,
     "tuning",
   );
+
+  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
   requester.clear();
 
   await runtime.stopTransmit("device-tuner", transmit.leaseToken);
@@ -291,7 +310,44 @@ test("runtime tuning dekey uses tuner OFF, PTT OFF, and one strict PTT read", as
     "\\set_ptt 0",
     "\\get_ptt",
   ]);
-  await runtime.close();
+});
+
+test("runtime exposes cached internal-tuner capability without steady-state CAT polling", async (context) => {
+  const requester = new RecordingHamlibRequester();
+  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  requester.clear();
+
+  assert.equal(await runtime.supportsInternalTuner(), true);
+  assert.equal(await runtime.supportsInternalTuner(), true);
+
+  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?"]);
+});
+
+test("runtime rejects unsupported tuning before reserving a transmit activation", async (context) => {
+  const requester = new RecordingHamlibRequester();
+  requester.vfoOperations = "CPY TOGGLE";
+  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("unsupported-tuner", "operator", true);
+  const control = await runtime.acquireControl("unsupported-device", operator);
+  requester.clear();
+
+  await assert.rejects(
+    runtime.startTransmit(
+      "unsupported-device",
+      operator,
+      control.lease.token,
+      "tuning",
+    ),
+    /does not support internal tuning/u,
+  );
+
+  assert.deepEqual(requester.commands, ["\\vfo_op ?"]);
+  assert.equal(runtime.interlock.snapshot().state, "idle");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
 });
 
 test("PTT None command cache cannot clear a runtime dekey latch", async (context) => {

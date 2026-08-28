@@ -55,7 +55,7 @@ final class AudioRuntimePolicyTests: XCTestCase {
         )
     }
 
-    func testAudioInterruptionEndingNeverRestartsTransmit() {
+    func testAudioInterruptionEndingRequestsReceiveOnlyRecovery() {
         let notification = Notification(
             name: AVAudioSession.interruptionNotification,
             object: nil,
@@ -64,7 +64,10 @@ final class AudioRuntimePolicyTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(RadioLiteAudioInterruptionPolicy.action(for: notification), .ignore)
+        XCTAssertEqual(
+            RadioLiteAudioInterruptionPolicy.action(for: notification),
+            .resumeReceiveOnly
+        )
     }
 
     func testMediaServicesResetStopsCaptureAndTransmit() {
@@ -102,12 +105,15 @@ final class AudioRuntimePolicyTests: XCTestCase {
         let center = NotificationCenter()
         var stopCount = 0
         var resetCount = 0
+        var receiveResumeCount = 0
         var observer: RadioLiteAudioInterruptionObserver? = RadioLiteAudioInterruptionObserver(
             notificationCenter: center
         ) {
             stopCount += 1
         } onMediaServicesReset: {
             resetCount += 1
+        } onReceiveMayResume: {
+            receiveResumeCount += 1
         }
         weak var weakObserver = observer
 
@@ -138,6 +144,11 @@ final class AudioRuntimePolicyTests: XCTestCase {
             ]
         )
         XCTAssertEqual(stopCount, 1, "interruption ended must never restart or stop PTT again")
+        XCTAssertEqual(
+            receiveResumeCount,
+            3,
+            "every media-services reset and a later interruption end may resume receive only"
+        )
 
         center.post(began)
         XCTAssertEqual(stopCount, 2, "a later interruption episode must still be handled")
@@ -159,5 +170,71 @@ final class AudioRuntimePolicyTests: XCTestCase {
         center.post(began)
         XCTAssertEqual(stopCount, 3, "deinitialized observers must stop receiving notifications")
         XCTAssertEqual(resetCount, 3, "deinitialized observers must not rebuild audio resources")
+        XCTAssertEqual(receiveResumeCount, 4, "deinitialized observers must not resume receive audio")
+    }
+
+    func testPlaybackQueueFlushRejectsCompletionsFromTheOldGeneration() throws {
+        var queue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
+        let oldGeneration = try XCTUnwrap(queue.enqueue())
+
+        queue.flush()
+        let replacementGeneration = try XCTUnwrap(queue.enqueue())
+        queue.complete(generation: oldGeneration)
+
+        XCTAssertEqual(queue.scheduledBuffers, 1)
+        queue.complete(generation: replacementGeneration)
+        XCTAssertEqual(queue.scheduledBuffers, 0)
+    }
+
+    func testFullStoppedPlaybackQueueRequestsRecoveryInsteadOfLatchingClosed() {
+        var queue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
+        for _ in 0..<25 {
+            XCTAssertNotNil(queue.enqueue())
+        }
+
+        XCTAssertNil(queue.enqueue())
+        XCTAssertTrue(queue.requiresRecovery(engineRunning: false, playerPlaying: false))
+
+        queue.flush()
+        XCTAssertNotNil(queue.enqueue(), "a recovered queue must accept the next live packet")
+    }
+
+    func testHealthyFullPlaybackQueueUsesBackpressureWithoutResettingPlayback() {
+        var queue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
+        for _ in 0..<25 { _ = queue.enqueue() }
+
+        XCTAssertFalse(queue.requiresRecovery(engineRunning: true, playerPlaying: true))
+        XCTAssertNil(queue.enqueue())
+        XCTAssertEqual(queue.scheduledBuffers, 25)
+    }
+
+    func testPlaybackRemainsSuspendedUntilPTTStopWasDispatched() {
+        var gate = RadioLitePlaybackSuspensionState()
+
+        gate.captureStarted()
+        gate.captureStopped(resumeImmediately: false)
+        XCTAssertTrue(gate.isSuspended)
+
+        gate.resumeAfterTransmitStopDispatch()
+        XCTAssertFalse(gate.isSuspended)
+    }
+
+    func testOrdinaryCaptureCleanupCanResumePlaybackImmediately() {
+        var gate = RadioLitePlaybackSuspensionState()
+
+        gate.captureStarted()
+        gate.captureStopped(resumeImmediately: true)
+
+        XCTAssertFalse(gate.isSuspended)
+    }
+
+    func testRestartingMonitoringClearsAStalePlaybackSuspension() {
+        var gate = RadioLitePlaybackSuspensionState()
+
+        gate.captureStarted()
+        gate.captureStopped(resumeImmediately: false)
+        gate.monitoringStarted()
+
+        XCTAssertFalse(gate.isSuspended)
     }
 }

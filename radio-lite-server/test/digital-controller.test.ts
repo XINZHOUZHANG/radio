@@ -457,8 +457,9 @@ class DigitalFakeRig implements RigControl {
     this.pttEvents.push(value);
   }
   async readPtt() { return this.ptt; }
+  async supportsInternalTuner() { return true; }
+  async startInternalTuner() {}
   async writeInternalTuner(_value: boolean) {}
-  async setInternalTuner(_value: boolean) { return true; }
   async readControls() { return []; }
   async setControl(_id: string, _value: number): Promise<never> {
     throw new Error("digital controller test rig has no adjustable controls");

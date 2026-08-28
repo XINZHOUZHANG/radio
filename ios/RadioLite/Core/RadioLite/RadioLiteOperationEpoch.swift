@@ -138,6 +138,34 @@ struct RadioLiteVoicePTTReceiveRestoreState: Equatable, Sendable {
     }
 }
 
+struct RadioLiteVoicePTTReleaseOwnership: Equatable, Sendable {
+    let epoch: UInt64
+}
+
+struct RadioLiteVoicePTTReleaseState: Equatable, Sendable {
+    private var epoch = RadioLiteOperationEpoch()
+
+    mutating func beginTransmit() {
+        epoch.invalidate()
+    }
+
+    mutating func beginRelease() -> RadioLiteVoicePTTReleaseOwnership {
+        RadioLiteVoicePTTReleaseOwnership(epoch: epoch.begin())
+    }
+
+    func mayResume(
+        _ ownership: RadioLiteVoicePTTReleaseOwnership,
+        voicePTTHeld: Bool,
+        tuning: Bool,
+        capturingMicrophone: Bool
+    ) -> Bool {
+        epoch.owns(ownership.epoch)
+            && !voicePTTHeld
+            && !tuning
+            && !capturingMicrophone
+    }
+}
+
 enum RadioLiteVoicePTTStopReason: Equatable, Sendable {
     case userRelease
     case transmitFailure

@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import XCTest
 @testable import RadioLite
 
@@ -69,6 +70,100 @@ final class RadioLiteMicrophonePolicyTests: XCTestCase {
         XCTAssertEqual(result.level, 0.759_600, accuracy: 0.000_001)
     }
 
+    func testStatefulProcessorRaisesSustainedLowLevelSpeechAfterFixedGain() {
+        var processor = RadioLiteMicrophoneProcessor()
+        let voice = alternatingFrame(amplitude: 0.01)
+        let first = processor.processFrame(voice, gain: .zeroDB)
+        var settled = first
+
+        for _ in 0..<30 {
+            settled = processor.processFrame(voice, gain: .zeroDB)
+        }
+
+        XCTAssertEqual(settled.samples.count, 320, "processing must preserve one 20 ms Opus frame")
+        XCTAssertGreaterThan(rms(settled.samples), rms(first.samples) * 1.7)
+        XCTAssertLessThanOrEqual(rms(settled.samples), 0.0201, "adaptive gain must stay within about +6 dB")
+    }
+
+    func testStatefulProcessorDoesNotPumpSilenceOrNoiseFloor() {
+        var processor = RadioLiteMicrophoneProcessor()
+        let voice = alternatingFrame(amplitude: 0.01)
+        for _ in 0..<30 {
+            _ = processor.processFrame(voice, gain: .zeroDB)
+        }
+
+        let silence = processor.processFrame(Array(repeating: 0, count: 320), gain: .zeroDB)
+        XCTAssertEqual(silence.samples, Array(repeating: 0, count: 320))
+
+        let noise = alternatingFrame(amplitude: 0.002)
+        var settledNoise = noise
+        for _ in 0..<30 {
+            let result = processor.processFrame(noise, gain: .zeroDB)
+            settledNoise = result.samples
+        }
+        XCTAssertLessThanOrEqual(rms(settledNoise), 0.0021)
+    }
+
+    func testStatefulProcessorLearnsSteadyMediumNoiseInsteadOfCallingItSpeech() {
+        var processor = RadioLiteMicrophoneProcessor()
+        let noise = alternatingFrame(amplitude: 0.008)
+        var settled = processor.processFrame(noise, gain: .zeroDB)
+
+        for _ in 0..<40 {
+            settled = processor.processFrame(noise, gain: .zeroDB)
+        }
+
+        XCTAssertLessThanOrEqual(rms(settled.samples), 0.0081)
+    }
+
+    func testStatefulProcessorKeepsGainThroughABriefLowEnergySyllable() {
+        var processor = RadioLiteMicrophoneProcessor()
+        let voice = alternatingFrame(amplitude: 0.01)
+        for _ in 0..<30 {
+            _ = processor.processFrame(voice, gain: .zeroDB)
+        }
+
+        let quietSyllable = processor.processFrame(
+            alternatingFrame(amplitude: 0.004),
+            gain: .zeroDB
+        )
+        let resumedVoice = processor.processFrame(voice, gain: .zeroDB)
+
+        XCTAssertGreaterThan(rms(quietSyllable.samples), 0.006)
+        XCTAssertGreaterThan(rms(resumedVoice.samples), 0.017)
+    }
+
+    func testStatefulProcessorKeepsBoostedPeaksSoftAndBounded() {
+        var processor = RadioLiteMicrophoneProcessor()
+        for _ in 0..<30 {
+            _ = processor.processFrame(alternatingFrame(amplitude: 0.01), gain: .zeroDB)
+        }
+
+        let result = processor.processFrame([0.5, -0.5, 2, -2], gain: .zeroDB)
+
+        XCTAssertTrue(result.samples.allSatisfy { abs($0) <= 1 })
+        XCTAssertLessThan(result.samples.map { abs($0) }.max() ?? 1, 1, "finite overloads must not hard clip")
+        XCTAssertEqual(result.samples[0], -result.samples[1], accuracy: 0.000_001)
+        XCTAssertEqual(result.samples[2], -result.samples[3], accuracy: 0.000_001)
+    }
+
+    func testStatefulProcessorResetMatchesAFreshCaptureEpoch() {
+        let voice = alternatingFrame(amplitude: 0.01)
+        var processor = RadioLiteMicrophoneProcessor()
+        for _ in 0..<30 {
+            _ = processor.processFrame(voice, gain: .zeroDB)
+        }
+        let boosted = processor.processFrame(voice, gain: .zeroDB)
+
+        processor.reset()
+        let afterReset = processor.processFrame(voice, gain: .zeroDB)
+        var fresh = RadioLiteMicrophoneProcessor()
+        let freshFirst = fresh.processFrame(voice, gain: .zeroDB)
+
+        XCTAssertEqual(afterReset, freshFirst)
+        XCTAssertLessThan(rms(afterReset.samples), rms(boosted.samples) * 0.75)
+    }
+
     func testPTTLocalReleaseInvalidatesCaptureAndUplinkSynchronously() {
         var captureState = RadioLiteCaptureEpochState()
         let capture = captureState.begin()
@@ -88,5 +183,17 @@ final class RadioLiteMicrophonePolicyTests: XCTestCase {
         XCTAssertTrue(uplinkResult)
         XCTAssertFalse(captureState.isActive(capture))
         XCTAssertFalse(uplinkState.isBound(uplink))
+    }
+
+    private func alternatingFrame(amplitude: Float) -> [Float] {
+        (0..<320).map { $0.isMultiple(of: 2) ? amplitude : -amplitude }
+    }
+
+    private func rms(_ samples: [Float]) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let meanSquare = samples.reduce(0.0) { partial, sample in
+            partial + Double(sample * sample)
+        } / Double(samples.count)
+        return sqrt(meanSquare)
     }
 }

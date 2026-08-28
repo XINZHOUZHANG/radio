@@ -88,4 +88,18 @@ final class RadioLiteModelsTests: XCTestCase {
         XCTAssertNil(snapshot.qso)
         XCTAssertEqual(snapshot.decodes.batches.first?.decodes.first?.id, "decode-1")
     }
+
+    func testRigStateDecodesInternalTunerCapabilityAndRemainsCompatibleWithOldServers() throws {
+        let capable = try JSONDecoder().decode(
+            RadioLiteRigState.self,
+            from: Data(#"{"frequencyHz":14074000,"mode":"PKTUSB","passbandHz":3000,"ptt":false,"supportsInternalTuner":true}"#.utf8)
+        )
+        let legacy = try JSONDecoder().decode(
+            RadioLiteRigState.self,
+            from: Data(#"{"frequencyHz":14074000,"mode":"PKTUSB","passbandHz":3000,"ptt":false}"#.utf8)
+        )
+
+        XCTAssertEqual(capable.supportsInternalTuner, true)
+        XCTAssertNil(legacy.supportsInternalTuner)
+    }
 }

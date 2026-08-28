@@ -22,6 +22,7 @@ enum RadioLiteAudioError: LocalizedError {
 
 enum RadioLiteAudioInterruptionAction: Equatable, Sendable {
     case stopCaptureAndTransmit
+    case resumeReceiveOnly
     case ignore
 }
 
@@ -34,7 +35,7 @@ enum RadioLiteAudioInterruptionPolicy {
         guard let type = interruptionType(for: notification) else {
             return .ignore
         }
-        return type == .began ? .stopCaptureAndTransmit : .ignore
+        return type == .began ? .stopCaptureAndTransmit : .resumeReceiveOnly
     }
 
     static func interruptionType(for notification: Notification) -> AVAudioSession.InterruptionType? {
@@ -77,12 +78,14 @@ final class RadioLiteAudioInterruptionObserver {
     private let observationBag: RadioLiteNotificationObservationBag
     private let onStopCaptureAndTransmit: @MainActor () -> Void
     private let onMediaServicesReset: @MainActor () -> Void
+    private let onReceiveMayResume: @MainActor () -> Void
     private var stopDeliveredForCurrentEpisode = false
 
     init(
         notificationCenter: NotificationCenter = .default,
         onStopCaptureAndTransmit: @escaping @MainActor () -> Void,
-        onMediaServicesReset: @escaping @MainActor () -> Void
+        onMediaServicesReset: @escaping @MainActor () -> Void,
+        onReceiveMayResume: @escaping @MainActor () -> Void
     ) {
         let observationBag = RadioLiteNotificationObservationBag(
             notificationCenter: notificationCenter
@@ -90,6 +93,7 @@ final class RadioLiteAudioInterruptionObserver {
         self.observationBag = observationBag
         self.onStopCaptureAndTransmit = onStopCaptureAndTransmit
         self.onMediaServicesReset = onMediaServicesReset
+        self.onReceiveMayResume = onReceiveMayResume
         for name in [
             AVAudioSession.interruptionNotification,
             AVAudioSession.mediaServicesWereLostNotification,
@@ -113,17 +117,19 @@ final class RadioLiteAudioInterruptionObserver {
     }
 
     private func receive(_ notification: Notification) {
-        if RadioLiteAudioInterruptionPolicy.interruptionType(for: notification) == .ended {
+        let action = RadioLiteAudioInterruptionPolicy.action(for: notification)
+        if action == .resumeReceiveOnly {
             rearm()
+            onReceiveMayResume()
             return
         }
-        if RadioLiteAudioInterruptionPolicy.action(for: notification) == .stopCaptureAndTransmit,
-           !stopDeliveredForCurrentEpisode {
+        if action == .stopCaptureAndTransmit, !stopDeliveredForCurrentEpisode {
             stopDeliveredForCurrentEpisode = true
             onStopCaptureAndTransmit()
         }
         if notification.name == AVAudioSession.mediaServicesWereResetNotification {
             onMediaServicesReset()
+            onReceiveMayResume()
         }
     }
 }
@@ -181,6 +187,64 @@ struct RadioLiteCaptureEpochState: Equatable, Sendable {
     var currentOwnership: RadioLiteMicrophoneCaptureOwnership? { current }
 }
 
+struct RadioLitePlaybackQueueState: Equatable, Sendable {
+    let targetBuffers: Int
+    let maximumBuffers: Int
+    private(set) var scheduledBuffers = 0
+    private(set) var generation: UInt64 = 1
+
+    init(targetBuffers: Int, maximumBuffers: Int) {
+        precondition(targetBuffers > 0 && maximumBuffers >= targetBuffers)
+        self.targetBuffers = targetBuffers
+        self.maximumBuffers = maximumBuffers
+    }
+
+    mutating func enqueue() -> UInt64? {
+        guard scheduledBuffers < maximumBuffers else { return nil }
+        scheduledBuffers += 1
+        return generation
+    }
+
+    mutating func complete(generation completedGeneration: UInt64) {
+        guard completedGeneration == generation else { return }
+        scheduledBuffers = max(0, scheduledBuffers - 1)
+    }
+
+    mutating func flush() {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        scheduledBuffers = 0
+    }
+
+    func requiresRecovery(engineRunning: Bool, playerPlaying: Bool) -> Bool {
+        scheduledBuffers >= maximumBuffers && (!engineRunning || !playerPlaying)
+    }
+
+    func shouldStartPlayback(playerPlaying: Bool) -> Bool {
+        !playerPlaying && scheduledBuffers >= targetBuffers
+    }
+}
+
+struct RadioLitePlaybackSuspensionState: Equatable, Sendable {
+    private(set) var isSuspended = false
+
+    mutating func captureStarted() {
+        isSuspended = true
+    }
+
+    mutating func captureStopped(resumeImmediately: Bool) {
+        isSuspended = !resumeImmediately
+    }
+
+    mutating func resumeAfterTransmitStopDispatch() {
+        isSuspended = false
+    }
+
+    mutating func monitoringStarted() {
+        isSuspended = false
+    }
+}
+
 @MainActor
 final class RadioLiteAudioEngine: ObservableObject {
     @Published private(set) var isMonitoring = false
@@ -201,6 +265,10 @@ final class RadioLiteAudioEngine: ObservableObject {
     }
 
     var onCaptureInterrupted: (@MainActor () -> Void)?
+    var onReceiveMayResume: (@MainActor () -> Void)?
+    var onReceivePlaybackStarted: (@MainActor () -> Void)?
+
+    var isPlaybackSuspended: Bool { playbackSuspension.isSuspended }
 
     // Keep playback and recording on separate graphs. Once an AVAudioEngine's
     // input node has been activated, restarting that same graph under a
@@ -213,16 +281,15 @@ final class RadioLiteAudioEngine: ObservableObject {
     private var audioSessionInterruptionObserver: RadioLiteAudioInterruptionObserver?
     private var codec: RadioLiteOpusCodec?
     private var configuredOpusBitrate = 20_000
-    private var playbackResourceGeneration: UInt64 = 1
     private var inputTapInstalled = false
     private var captureAccumulator: [Float] = []
     private var captureSampleRate: Double = 48_000
     private var packetHandler: ((Data) -> Void)?
     private var captureEpochState = RadioLiteCaptureEpochState()
+    private var microphoneProcessor = RadioLiteMicrophoneProcessor()
     private var microphoneTelemetryLimiter = AudioTelemetryLimiter(minimumInterval: 0.1)
-    private var scheduledBuffers = 0
-    private let targetBuffers = 3
-    private let maximumBuffers = 25
+    private var playbackQueue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
+    private var playbackSuspension = RadioLitePlaybackSuspensionState()
 
     init(notificationCenter: NotificationCenter = .default) {
         let microphonePreferences = RadioLiteMicrophonePreferences.load()
@@ -236,6 +303,9 @@ final class RadioLiteAudioEngine: ObservableObject {
             },
             onMediaServicesReset: { [weak self] in
                 self?.rebuildAudioResourcesAfterMediaServicesReset()
+            },
+            onReceiveMayResume: { [weak self] in
+                self?.onReceiveMayResume?()
             }
         )
     }
@@ -263,10 +333,12 @@ final class RadioLiteAudioEngine: ObservableObject {
             try activateAudioSession(capturing: false)
             try ensurePlaybackEngineStarted()
             isMonitoring = true
+            playbackSuspension.monitoringStarted()
             lastError = nil
+            onReceivePlaybackStarted?()
         } catch {
             isMonitoring = false
-            player.stop()
+            flushPlaybackQueue()
             playbackEngine.stop()
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             let wrapped = RadioLiteAudioError.playbackUnavailable(Self.diagnostic(error))
@@ -277,18 +349,29 @@ final class RadioLiteAudioEngine: ObservableObject {
 
     func stopMonitoring() {
         isMonitoring = false
-        player.stop()
-        scheduledBuffers = 0
+        flushPlaybackQueue()
         playbackEngine.stop()
         if !isCapturingMicrophone {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
 
-    func receiveOpusPacket(_ packet: Data) {
+    @discardableResult
+    func receiveOpusPacket(_ packet: Data) -> Bool {
         guard isMonitoring, !isCapturingMicrophone,
-              scheduledBuffers < maximumBuffers, let codec else { return }
+              !playbackSuspension.isSuspended, let codec else { return false }
+        if playbackQueue.requiresRecovery(
+            engineRunning: playbackEngine.isRunning,
+            playerPlaying: player.isPlaying
+        ) {
+            flushPlaybackQueue()
+        }
+        guard playbackQueue.scheduledBuffers < playbackQueue.maximumBuffers else {
+            droppedPackets &+= 1
+            return false
+        }
         do {
+            try ensurePlaybackEngineStarted()
             let samples = try codec.decode(packet)
             guard let buffer = AVAudioPCMBuffer(
                 pcmFormat: codec.pcmFormat,
@@ -300,23 +383,26 @@ final class RadioLiteAudioEngine: ObservableObject {
             samples.withUnsafeBufferPointer { pointer in
                 channel.update(from: pointer.baseAddress!, count: samples.count)
             }
-            scheduledBuffers += 1
+            guard let queueGeneration = playbackQueue.enqueue() else {
+                droppedPackets &+= 1
+                return false
+            }
             receivedPackets &+= 1
-            let resourceGeneration = playbackResourceGeneration
             player.scheduleBuffer(buffer) { [weak self] in
                 Task { @MainActor [weak self] in
-                    guard let self,
-                          self.playbackResourceGeneration == resourceGeneration else {
-                        return
-                    }
-                    self.scheduledBuffers = max(0, self.scheduledBuffers - 1)
+                    self?.playbackQueue.complete(generation: queueGeneration)
                 }
             }
-            if !playbackEngine.isRunning { try ensurePlaybackEngineStarted() }
-            if !player.isPlaying, scheduledBuffers >= targetBuffers { player.play() }
+            if playbackQueue.shouldStartPlayback(playerPlaying: player.isPlaying) { player.play() }
+            lastError = nil
+            return true
         } catch {
             droppedPackets &+= 1
             lastError = error.localizedDescription
+            if !playbackEngine.isRunning {
+                flushPlaybackQueue()
+            }
+            return false
         }
     }
 
@@ -359,6 +445,7 @@ final class RadioLiteAudioEngine: ObservableObject {
             }
             captureAccumulator.removeAll(keepingCapacity: true)
             captureSampleRate = format.sampleRate
+            microphoneProcessor.reset()
             packetHandler = onPacket
             let frames = AVAudioFrameCount(max(128, Int(format.sampleRate * 0.02)))
             input.installTap(onBus: 0, bufferSize: frames, format: format) { [weak self] buffer, _ in
@@ -395,19 +482,22 @@ final class RadioLiteAudioEngine: ObservableObject {
         let result = captureEpochState.stop(epoch: epoch)
         guard result == .stoppedActive else { return false }
         cleanupCaptureGraph()
+        playbackSuspension.captureStopped(
+            resumeImmediately: resumeMonitoringAfterCapture && isMonitoring
+        )
 
         if resumeMonitoringAfterCapture, isMonitoring {
             resumePlaybackAfterCaptureIfNeeded()
-        } else {
-            if !resumeMonitoringAfterCapture {
-                isMonitoring = false
-                player.stop()
-                scheduledBuffers = 0
-                playbackEngine.stop()
-            }
+        } else if !isMonitoring {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
         return true
+    }
+
+    func resumeMonitoringAfterCapture() {
+        guard !isCapturingMicrophone else { return }
+        playbackSuspension.resumeAfterTransmitStopDispatch()
+        resumePlaybackAfterCaptureIfNeeded()
     }
 
     func armPTTInterruptionFailSafe() {
@@ -417,8 +507,7 @@ final class RadioLiteAudioEngine: ObservableObject {
     func stopAll() {
         isMonitoring = false
         let stoppedCapture = stopMicrophoneCapture()
-        player.stop()
-        scheduledBuffers = 0
+        flushPlaybackQueue()
         playbackEngine.stop()
         captureEngine.stop()
         if !stoppedCapture {
@@ -444,7 +533,7 @@ final class RadioLiteAudioEngine: ObservableObject {
             let source = Array(captureAccumulator.prefix(sourceFrameCount))
             captureAccumulator.removeFirst(sourceFrameCount)
             let resampled = Self.resample(source, count: RadioLiteOpusCodec.samplesPerFrame)
-            let processed = RadioLiteMicrophoneDSP.processFrame(resampled, gain: microphoneGain)
+            let processed = microphoneProcessor.processFrame(resampled, gain: microphoneGain)
             if microphoneTelemetryLimiter.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
                 microphoneLevel = processed.level
             }
@@ -461,28 +550,20 @@ final class RadioLiteAudioEngine: ObservableObject {
         }
     }
 
-    private func activateAudioSession(capturing: Bool) throws {
+    private func activateAudioSession(capturing _: Bool) throws {
         let session = AVAudioSession.sharedInstance()
-        // Both audio graphs are stopped before changing category. Deactivating
-        // first prevents iOS from retaining an incompatible input/output graph.
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
-        if capturing {
-            let mode = microphoneProcessingMode.configuration.audioSessionMode
-            do {
-                try session.setCategory(
-                    .playAndRecord,
-                    mode: mode,
-                    options: [.defaultToSpeaker, .allowBluetooth]
-                )
-            } catch {
-                try session.setCategory(.playAndRecord, mode: mode, options: [.defaultToSpeaker])
-            }
-        } else {
-            do {
-                try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
-            } catch {
-                try session.setCategory(.playback, mode: .default)
-            }
+        // Keep one play-and-record route while monitoring and transmitting.
+        // Switching playback/A2DP to record/HFP on every PTT release can take
+        // seconds; a stable radio-voice route makes receive resume immediately.
+        let mode = microphoneProcessingMode.configuration.audioSessionMode
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: mode,
+                options: [.defaultToSpeaker, .allowBluetooth]
+            )
+        } catch {
+            try session.setCategory(.playAndRecord, mode: mode, options: [.defaultToSpeaker])
         }
         // These are preferences, not correctness requirements. Some routes
         // reject one of them with OSStatus even though playback itself works.
@@ -504,9 +585,8 @@ final class RadioLiteAudioEngine: ObservableObject {
     }
 
     private func suspendPlaybackForCapture() {
-        player.stop()
-        playbackEngine.stop()
-        scheduledBuffers = 0
+        playbackSuspension.captureStarted()
+        flushPlaybackQueue()
     }
 
     private func cleanupCaptureGraph() {
@@ -519,23 +599,29 @@ final class RadioLiteAudioEngine: ObservableObject {
         isCapturingMicrophone = false
         packetHandler = nil
         captureAccumulator.removeAll(keepingCapacity: true)
+        microphoneProcessor.reset()
         microphoneTelemetryLimiter.reset()
         microphoneLevel = 0
         codec?.reset()
     }
 
     private func resumePlaybackAfterCaptureIfNeeded() {
+        guard !isCapturingMicrophone else { return }
+        guard !playbackSuspension.isSuspended else { return }
         guard isMonitoring else {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             return
         }
         do {
-            try activateAudioSession(capturing: false)
+            // Capture and playback share one stable play-and-record session.
+            // Reconfiguring/activating it again on every release can block for
+            // seconds on Bluetooth and is unnecessary after local capture stops.
             try ensurePlaybackEngineStarted()
             lastError = nil
+            onReceivePlaybackStarted?()
         } catch {
             isMonitoring = false
-            player.stop()
+            flushPlaybackQueue()
             playbackEngine.stop()
             lastError = RadioLiteAudioError.playbackUnavailable(Self.diagnostic(error)).localizedDescription
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -567,6 +653,11 @@ final class RadioLiteAudioEngine: ObservableObject {
         player.volume = Float(monitorVolume)
     }
 
+    private func flushPlaybackQueue() {
+        playbackQueue.flush()
+        player.stop()
+    }
+
     private func rebuildAudioResourcesAfterMediaServicesReset() {
         // Apple invalidates every AVAudioEngine node and AudioConverter after
         // a media-services reset. Release the orphaned graph and codec instead
@@ -578,11 +669,10 @@ final class RadioLiteAudioEngine: ObservableObject {
         packetHandler = nil
         captureAccumulator.removeAll(keepingCapacity: true)
         captureSampleRate = 48_000
+        microphoneProcessor.reset()
         microphoneTelemetryLimiter.reset()
         microphoneLevel = 0
-        scheduledBuffers = 0
-        playbackResourceGeneration &+= 1
-        if playbackResourceGeneration == 0 { playbackResourceGeneration = 1 }
+        playbackQueue.flush()
         codec = nil
         playbackEngine = AVAudioEngine()
         captureEngine = AVAudioEngine()
@@ -598,6 +688,7 @@ final class RadioLiteAudioEngine: ObservableObject {
         // Stop the hardware before asking the session to perform any
         // asynchronous remote cleanup. Never restart capture on .ended.
         _ = stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
+        stopMonitoring()
         onCaptureInterrupted?()
     }
 

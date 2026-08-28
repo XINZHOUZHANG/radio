@@ -219,11 +219,13 @@ struct RadioLiteRadioView: View {
                     session.endVoicePTT()
                 }
                 RadioLiteHoldButton(
-                    title: session.isTuning ? "天调工作中" : "按住机内天调",
+                    title: session.rigState?.supportsInternalTuner == false
+                        ? "不支持机内天调"
+                        : (session.isTuning ? "天调工作中" : "按住机内天调"),
                     systemImage: "tuningfork",
                     active: session.isTuning,
                     tint: RadioPalette.warning,
-                    enabled: session.hasControl && session.canTransmit
+                    enabled: session.hasControl && session.canUseInternalTuner
                 ) {
                     session.beginTuning()
                 } onRelease: {

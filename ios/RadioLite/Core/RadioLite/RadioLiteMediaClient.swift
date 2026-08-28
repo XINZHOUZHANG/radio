@@ -97,6 +97,81 @@ enum RadioLiteMediaFailurePresentation: Equatable, Sendable {
     }
 }
 
+enum RadioLiteMediaLivenessFailure: LocalizedError, Equatable, Sendable {
+    case channelStalled
+    case audioStalled
+
+    var errorDescription: String? {
+        switch self {
+        case .channelStalled:
+            "媒体连接长时间没有收到服务器数据，正在重新连接"
+        case .audioStalled:
+            "接收音频流已中断，正在重新连接"
+        }
+    }
+}
+
+struct RadioLiteMediaLivenessState: Equatable, Sendable {
+    private let channelTimeout: TimeInterval
+    private let audioTimeout: TimeInterval
+    private var lastInboundAt: TimeInterval
+    private var lastAudioAt: TimeInterval?
+    private var subscriptionStartedAt: TimeInterval?
+    private var monitoringStartedAt: TimeInterval?
+
+    init(
+        connectedAt: TimeInterval,
+        channelTimeout: TimeInterval = 30,
+        audioTimeout: TimeInterval = 8
+    ) {
+        self.channelTimeout = channelTimeout
+        self.audioTimeout = audioTimeout
+        self.lastInboundAt = connectedAt
+    }
+
+    mutating func subscriptionStarted(at time: TimeInterval) {
+        subscriptionStartedAt = time
+        lastInboundAt = max(lastInboundAt, time)
+        lastAudioAt = nil
+        monitoringStartedAt = nil
+    }
+
+    mutating func subscriptionEnded() {
+        subscriptionStartedAt = nil
+        lastAudioAt = nil
+        monitoringStartedAt = nil
+    }
+
+    mutating func monitoringStarted(at time: TimeInterval) {
+        monitoringStartedAt = time
+        lastAudioAt = nil
+    }
+
+    mutating func receivedInbound(at time: TimeInterval) {
+        lastInboundAt = time
+    }
+
+    mutating func receivedAudio(at time: TimeInterval) {
+        lastAudioAt = time
+        receivedInbound(at: time)
+    }
+
+    func failure(
+        at time: TimeInterval,
+        monitoringAudio: Bool
+    ) -> RadioLiteMediaLivenessFailure? {
+        guard let subscriptionStartedAt else { return nil }
+        if time - max(subscriptionStartedAt, lastInboundAt) >= channelTimeout {
+            return .channelStalled
+        }
+        let audioReference = lastAudioAt ?? monitoringStartedAt ?? subscriptionStartedAt
+        if monitoringAudio, time - audioReference >= audioTimeout {
+            return .audioStalled
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class RadioLiteMediaClient: ObservableObject {
     @Published private(set) var state: RadioLiteSocketState = .disconnected
@@ -127,18 +202,26 @@ final class RadioLiteMediaClient: ObservableObject {
     private var subscriptionOwnershipState = RadioLiteMediaSubscriptionOwnershipState()
     private var spectrumHistoryBuffer = RadioLiteSpectrumHistory()
     private var spectrumAGC = RadioLiteSpectrumAGC()
+    private var liveness = RadioLiteMediaLivenessState(
+        connectedAt: ProcessInfo.processInfo.systemUptime
+    )
 
     init(audio: RadioLiteAudioEngine? = nil) {
         self.audio = audio ?? RadioLiteAudioEngine()
+        self.audio.onReceivePlaybackStarted = { [weak self] in
+            guard let self, self.subscribedRadioId != nil else { return }
+            self.liveness.monitoringStarted(at: ProcessInfo.processInfo.systemUptime)
+        }
         channel.onJSON = { [weak self] value in self?.handle(value) }
         channel.onBinary = { [weak self] data in self?.handle(data) }
         channel.onDisconnect = { [weak self] error in
             guard let self else { return }
             self.stopUplink()
             self.subscriptionOwnershipState.invalidate()
-            self.audio.stopMicrophoneCapture()
+            self.audio.stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
             self.subscribedRadioId = nil
             self.radioSlot = nil
+            self.liveness.subscriptionEnded()
             self.clearSpectrum(keepingCapability: false)
             self.state = .failed(error.localizedDescription)
             self.lastError = error.localizedDescription
@@ -158,6 +241,9 @@ final class RadioLiteMediaClient: ObservableObject {
                 credential: credential,
                 path: "/ws/media",
                 expectedChannel: "media"
+            )
+            liveness = RadioLiteMediaLivenessState(
+                connectedAt: ProcessInfo.processInfo.systemUptime
             )
             state = .ready
             startNetworkReports()
@@ -203,6 +289,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
         radioSlot = UInt8(slot)
         subscribedRadioId = radioId
+        liveness.subscriptionStarted(at: ProcessInfo.processInfo.systemUptime)
         self.policy = policy
         self.spectrumCapability = spectrumCapability
         clearSpectrum(keepingCapability: true)
@@ -225,6 +312,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
         subscribedRadioId = nil
         radioSlot = nil
+        liveness.subscriptionEnded()
         clearSpectrum(keepingCapability: false)
     }
 
@@ -238,6 +326,7 @@ final class RadioLiteMediaClient: ObservableObject {
         state = .disconnected
         subscribedRadioId = nil
         radioSlot = nil
+        liveness.subscriptionEnded()
         policy = nil
         clearSpectrum(keepingCapability: false)
     }
@@ -307,16 +396,26 @@ final class RadioLiteMediaClient: ObservableObject {
         guard spectrumVisible != visible else { return }
         spectrumVisible = visible
         if !visible { clearSpectrum(keepingCapability: true) }
-        Task { [weak self] in await self?.reportNetwork() }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.reportNetwork()
+            } catch {
+                self.failMediaConnectionIfReady(error)
+            }
+        }
     }
 
     private func handle(_ data: Data) {
+        liveness.receivedInbound(at: ProcessInfo.processInfo.systemUptime)
         do {
             let frame = try RadioLiteMediaFrameCodec.decode(data)
             if let expectedSlot = radioSlot, frame.radioSlot != expectedSlot { return }
             switch frame.kind {
             case .audioDownlink:
-                audio.receiveOpusPacket(frame.payload)
+                if audio.receiveOpusPacket(frame.payload) {
+                    liveness.receivedAudio(at: ProcessInfo.processInfo.systemUptime)
+                }
             case .spectrum:
                 guard spectrumVisible else { return }
                 let decoded = try RadioLiteMediaFrameCodec.decodeSpectrum(frame.payload)
@@ -338,6 +437,7 @@ final class RadioLiteMediaClient: ObservableObject {
     }
 
     private func handle(_ value: JSONValue) {
+        liveness.receivedInbound(at: ProcessInfo.processInfo.systemUptime)
         switch value["t"]?.stringValue {
         case "media.policy":
             if let policy: RadioLiteMediaPolicy = value["policy"]?.decoded() {
@@ -390,7 +490,7 @@ final class RadioLiteMediaClient: ObservableObject {
             )
             if isUplinkBound {
                 stopUplink()
-                audio.stopMicrophoneCapture()
+                audio.stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
             }
             switch presentation {
             case .none:
@@ -429,7 +529,7 @@ final class RadioLiteMediaClient: ObservableObject {
                     transmitToken: ownership.transmitToken,
                     epoch: ownership.epoch
                 ) else { return }
-                self.audio.stopMicrophoneCapture()
+                self.audio.stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
                 self.lastError = error.localizedDescription
                 self.onUplinkFailure?(error)
             }
@@ -442,14 +542,29 @@ final class RadioLiteMediaClient: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard !Task.isCancelled, let self, self.state == .ready else { return }
-                self.pingStartedAt = Date()
-                try? await self.channel.send(.object(["t": .string("ping")]))
-                await self.reportNetwork()
+                do {
+                    self.pingStartedAt = Date()
+                    try await self.channel.send(.object(["t": .string("ping")]))
+                    try await self.reportNetwork()
+                    let failure = self.liveness.failure(
+                        at: ProcessInfo.processInfo.systemUptime,
+                        monitoringAudio: self.audio.isMonitoring
+                            && !self.audio.isCapturingMicrophone
+                            && !self.audio.isPlaybackSuspended
+                    )
+                    if let failure {
+                        self.failMediaConnectionIfReady(failure)
+                        return
+                    }
+                } catch {
+                    self.failMediaConnectionIfReady(error)
+                    return
+                }
             }
         }
     }
 
-    private func reportNetwork() async {
+    private func reportNetwork() async throws {
         guard state == .ready, subscribedRadioId != nil else { return }
         let fallback = lastRoundTripMs > 0 ? lastRoundTripMs : 250
         let report = JSONValue.object(
@@ -459,7 +574,13 @@ final class RadioLiteMediaClient: ObservableObject {
             ("bufferedBytes", .number(0)),
             ("spectrumVisible", .bool(spectrumVisible))
         )
-        try? await channel.send(report)
+        try await channel.send(report)
+    }
+
+    private func failMediaConnectionIfReady(_ error: Error) {
+        guard state == .ready else { return }
+        lastError = error.localizedDescription
+        channel.disconnect(notify: true, reason: error)
     }
 
     private func clearSpectrum(keepingCapability: Bool) {

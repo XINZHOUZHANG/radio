@@ -211,6 +211,21 @@ struct RadioLiteRigState: Codable, Equatable, Sendable {
     let mode: String
     let passbandHz: Int
     let ptt: Bool
+    let supportsInternalTuner: Bool?
+
+    init(
+        frequencyHz: Int64,
+        mode: String,
+        passbandHz: Int,
+        ptt: Bool,
+        supportsInternalTuner: Bool? = nil
+    ) {
+        self.frequencyHz = frequencyHz
+        self.mode = mode
+        self.passbandHz = passbandHz
+        self.ptt = ptt
+        self.supportsInternalTuner = supportsInternalTuner
+    }
 }
 
 enum RadioLiteRigMode: String, Codable, CaseIterable, Identifiable, Equatable, Hashable, Sendable {

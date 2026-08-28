@@ -62,10 +62,23 @@ test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => 
   assert.deepEqual(encoder.args.slice(0, 3), ["-i0", "-o0", "opusenc"]);
   assert.ok(encoder.args.includes("--framesize=20"));
   assert.ok(encoder.args.includes("--bitrate=12"));
-  assert.deepEqual(opusDecoderCommand().args.slice(0, 3), [
-    "--quiet", "--rate", "16000",
-  ]);
   assert.throws(() => opusEncoderCommand(100_000), /bitrate/u);
+});
+
+test("Opus decoder disables stdin and stdout buffering with exact argv", () => {
+  assert.deepEqual(opusDecoderCommand(), {
+    file: "stdbuf",
+    args: [
+      "-i0",
+      "-o0",
+      "opusdec",
+      "--quiet",
+      "--rate",
+      "16000",
+      "-",
+      "-",
+    ],
+  });
 });
 
 test("system worker advertises a 4 kHz spectrum span", async (context) => {
@@ -133,7 +146,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   });
   context.after(() => worker.close());
   assert.deepEqual(commands.map((command) => command.file), [
-    "arecord", "stdbuf", "opusdec", "pacat",
+    "arecord", "stdbuf", "stdbuf", "pacat",
   ]);
 
   const [capture, encoder, decoder, playback] = processes;
