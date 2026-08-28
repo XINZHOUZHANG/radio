@@ -77,8 +77,11 @@ export function opusEncoderCommand(bitrate: number): MediaCommand {
     throw new Error("Opus bitrate must be in 6000..64000 bit/s");
   }
   return {
-    file: "opusenc",
+    file: "stdbuf",
     args: [
+      "-i0",
+      "-o0",
+      "opusenc",
       "--quiet",
       "--raw",
       `--raw-rate=${SAMPLE_RATE}`,

@@ -58,7 +58,8 @@ test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => 
     },
   );
   const encoder = opusEncoderCommand(12_000);
-  assert.equal(encoder.file, "opusenc");
+  assert.equal(encoder.file, "stdbuf");
+  assert.deepEqual(encoder.args.slice(0, 3), ["-i0", "-o0", "opusenc"]);
   assert.ok(encoder.args.includes("--framesize=20"));
   assert.ok(encoder.args.includes("--bitrate=12"));
   assert.deepEqual(opusDecoderCommand().args.slice(0, 3), [
@@ -132,7 +133,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   });
   context.after(() => worker.close());
   assert.deepEqual(commands.map((command) => command.file), [
-    "arecord", "opusenc", "opusdec", "pacat",
+    "arecord", "stdbuf", "opusdec", "pacat",
   ]);
 
   const [capture, encoder, decoder, playback] = processes;
@@ -189,7 +190,7 @@ test("system worker routes capture, Opus packets and playback through bounded ch
     spectrumBins: 0,
     spectrumFps: 0,
   });
-  assert.equal(commands.at(-1)?.file, "opusenc");
+  assert.equal(commands.at(-1)?.file, "stdbuf");
   assert.ok(commands.at(-1)?.args.includes("--bitrate=12"));
   assert.equal(faults.length, 0);
   await worker.close();
