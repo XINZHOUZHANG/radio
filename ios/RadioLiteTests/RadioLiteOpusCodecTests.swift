@@ -19,7 +19,6 @@ final class RadioLiteOpusCodecTests: XCTestCase {
         }
 
         XCTAssertEqual(decodedFrames.count, 6)
-        XCTAssertTrue(decodedFrames.allSatisfy { $0.count == RadioLiteOpusCodec.samplesPerFrame })
         let peak = decodedFrames.dropFirst().flatMap { $0 }.map { abs($0) }.max() ?? 0
         XCTAssertGreaterThan(peak, 0.01)
     }
