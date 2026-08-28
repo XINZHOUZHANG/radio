@@ -102,6 +102,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: macos-15
     timeout-minutes: 35
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
@@ -135,6 +137,8 @@ jobs:
           BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
           [[ "$SHORT_VERSION" =~ ^[0-9]+(\.[0-9]+){2}$ ]]
           [[ "$BUILD_VERSION" =~ ^[1-9][0-9]*$ ]]
+          echo "RADIO_LITE_RELEASE_TAG=radio-lite-ios-v${SHORT_VERSION}-build${BUILD_VERSION}" \
+            >> "$GITHUB_ENV"
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP_PATH/Info.plist")" = "true"
           if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP_PATH/Info.plist" >/dev/null 2>&1; then
             echo "::error::NSAllowsLocalNetworking makes iOS ignore NSAllowsArbitraryLoads"
@@ -157,6 +161,32 @@ jobs:
             Radio-Lite-Debug-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
+      - name: Publish branch test release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/public-dummy-web-integration'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE_NOTES="Unsigned Radio Lite test build ${RADIO_LITE_RELEASE_TAG}, generated from commit ${GITHUB_SHA}."
+          if gh release view "$RADIO_LITE_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RADIO_LITE_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Radio Lite iOS ${RADIO_LITE_RELEASE_TAG}" \
+              --notes "$RELEASE_NOTES"
+          else
+            gh release create "$RADIO_LITE_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Radio Lite iOS ${RADIO_LITE_RELEASE_TAG}" \
+              --notes "$RELEASE_NOTES" \
+              --prerelease
+          fi
+          gh release upload "$RADIO_LITE_RELEASE_TAG" \
+            Radio-Lite-Debug-unsigned.ipa \
+            Radio-Lite-Debug-unsigned.ipa.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
       - name: Publish Swift compiler diagnostics
         if: failure() && hashFiles('xcodebuild-device.log') != ''
         run: python3 scripts/annotate-xcodebuild.py xcodebuild-device.log
