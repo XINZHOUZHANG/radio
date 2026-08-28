@@ -17,6 +17,53 @@ The server replies with `auth.ok`, the channel name, principal permissions and
 the configured radio list. Binary data is rejected until authentication has
 completed.
 
+## Capability discovery
+
+`GET /healthz` is unauthenticated and advertises optional server features:
+
+```json
+{
+  "status":"ok",
+  "service":"radio-lite",
+  "protocolVersion":1,
+  "features":{"hardwarePreflight":true,"safetyEvents":true}
+}
+```
+
+Clients must treat a missing feature field as unsupported. In particular,
+missing `hardwarePreflight` means the server is too old or a reverse proxy is
+not forwarding `/api/v1/hardware/test`; clients should not present a generic
+404 for that case.
+
+## Safety state stream
+
+After `auth.ok` on `/ws/control`, the server immediately sends one complete,
+epoch-scoped safety snapshot envelope. It includes every configured radio,
+including radios that currently have no alert:
+
+```json
+{"t":"safety.snapshot.begin","safetyEpoch":"boot-uuid"}
+{"t":"safety.snapshot","safetyEpoch":"boot-uuid","radioId":"main","revision":4,"alert":{"kind":"dekey_required","startedAtMs":1787700000000,"source":"software"}}
+{"t":"safety.snapshot","safetyEpoch":"boot-uuid","radioId":"backup","revision":0,"alert":null}
+{"t":"safety.snapshot.end","safetyEpoch":"boot-uuid"}
+```
+
+Later changes use revisioned increments:
+
+```json
+{"t":"safety.event","safetyEpoch":"boot-uuid","radioId":"main","revision":5,"kind":"dekey_escalated","startedAtMs":1787700000000,"source":"software"}
+{"t":"safety.event","safetyEpoch":"boot-uuid","radioId":"main","revision":6,"kind":"recovered","startedAtMs":1787700032000,"source":"software"}
+```
+
+Persistent alert kinds are `active`, `external_ptt`, `telemetry_uncertain`,
+`dekey_required`, `dekey_escalated`, `swr_trip_latched`, and
+`swr_rearm_pending`. `recovered` is an event only: it clears the corresponding
+radio alert and never appears inside a snapshot. Clients replace state only
+after receiving the matching `safety.snapshot.end`, ignore older revisions,
+and discard state from a previous `safetyEpoch` after committing the new
+complete envelope. This server stream is authoritative for remote PTT-OFF
+confirmation and persistent stop-failure warnings.
+
 Authenticated HTTP APIs accept the same browser session cookie. Mutating
 browser requests additionally require the session's CSRF token in
 `X-CSRF-Token`. A paired native app instead sends both of these headers; Bearer

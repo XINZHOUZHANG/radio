@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import WebSocket, { type RawData } from "ws";
 
+import { AuditLog } from "../src/auth/audit-log.ts";
 import { DeviceStore } from "../src/auth/device-store.ts";
 import { SessionStore } from "../src/auth/session-store.ts";
 import { UserStore } from "../src/auth/user-store.ts";
@@ -78,12 +79,12 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
       codeFactory: () => codes.shift() ?? 999999,
       hmacKey: Buffer.alloc(32, 6),
     },
-    runtimeFactory: async (profile) => {
+    runtimeFactory: async (profile, _managedPort, safetyEvents) => {
       const runtime = new RadioRuntime(profile, rig, async () => {
         if (failRuntimeClose) {
           throw new Error("test runtime cleanup remained uncertain");
         }
-      }, now);
+      }, now, { safetyEvents });
       await runtime.initialize();
       return runtime;
     },
@@ -120,7 +121,12 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
 
   let response = await fetch(`${base}/healthz`);
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).status, "ok");
+  assert.deepEqual(await response.json(), {
+    status: "ok",
+    service: "radio-lite",
+    protocolVersion: 1,
+    features: { hardwarePreflight: true, safetyEvents: true },
+  });
   assert.equal(service.setupCode, "123456");
 
   const longPassword = "界".repeat(1_200);
@@ -339,16 +345,30 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     webSocket.once("open", resolve);
     webSocket.once("error", reject);
   });
-  webSocket.send(JSON.stringify({
+  const authenticated = await sendJsonAndReceive(webSocket, {
     t: "auth.device",
     deviceId: credentials.deviceId,
     accessToken: credentials.accessToken,
-  }));
-  const authenticated = await nextJsonMessage(webSocket);
+  });
   assert.equal(authenticated.t, "auth.ok");
   assert.equal(authenticated.channel, "control");
   assert.equal(authenticated.principal.deviceId, "device-1");
   assert.deepEqual(authenticated.radios.map((radio: { id: string }) => radio.id), ["main"]);
+  const safetyBegin = await nextJsonMessage(webSocket);
+  const safetySnapshot = await nextJsonMessage(webSocket);
+  const safetyEnd = await nextJsonMessage(webSocket);
+  assert.equal(safetyBegin.t, "safety.snapshot.begin");
+  assert.deepEqual(safetySnapshot, {
+    t: "safety.snapshot",
+    safetyEpoch: safetyBegin.safetyEpoch,
+    radioId: "main",
+    revision: 0,
+    alert: null,
+  });
+  assert.deepEqual(safetyEnd, {
+    t: "safety.snapshot.end",
+    safetyEpoch: safetyBegin.safetyEpoch,
+  });
 
   webSocket.send(JSON.stringify({ t: "ping" }));
   assert.equal((await nextJsonMessage(webSocket)).t, "pong");
@@ -495,12 +515,11 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     mediaSocket.once("open", resolve);
     mediaSocket.once("error", reject);
   });
-  mediaSocket.send(JSON.stringify({
+  const mediaAuthenticated = await sendJsonAndReceive(mediaSocket, {
     t: "auth.device",
     deviceId: credentials.deviceId,
     accessToken: credentials.accessToken,
-  }));
-  const mediaAuthenticated = await nextJsonMessage(mediaSocket);
+  });
   assert.equal(mediaAuthenticated.t, "auth.ok");
   assert.equal(mediaAuthenticated.channel, "media");
 
@@ -631,6 +650,13 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.t, "tx.stopped");
   assert.equal(rig.ptt, false);
   assert.equal((await uplinkEnded).t, "media.uplink.ended");
+  await waitForAsync(async () => {
+    const events = await new AuditLog(join(directory, "audit.jsonl")).readNewest(1_000);
+    const kinds = events
+      .filter((event) => event.action === "radio.safety-state")
+      .map((event) => event.metadata?.kind);
+    return kinds.includes("active") && kinds.includes("recovered");
+  });
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "tx.start",
@@ -700,64 +726,93 @@ function postJson(
   });
 }
 
+interface JsonQueueWaiter {
+  resolve(value: any): void;
+  reject(error: Error): void;
+}
+
+interface JsonQueue {
+  readonly messages: any[];
+  readonly waiters: JsonQueueWaiter[];
+  failure: Error | null;
+}
+
+const jsonQueues = new WeakMap<WebSocket, JsonQueue>();
+
+function queueFor(webSocket: WebSocket): JsonQueue {
+  const existing = jsonQueues.get(webSocket);
+  if (existing) {
+    return existing;
+  }
+
+  const queue: JsonQueue = { messages: [], waiters: [], failure: null };
+  const fail = (error: Error) => {
+    queue.failure = error;
+    for (const waiter of queue.waiters.splice(0)) {
+      waiter.reject(error);
+    }
+  };
+  webSocket.on("message", (data: RawData, isBinary: boolean) => {
+    if (isBinary) {
+      return;
+    }
+    let parsed: any;
+    try {
+      parsed = JSON.parse(data.toString());
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    const waiter = queue.waiters.shift();
+    if (waiter) {
+      waiter.resolve(parsed);
+    } else {
+      queue.messages.push(parsed);
+    }
+  });
+  webSocket.on("error", fail);
+  jsonQueues.set(webSocket, queue);
+  return queue;
+}
+
 function nextJsonMessage(webSocket: WebSocket): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const onMessage = (data: RawData) => {
-      cleanup();
-      try {
-        resolve(JSON.parse(data.toString()));
-      } catch (error) {
-        reject(error);
-      }
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      webSocket.off("message", onMessage);
-      webSocket.off("error", onError);
-    };
-    webSocket.once("message", onMessage);
-    webSocket.once("error", onError);
-  });
+  const queue = queueFor(webSocket);
+  const message = queue.messages.shift();
+  if (message !== undefined) {
+    return Promise.resolve(message);
+  }
+  if (queue.failure) {
+    return Promise.reject(queue.failure);
+  }
+  return new Promise((resolve, reject) => queue.waiters.push({ resolve, reject }));
 }
 
-function sendJsonAndReceive(webSocket: WebSocket, value: unknown): Promise<any> {
-  const response = nextJsonMessage(webSocket);
+async function sendJsonAndReceive(webSocket: WebSocket, value: unknown): Promise<any> {
+  let response = nextJsonMessage(webSocket);
   webSocket.send(JSON.stringify(value));
-  return response;
+  while (true) {
+    const parsed = await response;
+    if (typeof parsed?.t !== "string" || !parsed.t.startsWith("safety.")) {
+      return parsed;
+    }
+    response = nextJsonMessage(webSocket);
+  }
 }
 
-function sendJsonUntil(webSocket: WebSocket, value: unknown, expectedType: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const onMessage = (data: RawData, isBinary: boolean) => {
-      if (isBinary) {
-        return;
-      }
-      try {
-        const parsed = JSON.parse(data.toString());
-        if (parsed.t === expectedType) {
-          cleanup();
-          resolve(parsed);
-        }
-      } catch (error) {
-        cleanup();
-        reject(error);
-      }
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      webSocket.off("message", onMessage);
-      webSocket.off("error", onError);
-    };
-    webSocket.on("message", onMessage);
-    webSocket.on("error", onError);
-    webSocket.send(JSON.stringify(value));
-  });
+async function sendJsonUntil(
+  webSocket: WebSocket,
+  value: unknown,
+  expectedType: string,
+): Promise<any> {
+  let response = nextJsonMessage(webSocket);
+  webSocket.send(JSON.stringify(value));
+  while (true) {
+    const parsed = await response;
+    if (parsed?.t === expectedType) {
+      return parsed;
+    }
+    response = nextJsonMessage(webSocket);
+  }
 }
 
 function nextBinaryMessage(webSocket: WebSocket): Promise<Buffer> {
@@ -786,6 +841,19 @@ function nextBinaryMessage(webSocket: WebSocket): Promise<Buffer> {
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("condition was not satisfied before timeout");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
     if (Date.now() >= deadline) {
       throw new Error("condition was not satisfied before timeout");
     }

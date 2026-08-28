@@ -20,6 +20,7 @@ enum RadioLiteSessionError: LocalizedError {
     case invalidRigControlValue
     case rigControlLocked(String)
     case administratorRequired
+    case hardwarePreflightUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +33,8 @@ enum RadioLiteSessionError: LocalizedError {
         case .invalidRigControlValue: "控件数值超出电台允许范围"
         case .rigControlLocked(let reason): reason
         case .administratorRequired: "此操作需要管理员账户"
+        case .hardwarePreflightUnavailable:
+            "服务器版本过旧或反向代理路径错误，当前不支持硬件预检"
         }
     }
 }
@@ -73,6 +76,7 @@ final class RadioLiteSession: ObservableObject {
     private var server: RadioLiteServer?
     private var credential: RadioLiteCredential?
     private var http: RadioLiteHTTPClient?
+    private var serverFeatures: RadioLiteServerFeatures?
     private var intentionalDisconnect = false
     private var controlHeartbeatTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -160,6 +164,7 @@ final class RadioLiteSession: ObservableObject {
             guard healthValue.service == "radio-lite", healthValue.protocolVersion == 1 else {
                 throw RadioLiteHTTPError.invalidResponse
             }
+            serverFeatures = healthValue.features
             loginServerReachable = true
             setupRequired = setupValue.initializationRequired
         } catch {
@@ -1284,7 +1289,24 @@ final class RadioLiteSession: ObservableObject {
     ) async throws -> RadioLiteHardwarePreflightResult {
         guard isAdmin else { throw RadioLiteSessionError.administratorRequired }
         guard let http else { throw RadioLiteSessionError.notConnected }
-        return try await http.testHardware(profile)
+        if serverFeatures == nil {
+            let health = try await http.health()
+            guard health.service == "radio-lite", health.protocolVersion == 1 else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            serverFeatures = health.features
+        }
+        guard serverFeatures?.hardwarePreflight == true else {
+            throw RadioLiteSessionError.hardwarePreflightUnavailable
+        }
+        do {
+            return try await http.testHardware(profile)
+        } catch let error as RadioLiteHTTPError {
+            if case .http(let status, _, _) = error, status == 404 {
+                throw RadioLiteSessionError.hardwarePreflightUnavailable
+            }
+            throw error
+        }
     }
 
     @discardableResult
@@ -2414,6 +2436,7 @@ final class RadioLiteSession: ObservableObject {
         server = nil
         credential = nil
         http = nil
+        serverFeatures = nil
         principal = nil
         username = nil
         radios = []

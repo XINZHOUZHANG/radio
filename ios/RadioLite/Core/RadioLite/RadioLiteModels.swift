@@ -433,8 +433,14 @@ struct RadioLiteSetupStatus: Codable, Equatable, Sendable {
     let initializationRequired: Bool
 }
 
+struct RadioLiteServerFeatures: Codable, Equatable, Sendable {
+    let hardwarePreflight: Bool
+    let safetyEvents: Bool
+}
+
 struct RadioLiteHealth: Codable, Equatable, Sendable {
     let status: String
     let service: String
     let protocolVersion: Int
+    let features: RadioLiteServerFeatures?
 }

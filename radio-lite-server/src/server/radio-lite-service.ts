@@ -94,6 +94,7 @@ export class RadioLiteService {
   readonly #hardwareDiscovery: HardwareDiscovery;
   readonly #hardwarePreflight: HardwarePreflightRunner;
   readonly #secureCookies: boolean;
+  #safetyAuditUnsubscribe: (() => void) | null = null;
   #server: Server | null = null;
   #webSocketServer: WebSocketServer | null = null;
   readonly #webSockets = new Set<WebSocket>();
@@ -195,6 +196,21 @@ export class RadioLiteService {
     if (this.#users.list().length === 0) {
       this.#setupCode = this.#codes.issue("first-admin", "initial_setup", 10 * 60_000).code;
     }
+    this.#safetyAuditUnsubscribe = this.#runtimes.safetyEvents.subscribeControl((value) => {
+      if (value.t !== "safety.event") return;
+      void this.#audit.append({
+        occurredAtMs: this.#now(),
+        action: "radio.safety-state",
+        result: value.kind === "active" || value.kind === "recovered" ? "success" : "failure",
+        targetId: value.radioId,
+        metadata: {
+          kind: value.kind,
+          revision: value.revision,
+          source: value.source,
+          "safety-epoch": value.safetyEpoch,
+        },
+      }).catch(() => undefined);
+    });
     this.#initialized = true;
   }
 
@@ -275,11 +291,11 @@ export class RadioLiteService {
         });
     const failures: unknown[] = [];
     for (const operation of [
+      () => this.#runtimes.close(),
       () => this.#digital.close(),
       () => this.#media.close(),
       () => webSocketServerClosing,
       () => serverClosing,
-      () => this.#runtimes.close(),
     ]) {
       try {
         await operation();
@@ -287,6 +303,8 @@ export class RadioLiteService {
         failures.push(error);
       }
     }
+    this.#safetyAuditUnsubscribe?.();
+    this.#safetyAuditUnsubscribe = null;
     if (failures.length > 0) {
       throw new RadioRuntimeCleanupUncertainError(
         "service shutdown cleanup could not be confirmed",
@@ -306,6 +324,7 @@ export class RadioLiteService {
     let authenticatedUser: PublicUser | null = null;
     let authenticatedPrincipalId: string | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+    let safetyUnsubscribe: (() => void) | null = null;
     let commandTail: Promise<void> = Promise.resolve();
     let mediaTail: Promise<void> = Promise.resolve();
     const authTimer = setTimeout(() => {
@@ -344,6 +363,14 @@ export class RadioLiteService {
       });
       if (channel === "control") {
         this.#controlWebSockets.add(webSocket);
+        safetyUnsubscribe = this.#runtimes.safetyEvents.subscribeControl((value) => {
+          if (
+            webSocket.readyState === WebSocket.OPEN &&
+            webSocket.bufferedAmount <= 256 * 1_024
+          ) {
+            sendWebSocketJson(webSocket, value);
+          }
+        });
       }
       if (channel === "media") {
         this.#media.connect({
@@ -463,6 +490,8 @@ export class RadioLiteService {
       if (expiryTimer !== null) {
         clearTimeout(expiryTimer);
       }
+      safetyUnsubscribe?.();
+      safetyUnsubscribe = null;
       this.#webSockets.delete(webSocket);
       this.#controlWebSockets.delete(webSocket);
       if (channel === "media") {
@@ -921,7 +950,15 @@ export class RadioLiteService {
       const url = new URL(request.url ?? "/", "http://radio-lite.invalid");
       validateOrigin(request);
       if (method === "GET" && url.pathname === "/healthz") {
-        sendJson(response, 200, { status: "ok", service: "radio-lite", protocolVersion: 1 });
+        sendJson(response, 200, {
+          status: "ok",
+          service: "radio-lite",
+          protocolVersion: 1,
+          features: {
+            hardwarePreflight: true,
+            safetyEvents: true,
+          },
+        });
         return;
       }
       if (method === "GET" && url.pathname === "/api/v1/setup/status") {

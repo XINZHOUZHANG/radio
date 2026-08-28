@@ -340,6 +340,7 @@ export class RadioRuntime {
 export type RadioRuntimeFactory = (
   profile: RadioProfile,
   managedPort: number,
+  safetyEvents: SafetyEventHub,
 ) => Promise<RadioRuntime>;
 
 export type ManagedSerialDeviceResolver = (devicePath: string) => string;
@@ -452,7 +453,7 @@ export class RadioRuntimeRegistry {
       this.#runtimeSerialDevices.set(radioId, serialDeviceClaim);
     }
     try {
-      runtime = this.#factory(profile, 4_600 + index)
+      runtime = this.#factory(profile, 4_600 + index, this.safetyEvents)
         .catch((error) => {
           if (this.#runtimes.get(radioId) === runtime) {
             this.#runtimes.delete(radioId);

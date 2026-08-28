@@ -272,6 +272,38 @@ test("raw PTT write plus strict read uses exactly two CAT commands", async () =>
   assert.deepEqual(commands, ["\\set_ptt 0", "\\get_ptt"]);
 });
 
+test("de-key CAT commands use the safety queue", async (context) => {
+  const fixture = deferredTransportFixture();
+  context.after(async () => fixture.transport.close());
+  const rig = new HamlibRig(fixture.transport);
+
+  const tunerOff = rig.writeInternalTuner(false);
+  await fixture.socket.waitForWrite("\\set_func TUNER 0\n");
+  fixture.socket.replyActive();
+  await tunerOff;
+  const pttOff = rig.writePtt(false);
+  await fixture.socket.waitForWrite("\\set_ptt 0\n");
+  fixture.socket.replyActive();
+  await pttOff;
+  const readback = rig.readPtt();
+  await fixture.socket.waitForWrite("\\get_ptt\n");
+  fixture.socket.replyActive("PTT: 0");
+  assert.equal(await readback, false);
+
+  assert.deepEqual(
+    fixture.transport.commandTrace().map(({ command, priority, source }) => ({
+      command,
+      priority,
+      source,
+    })),
+    [
+      { command: "\\set_func TUNER 0", priority: "safety", source: "ptt-off" },
+      { command: "\\set_ptt 0", priority: "safety", source: "ptt-off" },
+      { command: "\\get_ptt", priority: "safety", source: "ptt-off" },
+    ],
+  );
+});
+
 test("raw internal tuner write sends exactly one CAT command", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({

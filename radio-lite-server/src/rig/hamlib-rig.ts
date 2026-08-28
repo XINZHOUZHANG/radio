@@ -1,10 +1,20 @@
 import type { PttMethod } from "../config/types.ts";
 import type { RigResponse } from "./extended-protocol.ts";
-import { RigReportError } from "./transport.ts";
+import { RigReportError, type RigRequestOptions } from "./transport.ts";
 
 export type RigRequester = {
-  request(command: string): Promise<RigResponse>;
+  request(command: string, options?: RigRequestOptions): Promise<RigResponse>;
 };
+
+const TELEMETRY_REQUEST = { source: "telemetry" } as const satisfies RigRequestOptions;
+const PTT_OFF_REQUEST = {
+  priority: "safety",
+  source: "ptt-off",
+} as const satisfies RigRequestOptions;
+const SAFETY_READ_REQUEST = {
+  priority: "safety",
+  source: "ptt-off",
+} as const satisfies RigRequestOptions;
 
 export type HamlibRigState = {
   frequencyHz: number;
@@ -153,8 +163,8 @@ export class HamlibRig {
 
   async readState(): Promise<HamlibRigState> {
     const [frequency, mode, ptt] = await Promise.all([
-      this.#transport.request("\\get_freq"),
-      this.#transport.request("\\get_mode"),
+      this.#transport.request("\\get_freq", TELEMETRY_REQUEST),
+      this.#transport.request("\\get_mode", TELEMETRY_REQUEST),
       this.#readPttForDisplay(),
     ]);
     return {
@@ -210,7 +220,7 @@ export class HamlibRig {
       try {
         controls.push({
           ...definition,
-          value: await this.#readControlValue(definition),
+          value: await this.#readControlValue(definition, TELEMETRY_REQUEST),
         });
       } catch (error) {
         if (!(error instanceof RigReportError)) {
@@ -275,14 +285,22 @@ export class HamlibRig {
 
   /** Read physical PTT evidence directly from Hamlib; command cache is never evidence. */
   async readPtt(): Promise<boolean> {
-    const confirmed = booleanField(await this.#transport.request("\\get_ptt"), "PTT");
+    const confirmed = booleanField(
+      await this.#transport.request("\\get_ptt", SAFETY_READ_REQUEST),
+      "PTT",
+    );
     this.#lastCommandedPttForDisplayOnly = confirmed;
     return confirmed;
   }
 
   async #readPttForDisplay(): Promise<boolean> {
     try {
-      return await this.readPtt();
+      const confirmed = booleanField(
+        await this.#transport.request("\\get_ptt", TELEMETRY_REQUEST),
+        "PTT",
+      );
+      this.#lastCommandedPttForDisplayOnly = confirmed;
+      return confirmed;
     } catch (error) {
       if (this.#isUnavailablePtt(error)) {
         return this.#lastCommandedPttForDisplayOnly;
@@ -296,7 +314,10 @@ export class HamlibRig {
       throw new Error("PTT state must be boolean");
     }
     try {
-      await this.#transport.request(`\\set_ptt ${enabled ? 1 : 0}`);
+      await this.#transport.request(
+        `\\set_ptt ${enabled ? 1 : 0}`,
+        enabled ? undefined : PTT_OFF_REQUEST,
+      );
       return true;
     } catch (error) {
       if (this.#isUnavailablePtt(error)) {
@@ -331,7 +352,10 @@ export class HamlibRig {
     if (typeof enabled !== "boolean") {
       throw new Error("tuner state must be boolean");
     }
-    await this.#transport.request(`\\set_func TUNER ${enabled ? 1 : 0}`);
+    await this.#transport.request(
+      `\\set_func TUNER ${enabled ? 1 : 0}`,
+      enabled ? undefined : PTT_OFF_REQUEST,
+    );
   }
 
   async #discoverControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
@@ -345,10 +369,10 @@ export class HamlibRig {
   async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
     const [readableLevels, writableLevels, readableFunctions, writableFunctions] =
       await Promise.all([
-        this.#queryCapabilityTokens("\\get_level ?", "Level"),
-        this.#queryCapabilityTokens("\\set_level ?", "Level"),
-        this.#queryCapabilityTokens("\\get_func ?", "Func"),
-        this.#queryCapabilityTokens("\\set_func ?", "Func"),
+        this.#queryCapabilityTokens("\\get_level ?", "Level", TELEMETRY_REQUEST),
+        this.#queryCapabilityTokens("\\set_level ?", "Level", TELEMETRY_REQUEST),
+        this.#queryCapabilityTokens("\\get_func ?", "Func", TELEMETRY_REQUEST),
+        this.#queryCapabilityTokens("\\set_func ?", "Func", TELEMETRY_REQUEST),
       ]);
     const levelIntersection = intersection(readableLevels, writableLevels);
     const functionIntersection = intersection(readableFunctions, writableFunctions);
@@ -357,7 +381,7 @@ export class HamlibRig {
       if (!levelIntersection.has(definition.token)) {
         continue;
       }
-      levels.push(await this.#levelDefinitionWithRigGranularity(definition));
+      levels.push(await this.#levelDefinitionWithRigGranularity(definition, TELEMETRY_REQUEST));
     }
     return [
       ...levels,
@@ -367,10 +391,14 @@ export class HamlibRig {
     ];
   }
 
-  async #queryCapabilityTokens(command: string, field: string): Promise<ReadonlySet<string>> {
+  async #queryCapabilityTokens(
+    command: string,
+    field: string,
+    options?: RigRequestOptions,
+  ): Promise<ReadonlySet<string>> {
     let response: RigResponse;
     try {
-      response = await this.#transport.request(command);
+      response = await this.#transport.request(command, options);
     } catch (error) {
       if (error instanceof RigReportError) {
         return new Set();
@@ -387,9 +415,13 @@ export class HamlibRig {
 
   async #levelDefinitionWithRigGranularity(
     fallback: HamlibRigControlDefinition,
+    options?: RigRequestOptions,
   ): Promise<HamlibRigControlDefinition> {
     try {
-      const response = await this.#transport.request(`\\set_level ${fallback.token} ?`);
+      const response = await this.#transport.request(
+        `\\set_level ${fallback.token} ?`,
+        options,
+      );
       const raw = response.values[0] ?? response.fields.get("Level Value") ?? "";
       const granularity = parseLevelGranularity(raw);
       return granularity === null ? fallback : { ...fallback, ...granularity };
@@ -401,12 +433,18 @@ export class HamlibRig {
     }
   }
 
-  async #readControlValue(definition: HamlibRigControlDefinition): Promise<number> {
+  async #readControlValue(
+    definition: HamlibRigControlDefinition,
+    options?: RigRequestOptions,
+  ): Promise<number> {
     if (definition.kind === "passband") {
-      return integerField(await this.#transport.request("\\get_mode"), "Passband");
+      return integerField(
+        await this.#transport.request("\\get_mode", options),
+        "Passband",
+      );
     }
     const command = definition.kind === "level" ? "get_level" : "get_func";
-    const response = await this.#transport.request(`\\${command} ${definition.token}`);
+    const response = await this.#transport.request(`\\${command} ${definition.token}`, options);
     return numericResponseValue(response, definition.token);
   }
 }
