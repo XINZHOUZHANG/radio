@@ -36,6 +36,24 @@ test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => 
         "--format=s16le",
         "--channels=1",
         "--rate=16000",
+        "--latency-msec=40",
+        "--process-time-msec=20",
+      ],
+    },
+  );
+  assert.deepEqual(
+    playbackCommand({ backend: "pulse", id: "alsa_output.usb-radio" }),
+    {
+      file: "pacat",
+      args: [
+        "--playback",
+        "--raw",
+        "--device=alsa_output.usb-radio",
+        "--format=s16le",
+        "--channels=1",
+        "--rate=16000",
+        "--latency-msec=40",
+        "--process-time-msec=20",
       ],
     },
   );

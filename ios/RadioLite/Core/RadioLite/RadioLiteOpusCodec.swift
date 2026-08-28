@@ -29,7 +29,6 @@ final class RadioLiteOpusCodec {
 
     private var encoder: AVAudioConverter
     private let decoder: AVAudioConverter
-    private let opusFramesPerPacket: UInt32
     private(set) var bitrate: Int
 
     init(bitrate: Int = 20_000) throws {
@@ -39,7 +38,7 @@ final class RadioLiteOpusCodec {
             channels: 1,
             interleaved: false
         ) else { throw RadioLiteOpusError.formatUnavailable }
-        var selected: (AVAudioFormat, AVAudioConverter, AVAudioConverter, UInt32)?
+        var selected: (AVAudioFormat, AVAudioConverter, AVAudioConverter)?
         // Some iOS releases expose Opus only with its 48 kHz RTP clock even when
         // the decoded PCM is 16 kHz. AudioConverter performs that rate change.
         for opusRate in [Self.sampleRate, 48_000] {
@@ -57,7 +56,7 @@ final class RadioLiteOpusCodec {
             if let opus = AVAudioFormat(streamDescription: &description),
                let encoder = AVAudioConverter(from: pcm, to: opus),
                let decoder = AVAudioConverter(from: opus, to: pcm) {
-                selected = (opus, encoder, decoder, description.mFramesPerPacket)
+                selected = (opus, encoder, decoder)
                 break
             }
         }
@@ -68,7 +67,6 @@ final class RadioLiteOpusCodec {
         self.opusFormat = selected.0
         self.encoder = selected.1
         self.decoder = selected.2
-        self.opusFramesPerPacket = selected.3
         self.bitrate = Self.clampBitrate(bitrate)
         encoder.bitRate = self.bitrate
         encoder.primeMethod = .none
@@ -110,7 +108,7 @@ final class RadioLiteOpusCodec {
         var conversionError: NSError?
         let status = encoder.convert(to: output, error: &conversionError) { _, inputStatus in
             guard !supplied else {
-                inputStatus.pointee = .endOfStream
+                inputStatus.pointee = .noDataNow
                 return nil
             }
             supplied = true
@@ -118,11 +116,13 @@ final class RadioLiteOpusCodec {
             return input
         }
         if let conversionError {
+            encoder.reset()
             throw RadioLiteOpusError.conversionFailed(conversionError.localizedDescription)
         }
-        guard status == .haveData || status == .inputRanDry || status == .endOfStream,
+        guard status == .haveData || status == .inputRanDry,
               output.byteLength > 0,
               output.byteLength <= Self.maximumPacketBytes else {
+            encoder.reset()
             throw RadioLiteOpusError.emptyPacket
         }
         return Data(bytes: output.data, count: Int(output.byteLength))
@@ -142,19 +142,19 @@ final class RadioLiteOpusCodec {
         input.packetCount = 1
         input.packetDescriptions?[0] = AudioStreamPacketDescription(
             mStartOffset: 0,
-            mVariableFramesInPacket: opusFramesPerPacket,
+            mVariableFramesInPacket: 0,
             mDataByteSize: UInt32(packet.count)
         )
 
         guard let output = AVAudioPCMBuffer(
             pcmFormat: pcmFormat,
-            frameCapacity: AVAudioFrameCount(Self.samplesPerFrame * 6)
+            frameCapacity: AVAudioFrameCount(Self.samplesPerFrame)
         ) else { throw RadioLiteOpusError.formatUnavailable }
         var supplied = false
         var conversionError: NSError?
         let status = decoder.convert(to: output, error: &conversionError) { _, inputStatus in
             guard !supplied else {
-                inputStatus.pointee = .endOfStream
+                inputStatus.pointee = .noDataNow
                 return nil
             }
             supplied = true
@@ -162,11 +162,13 @@ final class RadioLiteOpusCodec {
             return input
         }
         if let conversionError {
+            decoder.reset()
             throw RadioLiteOpusError.conversionFailed(conversionError.localizedDescription)
         }
-        guard status == .haveData || status == .inputRanDry || status == .endOfStream,
+        guard status == .haveData || status == .inputRanDry,
               output.frameLength > 0,
               let channel = output.floatChannelData?[0] else {
+            decoder.reset()
             throw RadioLiteOpusError.emptyPacket
         }
         return Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))

@@ -39,7 +39,15 @@ export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
       }
     : {
         file: "parec",
-        args: ["--raw", `--device=${endpoint.id}`, "--format=s16le", "--channels=1", `--rate=${SAMPLE_RATE}`],
+        args: [
+          "--raw",
+          `--device=${endpoint.id}`,
+          "--format=s16le",
+          "--channels=1",
+          `--rate=${SAMPLE_RATE}`,
+          "--latency-msec=40",
+          "--process-time-msec=20",
+        ],
       };
 }
 
@@ -51,7 +59,16 @@ export function playbackCommand(endpoint: AudioEndpoint): MediaCommand {
       }
     : {
         file: "pacat",
-        args: ["--playback", "--raw", `--device=${endpoint.id}`, "--format=s16le", "--channels=1", `--rate=${SAMPLE_RATE}`],
+        args: [
+          "--playback",
+          "--raw",
+          `--device=${endpoint.id}`,
+          "--format=s16le",
+          "--channels=1",
+          `--rate=${SAMPLE_RATE}`,
+          "--latency-msec=40",
+          "--process-time-msec=20",
+        ],
       };
 }
 
