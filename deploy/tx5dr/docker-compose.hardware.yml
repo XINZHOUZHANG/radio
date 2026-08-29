@@ -1,0 +1,20 @@
+services:
+  tx5dr:
+    volumes:
+      - /dev/snd:/dev/snd:rw
+      - /dev/shm:/dev/shm:rw
+      - /dev/bus/usb:/dev/bus/usb:rw
+      - /dev/serial/by-id:/dev/serial/by-id:ro
+    devices:
+      - /dev/bus/usb:/dev/bus/usb:rwm
+      - /dev/snd:/dev/snd:rwm
+    group_add:
+      - audio
+      - dialout
+
+# Add the exact tty nodes used by the station before enabling real hardware, e.g.:
+# services:
+#   tx5dr:
+#     devices:
+#       - /dev/ttyUSB0:/dev/ttyUSB0:rwm
+#       - /dev/ttyACM0:/dev/ttyACM0:rwm

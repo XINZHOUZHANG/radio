@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "tx5dr-mobile-six-digit-pairing",
+  "basedOn": {
+    "repository": "https://github.com/boybook/tx-5dr",
+    "commit": "f9e07fec6c5fb67b5c904936b5df03c1e3b0f5dc"
+  },
+  "implementationPatch": "deploy/tx5dr/patches/0001-mobile-six-digit-pairing.patch",
+  "http": {
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/api/auth/mobile-pairing-codes",
+        "minimumRole": "admin"
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/mobile-pairing-codes/exchange",
+        "minimumRole": "public-rate-limited"
+      }
+    ]
+  },
+  "security": {
+    "digits": 6,
+    "ttlMilliseconds": 120000,
+    "singleUse": true,
+    "maximumOutstandingPerIssuer": 3,
+    "maximumOutstandingGlobal": 24,
+    "maximumExchangeAttemptsPerIpPerMinute": 6
+  }
+}

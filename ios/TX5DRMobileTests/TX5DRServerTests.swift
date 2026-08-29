@@ -1,0 +1,125 @@
+import XCTest
+@testable import TX5DRMobile
+
+final class TX5DRServerTests: XCTestCase {
+    func testAddsDefaultSchemeAndAPIPrefix() throws {
+        let server = try TX5DRServer(address: "radio.example:8076/")
+
+        XCTAssertEqual(server.baseURL.absoluteString, "http://radio.example:8076")
+        XCTAssertEqual(try server.apiURL("/auth/me").absoluteString, "http://radio.example:8076/api/auth/me")
+    }
+
+    func testPreservesDeploymentBasePathAndEncodesQuery() throws {
+        let server = try TX5DRServer(address: "https://radio.example/tx5dr/")
+        let url = try server.apiURL("logbooks", queryItems: [URLQueryItem(name: "q", value: "BG 2")])
+
+        XCTAssertEqual(url.absoluteString, "https://radio.example/tx5dr/api/logbooks?q=BG%202")
+    }
+
+    func testBuildsControlWebSocketURL() throws {
+        let secure = try TX5DRServer(address: "https://radio.example")
+        let insecure = try TX5DRServer(address: "http://192.0.2.10:8076")
+
+        XCTAssertEqual(try secure.webSocketURL("/ws").absoluteString, "wss://radio.example/api/ws")
+        XCTAssertEqual(try insecure.webSocketURL("/ws").absoluteString, "ws://192.0.2.10:8076/api/ws")
+    }
+
+    func testBuildsFilteredLogbookWebSocketURL() throws {
+        let server = try TX5DRServer(address: "https://radio.example/tx5dr")
+        let url = try server.webSocketURL(
+            "/ws/logbook",
+            queryItems: [
+                URLQueryItem(name: "operatorId", value: "operator 1"),
+                URLQueryItem(name: "logBookId", value: "field-log"),
+                URLQueryItem(name: "token", value: "jwt+token"),
+            ]
+        )
+
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.scheme, "wss")
+        XCTAssertEqual(components.host, "radio.example")
+        XCTAssertEqual(components.path, "/tx5dr/api/ws/logbook")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "operatorId" }?.value, "operator 1")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "logBookId" }?.value, "field-log")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "token" }?.value, "jwt+token")
+    }
+
+    func testExternalizesInternalRealtimeOfferAndReplacesToken() throws {
+        let server = try TX5DRServer(address: "https://radio.example:8443")
+        let offer = try XCTUnwrap(URL(string: "ws://127.0.0.1:4000/api/realtime/ws-compat?token=old&mode=pcm"))
+        let external = try server.externalizedOfferURL(offer, token: "new token")
+        let components = try XCTUnwrap(URLComponents(url: external, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(components.scheme, "wss")
+        XCTAssertEqual(components.host, "radio.example")
+        XCTAssertEqual(components.port, 8443)
+        XCTAssertEqual(components.path, "/api/realtime/ws-compat")
+        XCTAssertEqual(components.queryItems?.filter { $0.name == "token" }.map(\.value), ["new token"])
+        XCTAssertEqual(components.queryItems?.first { $0.name == "mode" }?.value, "pcm")
+    }
+
+    func testBuildsAuthenticatedPluginPageURL() throws {
+        let server = try TX5DRServer(address: "https://radio.example/tx5dr")
+        let url = try server.pluginPageURL(
+            pluginName: "log-sync",
+            pageId: "settings",
+            params: ["operatorId": "operator 1", "callsign": "BG2XYZ"],
+            token: "jwt+token",
+            locale: "zh-Hant",
+            theme: "dark"
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(components.path, "/tx5dr/api/plugins/log-sync/ui/settings.html")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "auth_token" }?.value, "jwt+token")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "operatorId" }?.value, "operator 1")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "callsign" }?.value, "BG2XYZ")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "_locale" }?.value, "zh-Hant")
+        XCTAssertEqual(components.queryItems?.first { $0.name == "_theme" }?.value, "dark")
+    }
+
+    func testRejectsUnsupportedOrMissingAddresses() {
+        XCTAssertThrowsError(try TX5DRServer(address: ""))
+        XCTAssertThrowsError(try TX5DRServer(address: "ftp://radio.example"))
+        XCTAssertThrowsError(try TX5DRServer(address: "http:///missing-host"))
+    }
+
+    /// Replaces `testHighLatencyNetworkPolicyUsesFiveMinuteTimeouts`.
+    ///
+    /// The old policy was one five-minute deadline plus `waitsForConnectivity`,
+    /// chosen because Tailscale can be slow. It made an *unreachable* address
+    /// indistinguishable from a slow one: launching on a LAN with Tailscale off
+    /// left the app on its launch spinner for five minutes while URLSession
+    /// silently retried a `100.x` address that routes nowhere. A control app
+    /// must fail fast enough that the operator can go change the address.
+    func testUnreachableServerFailsFastInsteadOfHangingOnLaunch() throws {
+        let url = try XCTUnwrap(URL(string: "http://100.64.0.10:8076/api/auth/status"))
+        let request = TX5DRNetworkPolicy.request(url: url)
+        let configuration = TX5DRNetworkPolicy.session.configuration
+
+        XCTAssertEqual(TX5DRNetworkPolicy.requestTimeout, 15)
+        XCTAssertEqual(request.timeoutInterval, 15)
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 15)
+        XCTAssertFalse(
+            configuration.waitsForConnectivity,
+            "waitsForConnectivity turns an unroutable address into a silent wait"
+        )
+    }
+
+    /// A long transfer is still allowed; only the per-round-trip deadline shrank.
+    func testLongTransfersKeepAGenerousResourceCeiling() {
+        XCTAssertEqual(TX5DRNetworkPolicy.resourceTimeout, 300)
+        XCTAssertEqual(TX5DRNetworkPolicy.session.configuration.timeoutIntervalForResource, 300)
+    }
+
+    /// Control, logbook and audio sockets are idle by design between events, so
+    /// they must not inherit the REST per-request deadline. 60 s is comfortably
+    /// above the 20–25 s application-level heartbeats but well below five minutes.
+    func testWebSocketSessionToleratesQuietChannelsWithoutWaitingFiveMinutes() {
+        let configuration = TX5DRNetworkPolicy.webSocketSession.configuration
+
+        XCTAssertEqual(TX5DRNetworkPolicy.webSocketIdleTimeout, 60)
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 60)
+        XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+}

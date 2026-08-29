@@ -1,4 +1,4 @@
-name: Radio Lite iOS client
+name: TX-5DR iOS client
 
 permissions:
   contents: read
@@ -63,6 +63,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
+      - run: node scripts/check-ios-tx5dr-contract.mjs
+      # The Radio Lite stack is retained for reference; its contract check is
+      # cheap enough to keep green while the app itself is no longer built.
       - run: node scripts/check-ios-radio-lite-contract.mjs
 
   xcode-build-and-test:
@@ -73,7 +76,7 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
-        run: xcodegen generate --spec ios/RadioLite/project.yml
+        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
       - name: Select an available iPhone simulator
         shell: bash
         run: |
@@ -96,8 +99,8 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild test \
-            -project ios/RadioLite/RadioLite.xcodeproj \
-            -scheme RadioLite \
+            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
+            -scheme TX5DRMobile \
             -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             CODE_SIGNING_ALLOWED=NO \
@@ -116,18 +119,18 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
-        run: xcodegen generate --spec ios/RadioLite/project.yml
+        run: xcodegen generate --spec ios/TX5DRMobile/project.yml
       - name: Build unsigned iPhone application
         shell: bash
         run: |
           set -o pipefail
           xcodebuild build \
-            -project ios/RadioLite/RadioLite.xcodeproj \
-            -scheme RadioLite \
+            -project ios/TX5DRMobile/TX5DRMobile.xcodeproj \
+            -scheme TX5DRMobile \
             -configuration Debug \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/RadioLiteDerivedData" \
+            -derivedDataPath "$RUNNER_TEMP/TX5DRMobileDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
@@ -137,8 +140,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$RUNNER_TEMP/RadioLiteDerivedData/Build/Products/Debug-iphoneos/RadioLite.app"
-          PACKAGE_ROOT="$RUNNER_TEMP/RadioLiteUnsigned"
+          APP_PATH="$RUNNER_TEMP/TX5DRMobileDerivedData/Build/Products/Debug-iphoneos/TX5DRMobile.app"
+          PACKAGE_ROOT="$RUNNER_TEMP/TX5DRRemoteUnsigned"
           test -d "$APP_PATH"
           SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
           BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
@@ -150,13 +153,13 @@ jobs:
             exit 1
           fi
           mkdir -p "$PACKAGE_ROOT/Payload"
-          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/RadioLite.app"
+          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/TX5DRMobile.app"
           (
             cd "$PACKAGE_ROOT"
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" Payload
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa" Payload
           )
-          shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
-            > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
+          shasum -a 256 "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa" \
+            > "$GITHUB_WORKSPACE/TX5DR-Remote-Debug-unsigned.ipa.sha256"
       - name: Upload unsigned IPA
         # Push uploads require both a matching path change and [upload-ipa] in the head commit.
         if: >-
@@ -164,10 +167,10 @@ jobs:
               (github.event_name == 'push' && contains(github.event.head_commit.message, '[upload-ipa]')) }}
         uses: actions/upload-artifact@v4
         with:
-          name: Radio-Lite-Debug-unsigned-${{ github.sha }}
+          name: TX5DR-Remote-Debug-unsigned-${{ github.sha }}
           path: |
-            Radio-Lite-Debug-unsigned.ipa
-            Radio-Lite-Debug-unsigned.ipa.sha256
+            TX5DR-Remote-Debug-unsigned.ipa
+            TX5DR-Remote-Debug-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
       - name: Publish Swift compiler diagnostics
