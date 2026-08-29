@@ -14,7 +14,105 @@ import {
   RigQueueBusyError,
   RigReportError,
   RigTelemetryDroppedError,
+  type RigctldTransportOptions,
 } from "../src/rig/transport.ts";
+
+test("receive ordinary commands begin at least 500 ms apart", async (context) => {
+  const clock = new TransportClock();
+  const fixture = deferredTransportFixture({ now: clock.now, delay: clock.delay });
+  context.after(async () => fixture.transport.close());
+  fixture.transport.setCommandMode("receive");
+
+  const first = fixture.transport.request("\\get_freq");
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  fixture.socket.replyActive("Frequency: 14074000");
+  await first;
+
+  const second = fixture.transport.request("\\get_mode");
+  await clock.advanceBy(499);
+  assert.equal(fixture.socket.writes.includes("\\get_mode\n"), false);
+  await clock.advanceBy(1);
+  await fixture.socket.waitForWrite("\\get_mode\n");
+  fixture.socket.replyActive("Mode: USB", "Passband: 3000");
+  await second;
+
+  const third = fixture.transport.request("\\get_ptt");
+  await clock.advanceBy(500);
+  await fixture.socket.waitForWrite("\\get_ptt\n");
+  fixture.socket.replyActive("PTT: 0");
+  await third;
+
+  assert.deepEqual(
+    fixture.transport.commandTrace().map(({ startedAtMs }) => startedAtMs),
+    [0, 500, 1_000],
+  );
+});
+
+test("emergency OFF cancels a pending ordinary budget wait", async (context) => {
+  const clock = new TransportClock();
+  const fixture = deferredTransportFixture({ now: clock.now, delay: clock.delay });
+  context.after(async () => fixture.transport.close());
+  fixture.transport.setCommandMode("receive");
+
+  const first = fixture.transport.request("\\get_freq");
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  fixture.socket.replyActive("Frequency: 14074000");
+  await first;
+  const delayed = fixture.transport.request("\\get_mode");
+  const off = fixture.transport.request("\\set_ptt 0", { priority: "safety", source: "ptt-off" });
+
+  await fixture.socket.waitForWrite("\\set_ptt 0\n");
+  assert.equal(fixture.transport.commandTrace().length, 1);
+  fixture.socket.replyActive();
+  await off;
+  await clock.advanceBy(500);
+  await fixture.socket.waitForWrite("\\get_mode\n");
+  fixture.socket.replyActive("Mode: USB", "Passband: 3000");
+  await delayed;
+
+  assert.equal(fixture.transport.commandTrace()[1]?.startedAtMs, 0);
+});
+
+test("ordinary command waiting for CAT budget counts toward the normal queue limit", async (context) => {
+  const clock = new TransportClock();
+  const fixture = deferredTransportFixture({
+    now: clock.now,
+    delay: clock.delay,
+    normalQueueLimit: 1,
+  });
+  context.after(async () => fixture.transport.close());
+
+  const first = fixture.transport.request("\\get_freq");
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  fixture.socket.replyActive("Frequency: 14074000");
+  await first;
+  const delayed = fixture.transport.request("\\get_mode");
+  const delayedRejected = assert.rejects(delayed, /transport closed/u);
+  const overflow = fixture.transport.request("\\set_freq 14074000");
+
+  await assertRejectsOnNextTurn(overflow, RigQueueBusyError);
+
+  await fixture.transport.close();
+  await delayedRejected;
+});
+
+test("trace ring retains chronological entries 76 through 1099", async (context) => {
+  const fixture = deferredTransportFixture();
+  context.after(async () => fixture.transport.close());
+
+  for (let index = 0; index < 1_100; index += 1) {
+    const command = `\\get_freq ${index}`;
+    const request = fixture.transport.request(command, { priority: "safety", source: "ptt-off" });
+    await fixture.socket.waitForWrite(`${command}\n`);
+    fixture.socket.replyActive("Frequency: 14074000");
+    await request;
+  }
+
+  const trace = fixture.transport.commandTrace();
+  assert.equal(trace.length, 1_024);
+  assert.equal(trace[0]?.command, "\\get_freq 76");
+  assert.equal(trace.at(-1)?.command, "\\get_freq 1099");
+});
 
 test("extended protocol parser handles fragmented fields and report framing", () => {
   const parser = new ExtendedResponseParser();
@@ -124,7 +222,11 @@ test("normal queue rejects explicit control at 32 entries and drops telemetry", 
 
 test("persistent rigctld transport serializes commands and HamlibRig confirms read-back", async (context) => {
   const fake = await startFakeRigctld();
-  const transport = new RigctldTransport("127.0.0.1", fake.port);
+  const clock = new InstantClock();
+  const transport = new RigctldTransport("127.0.0.1", fake.port, {
+    now: clock.now,
+    delay: clock.delay,
+  });
   context.after(async () => {
     await transport.close();
     await closeServer(fake.server);
@@ -840,7 +942,9 @@ class DeferredSocket extends Duplex {
   }
 }
 
-function deferredTransportFixture(): {
+function deferredTransportFixture(
+  options: Pick<RigctldTransportOptions, "now" | "delay" | "normalQueueLimit"> = {},
+): {
   transport: RigctldTransport;
   socket: DeferredSocket;
 } {
@@ -849,9 +953,79 @@ function deferredTransportFixture(): {
     queueMicrotask(() => socket.emit("connect"));
     return socket as unknown as Socket;
   }) as typeof createConnection;
+  const clock = options.now === undefined && options.delay === undefined ? new InstantClock() : null;
   return {
     socket,
-    transport: new RigctldTransport("deferred.test", 4_532, { connect }),
+    transport: new RigctldTransport("deferred.test", 4_532, {
+      connect,
+      now: options.now ?? clock?.now,
+      delay: options.delay ?? clock?.delay,
+      normalQueueLimit: options.normalQueueLimit,
+    }),
+  };
+}
+
+async function assertRejectsOnNextTurn(
+  promise: Promise<unknown>,
+  expected: new (...args: never[]) => Error,
+): Promise<void> {
+  const outcome = await Promise.race([
+    promise.then(
+      () => ({ kind: "fulfilled" as const }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    ),
+    new Promise<{ kind: "pending" }>((resolve) => setImmediate(() => resolve({ kind: "pending" }))),
+  ]);
+  assert.equal(outcome.kind, "rejected", "queue overflow must reject without waiting for CAT budget");
+  if (outcome.kind === "rejected") assert.ok(outcome.error instanceof expected);
+}
+
+class TransportClock {
+  #now = 0;
+  #timers: Array<{
+    dueAtMs: number;
+    resolve: () => void;
+    signal: AbortSignal;
+    onAbort: () => void;
+  }> = [];
+
+  now = (): number => this.#now;
+
+  delay = (milliseconds: number, signal: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+    const timer = {
+      dueAtMs: this.#now + milliseconds,
+      resolve,
+      signal,
+      onAbort: () => {},
+    };
+    timer.onAbort = () => {
+      this.#timers = this.#timers.filter((candidate) => candidate !== timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("delay aborted"));
+    };
+    signal.addEventListener("abort", timer.onAbort, { once: true });
+    this.#timers.push(timer);
+  });
+
+  async advanceBy(milliseconds: number): Promise<void> {
+    this.#now += milliseconds;
+    const due = this.#timers.filter((timer) => timer.dueAtMs <= this.#now);
+    this.#timers = this.#timers.filter((timer) => timer.dueAtMs > this.#now);
+    for (const timer of due) {
+      timer.signal.removeEventListener("abort", timer.onAbort);
+      timer.resolve();
+    }
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+  }
+}
+
+class InstantClock {
+  #now = 0;
+
+  now = (): number => this.#now;
+
+  delay = async (milliseconds: number, signal: AbortSignal): Promise<void> => {
+    signal.throwIfAborted();
+    this.#now += milliseconds;
   };
 }
 

@@ -1,4 +1,5 @@
 import { HamlibRig } from "./hamlib-rig.ts";
+import type { CatCommandMode } from "./cat-command-limiter.ts";
 import type {
   RadioCapabilities,
   RadioControl,
@@ -18,10 +19,15 @@ import type {
  */
 export class HamlibDriver implements RadioDriver {
   readonly #rig: HamlibRig;
+  readonly #onTransportMode: (mode: CatCommandMode) => void;
   #capabilities: Promise<RadioCapabilities> | null = null;
 
-  constructor(rig: HamlibRig) {
+  constructor(
+    rig: HamlibRig,
+    options: { onTransportMode?: (mode: CatCommandMode) => void } = {},
+  ) {
     this.#rig = rig;
+    this.#onTransportMode = options.onTransportMode ?? (() => undefined);
   }
 
   async initialize(): Promise<void> {}
@@ -71,10 +77,12 @@ export class HamlibDriver implements RadioDriver {
     return this.#rig.writePtt(enabled);
   }
 
-  readPtt(options?: RadioPttReadOptions): Promise<boolean> {
-    return options?.purpose === "off-recovery"
+  async readPtt(options?: RadioPttReadOptions): Promise<boolean> {
+    const ptt = await (options?.purpose === "off-recovery"
       ? this.#rig.readPtt()
-      : this.#rig.readPttForControl();
+      : this.#rig.readPttForControl());
+    this.#onTransportMode(ptt ? "transmit" : "receive");
+    return ptt;
   }
 
   async #loadCapabilities(): Promise<RadioCapabilities> {

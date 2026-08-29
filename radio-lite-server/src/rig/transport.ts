@@ -2,6 +2,11 @@ import { createConnection, type Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
 import {
+  CatCommandLimiter,
+  type CatCommandDelay,
+  type CatCommandMode,
+} from "./cat-command-limiter.ts";
+import {
   encodeRigCommand,
   ExtendedResponseParser,
   RigProtocolError,
@@ -44,6 +49,7 @@ export type RigctldTransportOptions = {
   safetyTimeoutMs?: number;
   connect?: typeof createConnection;
   now?: () => number;
+  delay?: CatCommandDelay;
   normalQueueLimit?: number;
   safetyBreakAfterMs?: number;
 };
@@ -74,6 +80,7 @@ export class RigctldTransport {
   readonly #now: () => number;
   readonly #normalQueueLimit: number;
   readonly #safetyBreakAfterMs: number;
+  readonly #limiter: CatCommandLimiter;
   #socket: Socket | null = null;
   #connecting: ConnectionAttempt | null = null;
   #parser = new ExtendedResponseParser();
@@ -84,8 +91,12 @@ export class RigctldTransport {
   #safetyQueue: RigRequest[] = [];
   #normalQueue: RigRequest[] = [];
   #active: RigRequest | null = null;
+  #waitingNormal: RigRequest | null = null;
+  #ordinaryBudgetAbort: AbortController | null = null;
   #safetyBreakTimer: ReturnType<typeof setTimeout> | null = null;
-  #trace: RigCommandTrace[] = [];
+  #trace: Array<RigCommandTrace | undefined> = new Array(1_024);
+  #traceWriteIndex = 0;
+  #traceCount = 0;
   #closed = false;
   #closePromise: Promise<void> | null = null;
 
@@ -108,6 +119,7 @@ export class RigctldTransport {
     );
     this.#connect = options.connect ?? createConnection;
     this.#now = options.now ?? (() => performance.now());
+    this.#limiter = new CatCommandLimiter({ now: this.#now, delay: options.delay });
     this.#normalQueueLimit = positiveInteger(
       options.normalQueueLimit ?? 32,
       "rigctld normal queue limit",
@@ -133,7 +145,10 @@ export class RigctldTransport {
     if (this.#closed) {
       return Promise.reject(new RigTransportError("rigctld transport is closed"));
     }
-    if (priority === "normal" && this.#normalQueue.length >= this.#normalQueueLimit) {
+    if (
+      priority === "normal" &&
+      this.#normalQueue.length + (this.#waitingNormal === null ? 0 : 1) >= this.#normalQueueLimit
+    ) {
       return Promise.reject(
         source === "telemetry"
           ? new RigTelemetryDroppedError("rig_telemetry_dropped")
@@ -160,6 +175,7 @@ export class RigctldTransport {
     };
     if (priority === "safety") {
       this.#safetyQueue.push(request);
+      this.#ordinaryBudgetAbort?.abort(new Error("ordinary CAT budget wait interrupted for safety"));
     } else {
       this.#normalQueue.push(request);
     }
@@ -169,7 +185,16 @@ export class RigctldTransport {
   }
 
   commandTrace(): readonly RigCommandTrace[] {
-    return this.#trace.map((entry) => ({ ...entry }));
+    const oldest = (this.#traceWriteIndex - this.#traceCount + this.#trace.length) % this.#trace.length;
+    return Array.from({ length: this.#traceCount }, (_, offset) => {
+      const entry = this.#trace[(oldest + offset) % this.#trace.length];
+      if (entry === undefined) throw new Error("rigctld command trace is corrupt");
+      return { ...entry };
+    });
+  }
+
+  setCommandMode(mode: CatCommandMode): void {
+    this.#limiter.setMode(mode);
   }
 
   close(): Promise<void> {
@@ -179,6 +204,7 @@ export class RigctldTransport {
     const error = new RigTransportError("rigctld transport closed");
     for (const queued of this.#safetyQueue.splice(0)) this.#rejectQueued(queued, error);
     for (const queued of this.#normalQueue.splice(0)) this.#rejectQueued(queued, error);
+    this.#rejectWaitingNormal(error);
 
     const socket = this.#socket;
     const connectingSocket = this.#connecting?.socket ?? null;
@@ -200,11 +226,58 @@ export class RigctldTransport {
 
   #pump(): void {
     if (this.#closed || this.#active !== null) return;
-    const next = this.#safetyQueue.shift() ?? this.#normalQueue.shift();
-    if (next === undefined) {
+    const safety = this.#safetyQueue.shift();
+    if (safety !== undefined) {
+      this.#start(safety);
+      return;
+    }
+    if (this.#waitingNormal !== null) return;
+    const normal = this.#normalQueue.shift();
+    if (normal === undefined) {
       this.#clearSafetyBreakTimer();
       return;
     }
+    const controller = new AbortController();
+    this.#waitingNormal = normal;
+    this.#ordinaryBudgetAbort = controller;
+    void this.#waitAndStartOrdinary(normal, controller);
+  }
+
+  async #waitAndStartOrdinary(request: RigRequest, controller: AbortController): Promise<void> {
+    try {
+      await this.#limiter.waitForBudget(controller.signal);
+    } catch (error) {
+      if (this.#waitingNormal !== request || request.settled) return;
+      this.#waitingNormal = null;
+      if (this.#ordinaryBudgetAbort === controller) this.#ordinaryBudgetAbort = null;
+      if (controller.signal.aborted && !this.#closed) {
+        this.#normalQueue.unshift(request);
+        this.#pump();
+        return;
+      }
+      this.#rejectQueued(
+        request,
+        error instanceof Error ? error : new RigTransportError(String(error)),
+      );
+      this.#pump();
+      return;
+    }
+    if (this.#waitingNormal !== request || request.settled) return;
+    this.#waitingNormal = null;
+    if (this.#ordinaryBudgetAbort === controller) this.#ordinaryBudgetAbort = null;
+    if (this.#closed) {
+      this.#rejectQueued(request, new RigTransportError("rigctld transport closed"));
+      return;
+    }
+    if (this.#safetyQueue.length > 0) {
+      this.#normalQueue.unshift(request);
+      this.#pump();
+      return;
+    }
+    this.#start(request);
+  }
+
+  #start(next: RigRequest): void {
     this.#active = next;
     next.startedAtMs = this.#now();
     this.#refreshSafetyBreakTimer();
@@ -348,13 +421,15 @@ export class RigctldTransport {
     if (request.settled) return;
     request.settled = true;
     if (this.#active === request) this.#active = null;
-    this.#trace.push({
+    this.#trace[this.#traceWriteIndex] = {
       command: request.command,
       source: request.source,
       priority: request.priority,
       startedAtMs: request.startedAtMs ?? this.#now(),
       finishedAtMs: this.#now(),
-    });
+    };
+    this.#traceWriteIndex = (this.#traceWriteIndex + 1) % this.#trace.length;
+    this.#traceCount = Math.min(this.#traceCount + 1, this.#trace.length);
     if (error === null && response !== null) {
       request.resolve(response);
     } else {
@@ -368,6 +443,15 @@ export class RigctldTransport {
     if (request.settled) return;
     request.settled = true;
     request.reject(error);
+  }
+
+  #rejectWaitingNormal(error: Error): void {
+    const waiting = this.#waitingNormal;
+    if (waiting === null) return;
+    this.#waitingNormal = null;
+    this.#ordinaryBudgetAbort?.abort(error);
+    this.#ordinaryBudgetAbort = null;
+    this.#rejectQueued(waiting, error);
   }
 
   #refreshSafetyBreakTimer(): void {

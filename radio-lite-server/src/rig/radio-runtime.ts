@@ -713,7 +713,9 @@ async function createDefaultRadioRuntime(
     profile,
     new HamlibDriver(new HamlibRig(transport, {
       pttMethod: profile.ptt.method,
-    })),
+    }), {
+      onTransportMode: (mode) => transport.setCommandMode(mode),
+    }),
     async () => {
       const failures: unknown[] = [];
       try {
