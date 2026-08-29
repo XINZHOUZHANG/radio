@@ -209,7 +209,8 @@ final class RadioLiteSession: ObservableObject {
         isRestoringSession = true
         errorMessage = nil
         let restoreTask = Task { @MainActor [weak self] in
-            await self?.restoreStoredSession(authenticationOwnership: authenticationOwnership)
+            guard let self else { return }
+            await self.restoreStoredSession(authenticationOwnership: authenticationOwnership)
         }
         startupRestoreTask = restoreTask
         let deadlineTask = Task { @MainActor [weak self] in
