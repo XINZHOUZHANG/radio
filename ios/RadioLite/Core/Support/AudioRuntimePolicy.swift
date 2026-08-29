@@ -6,6 +6,13 @@ enum AudioRuntimeIntent: Equatable {
     case playAndRecord
 }
 
+struct AudioBackgroundRuntimeDecision: Equatable, Sendable {
+    let keepsReceiving: Bool
+    let suspendsReceiveAudio: Bool
+    let cancelsReceiveRecovery: Bool
+    let spectrumVisible: Bool
+}
+
 enum AudioRuntimePolicy {
     /// A media subscription is also used for spectrum and FT8 audio. Speaker
     /// playback remains opt-in so login cannot fail because an iOS audio route
@@ -17,6 +24,22 @@ enum AudioRuntimePolicy {
         if isCapturingMicrophone { return .playAndRecord }
         if isListening { return .playback }
         return .inactive
+    }
+
+    static func backgroundDecision(receiveAudioDesired: Bool) -> AudioBackgroundRuntimeDecision {
+        AudioBackgroundRuntimeDecision(
+            keepsReceiving: receiveAudioDesired,
+            suspendsReceiveAudio: !receiveAudioDesired,
+            cancelsReceiveRecovery: !receiveAudioDesired,
+            spectrumVisible: false
+        )
+    }
+
+    static func allowsReceiveRecovery(
+        isAppActive: Bool,
+        keepsReceivingInBackground: Bool
+    ) -> Bool {
+        isAppActive || keepsReceivingInBackground
     }
 }
 

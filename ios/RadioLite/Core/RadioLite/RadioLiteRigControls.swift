@@ -159,6 +159,7 @@ struct RadioLiteRigControl: Codable, Identifiable, Equatable, Sendable {
         case "NB": return "脉冲噪声抑制"
         case "NR": return "降噪"
         case "ANF": return "自动陷波"
+        case "TUNER": return "机内天调接入"
         default: return normalized.isEmpty ? token : normalized
         }
     }
@@ -238,6 +239,42 @@ struct RadioLiteRigControlOperationOwnership: Equatable, Sendable {
 
     func isCurrent(selectedRadioId: String?, catalogueGeneration currentGeneration: UInt64) -> Bool {
         selectedRadioId == radioId && currentGeneration == catalogueGeneration
+    }
+}
+
+enum RadioLiteTunerTapAction: Equatable, Sendable {
+    case start
+    case stop
+    case unavailable
+}
+
+enum RadioLiteTunerInteractionPolicy {
+    static func action(isTuning: Bool, tuneSupported: Bool) -> RadioLiteTunerTapAction {
+        guard tuneSupported else { return .unavailable }
+        return isTuning ? .stop : .start
+    }
+
+    static func shouldReengageSwitch(
+        after reason: RadioLiteVoicePTTStopReason,
+        switchAvailable: Bool
+    ) -> Bool {
+        switchAvailable && reason == .userRelease
+    }
+}
+
+struct RadioLiteTunerSwitchReengageOwnership: Equatable, Sendable {
+    let radioId: String
+    let startupEpoch: UInt64
+    let completionEpoch: UInt64
+
+    func isCurrent(
+        radioId candidateRadioId: String,
+        startupEpoch candidateStartupEpoch: UInt64,
+        currentEpoch: UInt64
+    ) -> Bool {
+        radioId == candidateRadioId
+            && startupEpoch == candidateStartupEpoch
+            && completionEpoch == currentEpoch
     }
 }
 

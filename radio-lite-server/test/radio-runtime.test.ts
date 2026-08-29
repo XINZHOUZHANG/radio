@@ -127,6 +127,7 @@ class RecordingHamlibRequester {
   tuner = false;
   pttUnavailable = false;
   vfoOperations = "TUNE TOGGLE";
+  writableFunctions = "NB NR TUNER";
 
   async request(command: string): Promise<RigResponse> {
     this.commands.push(command);
@@ -149,7 +150,7 @@ class RecordingHamlibRequester {
       return rigResponse(name);
     }
     if (command === "\\set_func ?") {
-      return rigResponse(name, { Func: "NB NR TUNER" });
+      return rigResponse(name, { Func: this.writableFunctions });
     }
     if (name === "set_func") {
       this.tuner = command.endsWith(" 1");
@@ -300,7 +301,12 @@ test("runtime tuning starts with the cached Hamlib TUNE action and dekeys safely
     "tuning",
   );
 
-  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+  assert.deepEqual(requester.commands, [
+    "\\vfo_op ?",
+    "\\set_func ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
   requester.clear();
 
   await runtime.stopTransmit("device-tuner", transmit.leaseToken);
@@ -310,6 +316,32 @@ test("runtime tuning starts with the cached Hamlib TUNE action and dekeys safely
     "\\set_ptt 0",
     "\\get_ptt",
   ]);
+});
+
+test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch", async (context) => {
+  const requester = new RecordingHamlibRequester();
+  requester.writableFunctions = "NB NR";
+  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("tune-only-operator", "operator", true);
+  const control = await runtime.acquireControl("tune-only-device", operator);
+  requester.clear();
+  const transmit = await runtime.startTransmit(
+    "tune-only-device",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+
+  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+  requester.clear();
+
+  await runtime.stopTransmit("tune-only-device", transmit.leaseToken);
+
+  assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"]);
+  assert.equal(runtime.interlock.snapshot().state, "idle");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
 });
 
 test("runtime exposes cached internal-tuner capability without steady-state CAT polling", async (context) => {
@@ -322,7 +354,7 @@ test("runtime exposes cached internal-tuner capability without steady-state CAT 
   assert.equal(await runtime.supportsInternalTuner(), true);
   assert.equal(await runtime.supportsInternalTuner(), true);
 
-  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?"]);
+  assert.deepEqual(requester.commands, ["\\vfo_op ?"]);
 });
 
 test("runtime rejects unsupported tuning before reserving a transmit activation", async (context) => {

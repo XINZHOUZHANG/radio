@@ -60,7 +60,7 @@ struct RadioLiteRadioView: View {
         .onChange(of: session.rigState?.frequencyHz) { _, _ in
             if !frequencyFocused { syncFrequency() }
         }
-        .onDisappear { session.endVoicePTT(); session.endTuning() }
+        .onDisappear { session.endVoicePTT(); session.cancelTuning() }
     }
 
     private var statusStrip: some View {
@@ -218,19 +218,40 @@ struct RadioLiteRadioView: View {
                 } onRelease: {
                     session.endVoicePTT()
                 }
-                RadioLiteHoldButton(
-                    title: session.rigState?.supportsInternalTuner == false
-                        ? "不支持机内天调"
-                        : (session.isTuning ? "天调工作中" : "按住机内天调"),
-                    systemImage: "tuningfork",
-                    active: session.isTuning,
-                    tint: RadioPalette.warning,
-                    enabled: session.hasControl && session.canUseInternalTuner
-                ) {
-                    session.beginTuning()
-                } onRelease: {
-                    session.endTuning()
+                Button {
+                    switch RadioLiteTunerInteractionPolicy.action(
+                        isTuning: session.isTuning,
+                        tuneSupported: session.rigState?.supportsInternalTuner != false
+                    ) {
+                    case .start:
+                        session.beginTuning()
+                    case .stop:
+                        session.endTuning()
+                    case .unavailable:
+                        break
+                    }
+                } label: {
+                    Label(
+                        session.rigState?.supportsInternalTuner == false
+                            ? "不支持机内天调"
+                            : (session.isTuning ? "停止调谐" : "开始调谐"),
+                        systemImage: "tuningfork"
+                    )
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(session.isTuning ? Color.white : RadioPalette.warning)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(
+                        session.isTuning ? RadioPalette.warning : RadioPalette.warning.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(RadioPalette.warning.opacity(session.isTuning ? 0.8 : 0.34))
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
+                .buttonStyle(.plain)
+                .disabled(!session.hasControl || !session.canUseInternalTuner)
             }
             if session.isVoicePTTHeld {
                 ProgressView(value: audio.microphoneLevel)

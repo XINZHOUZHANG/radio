@@ -39,6 +39,7 @@ export type HamlibRigControl = {
 };
 
 type HamlibRigControlDefinition = Omit<HamlibRigControl, "value">;
+type HamlibCapabilityTokens = ReadonlySet<string> | null;
 
 export type HamlibRigOptions = {
   pttMethod?: PttMethod;
@@ -129,6 +130,7 @@ const FUNCTION_CONTROL_DEFINITIONS: readonly HamlibRigControlDefinition[] = [
   functionDefinition("NB"),
   functionDefinition("NR"),
   functionDefinition("ANF"),
+  functionDefinition("TUNER", true),
 ];
 
 const PASSBAND_CONTROL: HamlibRigControlDefinition = {
@@ -157,8 +159,9 @@ export class HamlibRig {
   readonly #unavailablePttIsSafe: boolean;
   #lastCommandedPttForDisplayOnly = false;
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
-  #vfoOperations: Promise<ReadonlySet<string>> | null = null;
-  #writableFunctions: Promise<ReadonlySet<string>> | null = null;
+  #vfoOperations: Promise<HamlibCapabilityTokens> | null = null;
+  #writableFunctions: Promise<HamlibCapabilityTokens> | null = null;
+  #tunerSwitchWritable: boolean | null | undefined;
 
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
     this.#transport = transport;
@@ -339,10 +342,7 @@ export class HamlibRig {
 
   async supportsInternalTuner(): Promise<boolean> {
     const vfoOperations = await this.#discoverVfoOperations();
-    if (!vfoOperations.has("TUNE")) {
-      return false;
-    }
-    return (await this.#discoverWritableFunctions()).has("TUNER");
+    return vfoOperations === null || vfoOperations.has("TUNE");
   }
 
   async startInternalTuner(): Promise<void> {
@@ -350,6 +350,22 @@ export class HamlibRig {
       throw new InternalTunerUnsupportedError(
         "radio does not support internal tuning via Hamlib TUNE",
       );
+    }
+    const tunerSwitchSupport = await this.#discoverTunerSwitchSupport();
+    if (tunerSwitchSupport !== false) {
+      try {
+        await this.#transport.request("\\set_func TUNER 1");
+        this.#tunerSwitchWritable = true;
+      } catch (error) {
+        if (
+          tunerSwitchSupport !== null ||
+          !(error instanceof RigReportError) ||
+          error.report !== -11
+        ) {
+          throw error;
+        }
+        this.#tunerSwitchWritable = false;
+      }
     }
     await this.#transport.request("\\vfo_op TUNE");
   }
@@ -363,13 +379,16 @@ export class HamlibRig {
       await this.startInternalTuner();
       return;
     }
+    if (this.#tunerSwitchWritable === false) {
+      return;
+    }
     await this.#transport.request(
       "\\set_func TUNER 0",
       PTT_OFF_REQUEST,
     );
   }
 
-  async #discoverVfoOperations(): Promise<ReadonlySet<string>> {
+  async #discoverVfoOperations(): Promise<HamlibCapabilityTokens> {
     this.#vfoOperations ??= this.#queryCapabilityTokens(
       "\\vfo_op ?",
       "Mem/VFO Op",
@@ -380,7 +399,7 @@ export class HamlibRig {
     return this.#vfoOperations;
   }
 
-  async #discoverWritableFunctions(): Promise<ReadonlySet<string>> {
+  async #discoverWritableFunctions(): Promise<HamlibCapabilityTokens> {
     this.#writableFunctions ??= this.#queryCapabilityTokens(
       "\\set_func ?",
       "Func",
@@ -390,6 +409,17 @@ export class HamlibRig {
       throw error;
     });
     return this.#writableFunctions;
+  }
+
+  async #discoverTunerSwitchSupport(): Promise<boolean | null> {
+    if (this.#tunerSwitchWritable !== undefined) {
+      return this.#tunerSwitchWritable;
+    }
+    const writableFunctions = await this.#discoverWritableFunctions();
+    this.#tunerSwitchWritable = writableFunctions === null
+      ? null
+      : writableFunctions.has("TUNER");
+    return this.#tunerSwitchWritable;
   }
 
   async #discoverControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
@@ -429,13 +459,13 @@ export class HamlibRig {
     command: string,
     field: string,
     options?: RigRequestOptions,
-  ): Promise<ReadonlySet<string>> {
+  ): Promise<HamlibCapabilityTokens> {
     let response: RigResponse;
     try {
       response = await this.#transport.request(command, options);
     } catch (error) {
       if (error instanceof RigReportError) {
-        return new Set();
+        return null;
       }
       throw error;
     }
@@ -516,7 +546,13 @@ function functionDefinition(token: string, transmitLocked = false): HamlibRigCon
   };
 }
 
-function intersection(left: ReadonlySet<string>, right: ReadonlySet<string>): Set<string> {
+function intersection(
+  left: HamlibCapabilityTokens,
+  right: HamlibCapabilityTokens,
+): Set<string> {
+  if (left === null || right === null) {
+    return new Set();
+  }
   return new Set([...left].filter((value) => right.has(value)));
 }
 

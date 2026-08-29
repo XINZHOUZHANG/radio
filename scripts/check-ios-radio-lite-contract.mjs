@@ -20,6 +20,7 @@ const models = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteModels.sw
 const radioView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteRadioView.swift');
 const media = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMediaClient.swift');
 const audio = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteAudioEngine.swift');
+const audioRuntimePolicy = read('ios', 'RadioLite', 'Core', 'Support', 'AudioRuntimePolicy.swift');
 const microphonePolicy = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMicrophonePolicy.swift');
 const receiveMonitoringPreference = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteReceiveMonitoringPreference.swift');
 const rigControls = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteRigControls.swift');
@@ -34,6 +35,26 @@ const frame = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMediaFrame
 const socket = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
 const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
+
+assert(audioRuntimePolicy.includes('struct AudioBackgroundRuntimeDecision'));
+assert(audioRuntimePolicy.includes('backgroundDecision(receiveAudioDesired:'));
+assert(audioRuntimePolicy.includes('allowsReceiveRecovery('));
+const backgroundTransition = session.slice(
+  session.indexOf('func appDidEnterBackground()'),
+  session.indexOf('func appDidBecomeActive()'),
+);
+assert(backgroundTransition.includes('AudioRuntimePolicy.backgroundDecision('));
+assert(backgroundTransition.includes('if decision.suspendsReceiveAudio'));
+assert(backgroundTransition.includes('media.setSpectrumVisible(decision.spectrumVisible)'));
+assert(!backgroundTransition.includes('isAppActive = true'));
+assert(rigControls.includes('enum RadioLiteTunerTapAction'));
+assert(rigControls.includes('enum RadioLiteTunerInteractionPolicy'));
+assert(rigControls.includes('struct RadioLiteTunerSwitchReengageOwnership'));
+assert(rigControls.includes('case "TUNER": return "机内天调接入"'));
+assert(radioView.includes('RadioLiteTunerInteractionPolicy.action('));
+assert(session.includes('shouldReengageSwitch('));
+assert(session.includes('finishTunerSwitchReengageAfterStop('));
+assert(session.includes('endTuning(reason: .operatorCancellation)'));
 
 const httpPaths = [
   '/healthz',

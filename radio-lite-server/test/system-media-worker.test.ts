@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 
 import { MediaKind, type MediaFrame } from "../src/media/frame.ts";
@@ -13,6 +13,7 @@ import {
   opusEncoderCommand,
   playbackCommand,
   SystemMediaWorker,
+  type SystemMediaWorkerOptions,
 } from "../src/media/system-media-worker.ts";
 
 test("system media executable requirements follow each configured audio backend", () => {
@@ -248,19 +249,147 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   assert.ok(processes.every((process) => process.killed));
 });
 
+test("digital playback uses absolute deadlines so repeated timer overshoot does not accumulate", async (context) => {
+  const clock = new AdvancingPlaybackClock(2);
+  const fixture = await createPlaybackFixture(clock);
+  context.after(() => fixture.worker.close());
+
+  await fixture.worker.digitalAudio.play(
+    new Int16Array(16_000 * 5).fill(1_000),
+    16_000,
+    new AbortController().signal,
+  );
+
+  assert.ok(clock.nowMs >= 5_080, `playback completed too early at ${clock.nowMs} ms`);
+  assert.ok(clock.nowMs <= 5_085, `timer overshoot accumulated to ${clock.nowMs} ms`);
+});
+
+test("digital playback preserves every PCM byte with no more than 80 ms written ahead", async (context) => {
+  const clock = new AdvancingPlaybackClock();
+  const fixture = await createPlaybackFixture(clock);
+  context.after(() => fixture.worker.close());
+  const pcm = Int16Array.from(
+    { length: 3_200 },
+    (_, index) => (index % 511) - 255,
+  );
+
+  await fixture.worker.digitalAudio.play(
+    pcm,
+    16_000,
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(Buffer.concat(fixture.playback.stdinChunks), pcm16LeFixture(pcm));
+  let writtenBytes = 0;
+  let maximumLeadMs = 0;
+  for (let index = 0; index < fixture.playback.stdinChunks.length; index += 1) {
+    writtenBytes += fixture.playback.stdinChunks[index].length;
+    const writtenAudioMs = writtenBytes * 1_000 / (16_000 * 2);
+    maximumLeadMs = Math.max(
+      maximumLeadMs,
+      writtenAudioMs - fixture.playback.writeTimesMs[index],
+    );
+  }
+  assert.equal(maximumLeadMs, 80);
+});
+
+test("digital playback waits for the logical audio end and tail after its final write", async (context) => {
+  const clock = new AdvancingPlaybackClock();
+  const fixture = await createPlaybackFixture(clock);
+  context.after(() => fixture.worker.close());
+
+  await fixture.worker.digitalAudio.play(
+    new Int16Array(16_000).fill(1_000),
+    16_000,
+    new AbortController().signal,
+  );
+
+  assert.equal(fixture.playback.writeTimesMs.at(-1), 920);
+  assert.equal(clock.nowMs, 1_080);
+});
+
+test("digital playback aborts a timer wait before writing any later PCM", async (context) => {
+  const clock = new BlockingPlaybackClock();
+  const fixture = await createPlaybackFixture(clock);
+  context.after(() => fixture.worker.close());
+  const playing = fixture.worker.digitalAudio.play(
+    new Int16Array(16_000).fill(1_000),
+    16_000,
+    new AbortController().signal,
+  );
+  const playingResult = playing.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  await immediate();
+
+  try {
+    assert.equal(Buffer.concat(fixture.playback.stdinChunks).length, 2_560);
+  } finally {
+    await fixture.worker.digitalAudio.stop();
+  }
+  const error = await playingResult;
+  assert.ok(error instanceof Error && error.name === "AbortError");
+  await immediate();
+  assert.equal(Buffer.concat(fixture.playback.stdinChunks).length, 2_560);
+});
+
+test("drain abort keeps voice playback suppressed for the bounded residual window", async (context) => {
+  const clock = new AdvancingPlaybackClock();
+  const blockedPlayback = new BlockingWritable();
+  let wallNowMs = 10_000;
+  const fixture = await createPlaybackFixture(
+    clock,
+    () => wallNowMs,
+    blockedPlayback,
+  );
+  context.after(() => fixture.worker.close());
+  const playing = fixture.worker.digitalAudio.play(
+    new Int16Array(16_000).fill(1_000),
+    16_000,
+    new AbortController().signal,
+  );
+  await immediate();
+
+  assert.equal(blockedPlayback.chunks.length, 1);
+  await fixture.worker.digitalAudio.stop();
+  await assert.rejects(playing, (error: unknown) =>
+    error instanceof Error && error.name === "AbortError"
+  );
+  blockedPlayback.release();
+  await immediate();
+
+  wallNowMs += 139;
+  fixture.decoder.stdout.write(Buffer.from([9, 9, 9, 9]));
+  await immediate();
+  assert.equal(blockedPlayback.chunks.length, 1);
+
+  wallNowMs += 61;
+  fixture.decoder.stdout.write(Buffer.from([8, 8, 8, 8]));
+  await immediate();
+  assert.deepEqual(blockedPlayback.chunks.at(-1), Buffer.from([8, 8, 8, 8]));
+});
+
 class FakeProcess extends EventEmitter {
-  readonly stdin = new PassThrough();
+  readonly stdin: Writable;
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly stdinChunks: Buffer[] = [];
+  readonly writeTimesMs: number[] = [];
   pid = 10;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   killed = false;
 
-  constructor() {
+  constructor(options: { stdin?: Writable; writtenAt?: () => number } = {}) {
     super();
-    this.stdin.on("data", (chunk: Buffer) => this.stdinChunks.push(Buffer.from(chunk)));
+    this.stdin = options.stdin ?? new PassThrough();
+    if (this.stdin instanceof PassThrough) {
+      this.stdin.on("data", (chunk: Buffer) => {
+        this.stdinChunks.push(Buffer.from(chunk));
+        this.writeTimesMs.push(options.writtenAt?.() ?? 0);
+      });
+    }
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
@@ -271,6 +400,134 @@ class FakeProcess extends EventEmitter {
     this.signalCode = signal;
     queueMicrotask(() => this.emit("exit", null, signal));
     return true;
+  }
+}
+
+type PlaybackTestOptions = SystemMediaWorkerOptions & {
+  monotonicNow: () => number;
+  delayPlayback: (
+    milliseconds: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ) => Promise<void>;
+};
+
+async function createPlaybackFixture(
+  clock: { now: () => number; delay: PlaybackTestOptions["delayPlayback"] },
+  wallNow: () => number = () => 5_000,
+  playbackStdin?: Writable,
+) {
+  const processes: FakeProcess[] = [];
+  const spawnProcess = (() => {
+    const child = processes.length === 3
+      ? new FakeProcess({ stdin: playbackStdin, writtenAt: clock.now })
+      : new FakeProcess();
+    processes.push(child);
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  }) as unknown as typeof spawn;
+  const options: PlaybackTestOptions = {
+    spawnProcess,
+    now: wallNow,
+    monotonicNow: clock.now,
+    delayPlayback: clock.delay,
+  };
+  const worker = await SystemMediaWorker.create(profile(), {
+    audioDownlink: () => undefined,
+    spectrum: () => undefined,
+    fault: (error) => { throw error; },
+  }, options);
+  return {
+    worker,
+    playback: processes[3],
+    decoder: processes[2],
+  };
+}
+
+class AdvancingPlaybackClock {
+  nowMs = 0;
+  readonly #overshootMs: number;
+
+  constructor(overshootMs = 0) {
+    this.#overshootMs = overshootMs;
+  }
+
+  readonly now = (): number => this.nowMs;
+
+  readonly delay = async (
+    milliseconds: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ): Promise<void> => {
+    throwIfTestAborted(firstSignal, secondSignal);
+    this.nowMs += Math.max(0, milliseconds) + this.#overshootMs;
+    throwIfTestAborted(firstSignal, secondSignal);
+  };
+}
+
+class BlockingPlaybackClock {
+  readonly now = (): number => 0;
+
+  readonly delay = (
+    _milliseconds: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ): Promise<void> => new Promise((_resolve, reject) => {
+    const cleanup = () => {
+      firstSignal.removeEventListener("abort", onAbort);
+      secondSignal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      const error = new Error("test playback aborted");
+      error.name = "AbortError";
+      reject(error);
+    };
+    firstSignal.addEventListener("abort", onAbort, { once: true });
+    secondSignal.addEventListener("abort", onAbort, { once: true });
+    if (firstSignal.aborted || secondSignal.aborted) {
+      onAbort();
+    }
+  });
+}
+
+class BlockingWritable extends Writable {
+  readonly chunks: Buffer[] = [];
+  #pending: (() => void) | null = null;
+
+  constructor() {
+    super({ highWaterMark: 1 });
+  }
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    this.#pending = callback;
+  }
+
+  release(): void {
+    const pending = this.#pending;
+    this.#pending = null;
+    pending?.();
+  }
+}
+
+function pcm16LeFixture(value: Int16Array): Buffer {
+  const result = Buffer.alloc(value.length * 2);
+  for (let index = 0; index < value.length; index += 1) {
+    result.writeInt16LE(value[index], index * 2);
+  }
+  return result;
+}
+
+function throwIfTestAborted(firstSignal: AbortSignal, secondSignal: AbortSignal): void {
+  if (firstSignal.aborted || secondSignal.aborted) {
+    const error = new Error("test playback aborted");
+    error.name = "AbortError";
+    throw error;
   }
 }
 

@@ -92,6 +92,7 @@ final class RadioLiteSession: ObservableObject {
     private var mediaRetryOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTStartupTask: Task<Void, Never>?
     private var tuningStartupTask: Task<Void, Never>?
+    private var tunerSwitchReengageOwnership: RadioLiteTunerSwitchReengageOwnership?
     private var receiveAudioStartupTask: Task<Void, Never>?
     private var receiveAudioStartupOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTReceiveRestoreState = RadioLiteVoicePTTReceiveRestoreState()
@@ -102,6 +103,7 @@ final class RadioLiteSession: ObservableObject {
     private var audioInterruptionReceiveRestore: RadioLiteReceiveMonitoringOwnership?
     private var audioInterruptionRecoveryTask: Task<Void, Never>?
     private var isAppActive = true
+    private var keepsReceiveAudioInBackground = false
     private var radioConfigurationReconnectState = RadioLiteRadioConfigurationReconnectOwnershipState()
     private var activeTransmitToken: String?
     private var voicePTTGeneration: UInt64?
@@ -430,7 +432,7 @@ final class RadioLiteSession: ObservableObject {
 
     func releaseControl() async {
         endVoicePTT()
-        endTuning()
+        endTuning(reason: .operatorCancellation)
         guard let radioId = selectedRadioId, let token = controlToken else { return }
         controlHeartbeatTask?.cancel()
         controlHeartbeatTask = nil
@@ -452,7 +454,7 @@ final class RadioLiteSession: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         endVoicePTT()
-        endTuning()
+        endTuning(reason: .operatorCancellation)
         let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         await releaseControl()
@@ -1078,7 +1080,8 @@ final class RadioLiteSession: ObservableObject {
     }
 
     private func resumeReceiveAudioAfterInterruption() {
-        guard isAppActive, !isVoicePTTHeld, !isTuning, !audio.isCapturingMicrophone,
+        guard allowsReceiveMonitoringInCurrentScene,
+              !isVoicePTTHeld, !isTuning, !audio.isCapturingMicrophone,
               receiveMonitoringIntent.isDesired,
               let radioId = selectedRadioId else { return }
         let ownership = audioInterruptionReceiveRestore
@@ -1096,7 +1099,7 @@ final class RadioLiteSession: ObservableObject {
                     try? await Task.sleep(for: .seconds(delay))
                 }
                 guard !Task.isCancelled,
-                      self.isAppActive,
+                      self.allowsReceiveMonitoringInCurrentScene,
                       self.audioInterruptionReceiveRestore == ownership,
                       ownership.isCurrent(
                           selectedRadioId: self.selectedRadioId,
@@ -1152,7 +1155,7 @@ final class RadioLiteSession: ObservableObject {
         voicePTTRestore: RadioLiteReceiveMonitoringOwnership? = nil
     ) {
         let releaseOwnership = voicePTTReleaseState.beginRelease()
-        guard isAppActive, reason.restoresReceiveMonitoring,
+        guard allowsReceiveMonitoringInCurrentScene, reason.restoresReceiveMonitoring,
               voicePTTReleaseState.mayResume(
                   releaseOwnership,
                   voicePTTHeld: isVoicePTTHeld,
@@ -1208,6 +1211,7 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
             return
         }
+        tunerSwitchReengageOwnership = nil
         voicePTTReleaseState.beginTransmit()
         voicePTTReceiveResumeTask?.cancel()
         voicePTTReceiveResumeTask = nil
@@ -1239,7 +1243,15 @@ final class RadioLiteSession: ObservableObject {
                 guard !Task.isCancelled,
                       self.isTuning,
                       self.transmitEpoch.owns(generation) else {
-                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
+                    let stopped = await self.stopRemoteTransmit(
+                        radioId: radioId,
+                        transmitToken: transmitToken
+                    )
+                    await self.finishTunerSwitchReengageAfterStop(
+                        stopped: stopped,
+                        radioId: radioId,
+                        startupEpoch: generation
+                    )
                     return
                 }
                 self.activeTransmitToken = transmitToken
@@ -1263,7 +1275,15 @@ final class RadioLiteSession: ObservableObject {
                     }
                 }
                 if let startedToken {
-                    await self.stopRemoteTransmit(radioId: radioId, transmitToken: startedToken)
+                    let stopped = await self.stopRemoteTransmit(
+                        radioId: radioId,
+                        transmitToken: startedToken
+                    )
+                    await self.finishTunerSwitchReengageAfterStop(
+                        stopped: stopped,
+                        radioId: radioId,
+                        startupEpoch: generation
+                    )
                 }
             }
         }
@@ -1273,14 +1293,69 @@ final class RadioLiteSession: ObservableObject {
         endTuning(reason: .userRelease)
     }
 
+    func cancelTuning() {
+        endTuning(reason: .operatorCancellation)
+    }
+
     private func endTuning(reason: RadioLiteVoicePTTStopReason) {
+        if reason != .userRelease {
+            tunerSwitchReengageOwnership = nil
+        }
         guard isTuning || tuningStartupTask != nil else { return }
         let transmitToken = activeTransmitToken
         let radioId = selectedRadioId
+        let startupEpoch = transmitEpoch.current
         guard stopLocalTransmit() else { return }
+        let completionEpoch = transmitEpoch.current
+        if let radioId,
+           RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
+            after: reason,
+            switchAvailable: rigControls.contains { $0.id == "function:TUNER" }
+           ) {
+            tunerSwitchReengageOwnership = RadioLiteTunerSwitchReengageOwnership(
+                radioId: radioId,
+                startupEpoch: startupEpoch,
+                completionEpoch: completionEpoch
+            )
+        }
         finishReceiveMonitoringAfterTransmit(reason: reason)
         guard let transmitToken, let radioId else { return }
-        Task { [weak self] in await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken) }
+        Task { [weak self] in
+            guard let self else { return }
+            let stopped = await self.stopRemoteTransmit(
+                radioId: radioId,
+                transmitToken: transmitToken
+            )
+            await self.finishTunerSwitchReengageAfterStop(
+                stopped: stopped,
+                radioId: radioId,
+                startupEpoch: startupEpoch
+            )
+        }
+    }
+
+    private func finishTunerSwitchReengageAfterStop(
+        stopped: Bool,
+        radioId: String,
+        startupEpoch: UInt64
+    ) async {
+        guard let ownership = tunerSwitchReengageOwnership,
+              ownership.startupEpoch == startupEpoch else { return }
+        tunerSwitchReengageOwnership = nil
+        guard stopped,
+              ownership.isCurrent(
+                radioId: radioId,
+                startupEpoch: startupEpoch,
+                currentEpoch: transmitEpoch.current
+              ),
+              isAppActive,
+              selectedRadioId == radioId,
+              controlToken != nil,
+              !isVoicePTTHeld,
+              !isTuning,
+              rigControls.contains(where: { $0.id == "function:TUNER" }) else { return }
+        replaceRigState(ptt: false)
+        _ = await setRigControl("function:TUNER", value: 1)
     }
 
     func refreshDigitalSnapshot(
@@ -1495,7 +1570,7 @@ final class RadioLiteSession: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         endVoicePTT()
-        endTuning()
+        endTuning(reason: .operatorCancellation)
 
         let response = try await http.upsertRadio(
             profile,
@@ -1622,26 +1697,35 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func appDidEnterBackground() {
+        let decision = AudioRuntimePolicy.backgroundDecision(
+            receiveAudioDesired: receiveMonitoringIntent.isDesired
+        )
+        keepsReceiveAudioInBackground = decision.keepsReceiving
         isAppActive = false
         endVoicePTT()
-        endTuning()
-        voicePTTReleaseState.beginTransmit()
-        voicePTTReceiveResumeTask?.cancel()
-        voicePTTReceiveResumeTask = nil
-        audioInterruptionRecoveryTask?.cancel()
-        audioInterruptionRecoveryTask = nil
-        let generation = suspendReceiveAudio()
-        if receiveMonitoringIntent.isDesired, let radioId = selectedRadioId {
-            audioInterruptionReceiveRestore = RadioLiteReceiveMonitoringOwnership(
-                radioId: radioId,
-                generation: generation
-            )
+        endTuning(reason: .operatorCancellation)
+        if decision.cancelsReceiveRecovery {
+            voicePTTReleaseState.beginTransmit()
+            voicePTTReceiveResumeTask?.cancel()
+            voicePTTReceiveResumeTask = nil
+            audioInterruptionRecoveryTask?.cancel()
+            audioInterruptionRecoveryTask = nil
         }
-        media.setSpectrumVisible(false)
+        if decision.suspendsReceiveAudio {
+            let generation = suspendReceiveAudio()
+            if receiveMonitoringIntent.isDesired, let radioId = selectedRadioId {
+                audioInterruptionReceiveRestore = RadioLiteReceiveMonitoringOwnership(
+                    radioId: radioId,
+                    generation: generation
+                )
+            }
+        }
+        media.setSpectrumVisible(decision.spectrumVisible)
     }
 
     func appDidBecomeActive() {
         isAppActive = true
+        keepsReceiveAudioInBackground = false
         media.setSpectrumVisible(true)
         guard phase == .ready else { return }
         resumeReceiveAudioAfterInterruption()
@@ -1902,7 +1986,7 @@ final class RadioLiteSession: ObservableObject {
                     self.controlToken = nil
                     self.controlExpiresAtMs = nil
                     self.endVoicePTT()
-                    self.endTuning()
+                    self.endTuning(reason: .operatorCancellation)
                     self.presentNotice("控制租约已失效，请重新取得控制权")
                     return
                 }
@@ -1966,21 +2050,27 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
+    @discardableResult
     private func stopRemoteTransmit(
         radioId: String,
         transmitToken: String
-    ) async {
+    ) async -> Bool {
         let commandId = UUID().uuidString
-        _ = try? await control.request(
-            .object([
-                "t": .string("tx.stop"),
-                "radioId": .string(radioId),
-                "transmitToken": .string(transmitToken),
-                "commandId": .string(commandId),
-            ]),
-            expecting: ["tx.stopped"],
-            commandId: commandId
-        )
+        do {
+            _ = try await control.request(
+                .object([
+                    "t": .string("tx.stop"),
+                    "radioId": .string(radioId),
+                    "transmitToken": .string(transmitToken),
+                    "commandId": .string(commandId),
+                ]),
+                expecting: ["tx.stopped"],
+                commandId: commandId
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func takeVoicePTTReceiveRestore(
@@ -2452,7 +2542,7 @@ final class RadioLiteSession: ObservableObject {
     private func restoreOrRetryReceiveAudioAfterVoicePTT(
         _ ownership: RadioLiteReceiveMonitoringOwnership
     ) async {
-        guard isAppActive,
+        guard allowsReceiveMonitoringInCurrentScene,
               ownership.isCurrent(
             selectedRadioId: selectedRadioId,
             generation: receiveMonitoringIntent.generation
@@ -2466,6 +2556,13 @@ final class RadioLiteSession: ObservableObject {
         await restoreReceiveAudioAfterSubscription(
             expectedRadioId: ownership.radioId,
             generation: ownership.generation
+        )
+    }
+
+    private var allowsReceiveMonitoringInCurrentScene: Bool {
+        AudioRuntimePolicy.allowsReceiveRecovery(
+            isAppActive: isAppActive,
+            keepsReceivingInBackground: keepsReceiveAudioInBackground
         )
     }
 

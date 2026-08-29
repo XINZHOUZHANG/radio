@@ -30,6 +30,46 @@ final class AudioRuntimePolicyTests: XCTestCase {
         )
     }
 
+    func testBackgroundKeepsReceiveAudioWhenTheOperatorIsListening() {
+        let decision = AudioRuntimePolicy.backgroundDecision(receiveAudioDesired: true)
+
+        XCTAssertTrue(decision.keepsReceiving)
+        XCTAssertFalse(decision.suspendsReceiveAudio)
+        XCTAssertFalse(decision.cancelsReceiveRecovery)
+    }
+
+    func testBackgroundSuspendsReceiveAudioWhenTheOperatorIsNotListening() {
+        let decision = AudioRuntimePolicy.backgroundDecision(receiveAudioDesired: false)
+
+        XCTAssertFalse(decision.keepsReceiving)
+        XCTAssertTrue(decision.suspendsReceiveAudio)
+        XCTAssertTrue(decision.cancelsReceiveRecovery)
+    }
+
+    func testBackgroundPTTReleaseMayRecoverReceiveAudio() {
+        XCTAssertTrue(
+            AudioRuntimePolicy.allowsReceiveRecovery(
+                isAppActive: false,
+                keepsReceivingInBackground: true
+            )
+        )
+        XCTAssertFalse(
+            AudioRuntimePolicy.allowsReceiveRecovery(
+                isAppActive: false,
+                keepsReceivingInBackground: false
+            )
+        )
+    }
+
+    func testBackgroundAlwaysHidesSpectrum() {
+        XCTAssertFalse(
+            AudioRuntimePolicy.backgroundDecision(receiveAudioDesired: true).spectrumVisible
+        )
+        XCTAssertFalse(
+            AudioRuntimePolicy.backgroundDecision(receiveAudioDesired: false).spectrumVisible
+        )
+    }
+
     func testTelemetryLimiterDoesNotRefreshSwiftUIForEveryAudioFrame() {
         var limiter = AudioTelemetryLimiter(minimumInterval: 0.1)
 

@@ -500,6 +500,10 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
     func testPTTStopReasonRestoresReceiveExceptDuringConnectionLoss() {
         XCTAssertTrue(RadioLiteVoicePTTStopReason.userRelease.restoresReceiveMonitoring)
         XCTAssertTrue(RadioLiteVoicePTTStopReason.transmitFailure.restoresReceiveMonitoring)
+        XCTAssertTrue(
+            RadioLiteVoicePTTStopReason.operatorCancellation.restoresReceiveMonitoring,
+            "a local lifecycle stop must keep the operator's receive-audio intent"
+        )
         XCTAssertFalse(
             RadioLiteVoicePTTStopReason.connectionLoss.restoresReceiveMonitoring,
             "connection recovery owns a newer monitoring suspension"

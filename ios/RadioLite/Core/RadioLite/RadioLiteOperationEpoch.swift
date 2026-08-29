@@ -253,12 +253,13 @@ struct RadioLiteVoicePTTReleaseState: Equatable, Sendable {
 enum RadioLiteVoicePTTStopReason: Equatable, Sendable {
     case userRelease
     case transmitFailure
+    case operatorCancellation
     case connectionLoss
     case audioInterruption
 
     var restoresReceiveMonitoring: Bool {
         switch self {
-        case .userRelease, .transmitFailure: return true
+        case .userRelease, .transmitFailure, .operatorCancellation: return true
         case .connectionLoss, .audioInterruption: return false
         }
     }

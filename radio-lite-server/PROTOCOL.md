@@ -251,10 +251,18 @@ radio commands require the per-radio `controlToken` returned by
 `control.acquire`. `tx.start` returns a separate high-entropy `transmitToken`.
 
 `rig.state.get` returns the normal frequency/mode/passband/PTT readback plus
-`supportsInternalTuner`. The latter requires both a `TUNE` operation and a
-writable `TUNER` function in Hamlib's cached `vfo_op ?` and `set_func ?`
-results, so clients can disable a tuner that cannot also be stopped without
-adding capability queries to every steady-state CAT poll.
+`supportsInternalTuner`. Manual tuning is available when Hamlib reports a
+`TUNE` operation. A rejected capability query is cached as unknown rather than
+as an explicit negative, so the service probes the real command without adding
+capability queries to every steady-state CAT poll. An unknown `TUNER` switch is
+tried before `TUNE`; only an explicit `RPRT -11` downgrades that switch to
+unsupported and continues with `TUNE`, while every other report is preserved.
+The independent `TUNER` switch appears in `rig.controls` only when Hamlib
+reports it as both readable and writable. When that switch is known writable,
+the service sends `TUNER 1` before `TUNE`; when it is known unavailable, tuning
+still starts with `TUNE` and shutdown skips the unsupported switch command.
+Every tuning shutdown still sends emergency PTT OFF and requires an OFF
+read-back before clearing the safety latch.
 
 `rig.mode.set` carries a Hamlib mode token. Operator-facing DATA-U/DATA-L labels
 map to `PKTUSB`/`PKTLSB` on the wire; the service also accepts the finite legacy
@@ -271,6 +279,7 @@ Hamlib backend exposes the same knobs:
 {"t":"rig.controls","radioId":"main","commandId":"controls-1","controls":[
   {"id":"level:RFPOWER","kind":"level","token":"RFPOWER","value":0.25,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true},
   {"id":"function:NB","kind":"function","token":"NB","value":1,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":false},
+  {"id":"function:TUNER","kind":"function","token":"TUNER","value":0,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":true},
   {"id":"passband:CURRENT","kind":"passband","token":"CURRENT","value":3000,"minimum":100,"maximum":12000,"step":50,"unit":"hertz","transmitLocked":false}
 ]}
 ```

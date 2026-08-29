@@ -318,7 +318,7 @@ test("raw internal tuner write sends exactly one CAT command", async () => {
   assert.deepEqual(commands, ["\\set_func TUNER 0"]);
 });
 
-test("internal tuner start discovers TUNE once and sends the stateless VFO action", async () => {
+test("internal tuner start enables a supported tuner switch before the TUNE action", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({
     request: async (command: string) => {
@@ -336,7 +336,12 @@ test("internal tuner start discovers TUNE once and sends the stateless VFO actio
   assert.equal(await rig.supportsInternalTuner(), true);
   assert.equal(await rig.supportsInternalTuner(), true);
   await rig.startInternalTuner();
-  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+  assert.deepEqual(commands, [
+    "\\vfo_op ?",
+    "\\set_func ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
 });
 
 test("internal tuner reports an unsupported VFO action without trying to tune", async () => {
@@ -344,7 +349,10 @@ test("internal tuner reports an unsupported VFO action without trying to tune", 
   const rig = new HamlibRig({
     request: async (command: string) => {
       commands.push(command);
-      throw new RigReportError("vfo_op", -11);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["CPY TOGGLE"]);
+      }
+      throw new Error(`unexpected command ${command}`);
     },
   });
 
@@ -354,7 +362,110 @@ test("internal tuner reports an unsupported VFO action without trying to tune", 
   assert.deepEqual(commands, ["\\vfo_op ?"]);
 });
 
-test("internal tuner requires both TUNE and a writable TUNER function", async () => {
+test("internal tuner treats a rejected capability query as unknown and surfaces the TUNE result", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        throw new RigReportError("vfo_op", -11);
+      }
+      if (command === "\\set_func ?") {
+        return responseValues("set_func", ["NB NR"]);
+      }
+      if (command === "\\vfo_op TUNE") {
+        throw new RigReportError("vfo_op", -1);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  assert.equal(await rig.supportsInternalTuner(), true);
+  assert.equal(await rig.supportsInternalTuner(), true);
+  await assert.rejects(rig.startInternalTuner(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -1,
+  );
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+});
+
+test("internal tuner probes a TUNER switch whose capability query is unknown", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["TUNE"]);
+      }
+      if (command === "\\set_func ?") {
+        throw new RigReportError("set_func", -11);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.startInternalTuner();
+
+  assert.deepEqual(commands, [
+    "\\vfo_op ?",
+    "\\set_func ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
+});
+
+test("internal tuner falls back to TUNE when an unknown TUNER switch returns ENIMPL", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["TUNE"]);
+      }
+      if (command === "\\set_func ?" || command === "\\set_func TUNER 1") {
+        throw new RigReportError("set_func", -11);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.startInternalTuner();
+  assert.deepEqual(commands, [
+    "\\vfo_op ?",
+    "\\set_func ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
+
+  commands.length = 0;
+  await rig.writeInternalTuner(false);
+  assert.deepEqual(commands, []);
+});
+
+test("internal tuner preserves a non-ENIMPL TUNER probe error without starting TUNE", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["TUNE"]);
+      }
+      if (command === "\\set_func ?") {
+        throw new RigReportError("set_func", -11);
+      }
+      if (command === "\\set_func TUNER 1") {
+        throw new RigReportError("set_func", -2);
+      }
+      throw new Error(`unexpected command ${command}`);
+    },
+  });
+
+  await assert.rejects(rig.startInternalTuner(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -2,
+  );
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\set_func TUNER 1"]);
+});
+
+test("internal tuner start remains available when only the TUNE action is supported", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({
     request: async (command: string) => {
@@ -369,12 +480,61 @@ test("internal tuner requires both TUNE and a writable TUNER function", async ()
     },
   });
 
-  assert.equal(await rig.supportsInternalTuner(), false);
-  await assert.rejects(rig.startInternalTuner(), /does not support internal tuning/u);
-  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?"]);
+  assert.equal(await rig.supportsInternalTuner(), true);
+  await rig.startInternalTuner();
+  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
 });
 
-test("internal tuner surfaces a rejected TUNE action without a function fallback", async () => {
+test("internal tuner stop skips a TUNER command known to be unsupported", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["CPY TUNE TOGGLE"]);
+      }
+      if (command === "\\set_func ?") {
+        return responseValues("set_func", ["NB NR"]);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.startInternalTuner();
+  commands.length = 0;
+  await rig.writeInternalTuner(false);
+
+  assert.deepEqual(commands, []);
+});
+
+test("internal tuner stop attempts the real command when TUNER capability is unknown", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      if (command === "\\vfo_op ?") {
+        return responseValues("vfo_op", ["TUNE"]);
+      }
+      if (command === "\\set_func ?") {
+        throw new RigReportError("set_func", -11);
+      }
+      if (command === "\\set_func TUNER 0") {
+        throw new RigReportError("set_func", -2);
+      }
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  await rig.startInternalTuner();
+  commands.length = 0;
+  await assert.rejects(rig.writeInternalTuner(false), (error: unknown) =>
+    error instanceof RigReportError && error.report === -2,
+  );
+
+  assert.deepEqual(commands, ["\\set_func TUNER 0"]);
+});
+
+test("internal tuner surfaces a rejected TUNE action after enabling the supported switch", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({
     request: async (command: string) => {
@@ -385,14 +545,25 @@ test("internal tuner surfaces a rejected TUNE action without a function fallback
       if (command === "\\set_func ?") {
         return responseValues("set_func", ["NB NR TUNER"]);
       }
-      throw new RigReportError("vfo_op", -1);
+      if (command === "\\set_func TUNER 1") {
+        return response("set_func", {});
+      }
+      if (command === "\\vfo_op TUNE") {
+        throw new RigReportError("vfo_op", -1);
+      }
+      throw new Error(`unexpected command ${command}`);
     },
   });
 
   await assert.rejects(rig.startInternalTuner(), (error: unknown) =>
     error instanceof RigReportError && error.report === -1,
   );
-  assert.deepEqual(commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+  assert.deepEqual(commands, [
+    "\\vfo_op ?",
+    "\\set_func ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
 });
 
 test("real rigs still surface unavailable PTT read-back from Hamlib", async () => {
@@ -423,6 +594,7 @@ test("Hamlib controls are the safe readable and writable capability intersection
   const functionValues = new Map([
     ["NB", "1"],
     ["ANF", "0"],
+    ["TUNER", "0"],
   ]);
   const rig = new HamlibRig({
     request: async (command: string) => {
@@ -437,7 +609,7 @@ test("Hamlib controls are the safe readable and writable capability intersection
         return response("get_func", { Func: "NB NR ANF TUNER" });
       }
       if (command === "\\set_func ?") {
-        return responseValues("set_func", ["COMP NB ANF"]);
+        return responseValues("set_func", ["COMP NB ANF TUNER"]);
       }
       if (command === "\\set_level AF ?" || command === "\\set_level RFPOWER ?") {
         return responseValues("set_level", ["(0.000000..1.000000/0.010000)"]);
@@ -463,6 +635,7 @@ test("Hamlib controls are the safe readable and writable capability intersection
     "level:AF",
     "function:NB",
     "function:ANF",
+    "function:TUNER",
     "passband:CURRENT",
   ]);
   assert.deepEqual(controls[0], {
@@ -478,6 +651,17 @@ test("Hamlib controls are the safe readable and writable capability intersection
   });
   assert.equal(controls[1]?.value, 0.42);
   assert.equal(controls[2]?.value, 1);
+  assert.deepEqual(controls[4], {
+    id: "function:TUNER",
+    kind: "function",
+    token: "TUNER",
+    value: 0,
+    minimum: 0,
+    maximum: 1,
+    step: 1,
+    unit: "boolean",
+    transmitLocked: true,
+  });
   assert.deepEqual(controls.at(-1), {
     id: "passband:CURRENT",
     kind: "passband",

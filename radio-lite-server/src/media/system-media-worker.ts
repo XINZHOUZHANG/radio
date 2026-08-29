@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import type { Writable } from "node:stream";
 
 import type { AudioEndpoint, RadioProfile } from "../config/types.ts";
@@ -24,12 +25,21 @@ export type SystemMediaWorkerOptions = {
   spawnProcess?: typeof spawn;
   readCenterFrequencyHz?: () => Promise<number>;
   now?: () => number;
+  monotonicNow?: () => number;
+  delayPlayback?: (
+    milliseconds: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ) => Promise<void>;
 };
 
 const SAMPLE_RATE = 16_000;
 const CHANNELS = 1;
 const MAX_PROCESS_INPUT_BYTES = 64 * 1_024;
+const DIGITAL_FRAME_MS = 20;
+const DIGITAL_WRITE_AHEAD_MS = 80;
 const DIGITAL_PLAYBACK_TAIL_MS = 80;
+const DIGITAL_VOICE_RESUME_GUARD_MS = 200;
 
 export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
   return endpoint.backend === "alsa"
@@ -151,6 +161,12 @@ export class SystemMediaWorker implements MediaWorker {
   readonly #spawnProcess: typeof spawn;
   readonly #readCenterFrequencyHz: () => Promise<number>;
   readonly #now: () => number;
+  readonly #monotonicNow: () => number;
+  readonly #delayPlayback: (
+    milliseconds: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ) => Promise<void>;
   readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 4_096 });
   readonly #uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
   readonly #expectedExit = new WeakSet<ChildProcessWithoutNullStreams>();
@@ -190,6 +206,8 @@ export class SystemMediaWorker implements MediaWorker {
     this.#spawnProcess = options.spawnProcess ?? spawn;
     this.#readCenterFrequencyHz = options.readCenterFrequencyHz ?? (async () => 0);
     this.#now = options.now ?? Date.now;
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.#delayPlayback = options.delayPlayback ?? abortableDelay;
     this.digitalAudio = {
       sampleRate: SAMPLE_RATE,
       play: (pcm, sampleRate, signal) => this.#playDigitalPcm(pcm, sampleRate, signal),
@@ -365,27 +383,53 @@ export class SystemMediaWorker implements MediaWorker {
     this.#digitalPlaybackActive = true;
     try {
       const output = resampleInt16(pcm, sampleRate, SAMPLE_RATE);
-      const frameSamples = SAMPLE_RATE / 50;
+      const frameSamples = SAMPLE_RATE * DIGITAL_FRAME_MS / 1_000;
+      const playbackStartedAtMs = this.#monotonicNow();
+      const durationMs = output.length * 1_000 / SAMPLE_RATE;
+      const writeAheadMs = Math.min(DIGITAL_WRITE_AHEAD_MS, durationMs);
+      let lastWriteCompletedAtMs = playbackStartedAtMs;
       for (let offset = 0; offset < output.length; offset += frameSamples) {
-        assertNotAborted(signal, localAbort.signal);
         const end = Math.min(output.length, offset + frameSamples);
+        const frameEndMs = end * 1_000 / SAMPLE_RATE;
+        const writeAtMs = playbackStartedAtMs + Math.max(0, frameEndMs - writeAheadMs);
+        await this.#waitForPlaybackDeadline(writeAtMs, signal, localAbort.signal);
+        assertNotAborted(signal, localAbort.signal);
         const chunk = int16ToPcm16Le(output.subarray(offset, end));
         if (!playback.stdin.write(chunk)) {
           await waitForDrain(playback.stdin, signal, localAbort.signal);
         }
-        await abortableDelay(
-          (end - offset) * 1_000 / SAMPLE_RATE,
-          signal,
-          localAbort.signal,
-        );
+        lastWriteCompletedAtMs = this.#monotonicNow();
       }
-      await abortableDelay(DIGITAL_PLAYBACK_TAIL_MS, signal, localAbort.signal);
+      const playbackEndMs = Math.max(
+        playbackStartedAtMs + durationMs,
+        lastWriteCompletedAtMs + writeAheadMs,
+      );
+      await this.#waitForPlaybackDeadline(
+        playbackEndMs + DIGITAL_PLAYBACK_TAIL_MS,
+        signal,
+        localAbort.signal,
+      );
     } finally {
       if (this.#digitalPlaybackAbort === localAbort) {
         this.#digitalPlaybackAbort = null;
       }
       this.#digitalPlaybackActive = false;
-      this.#suppressVoicePlaybackUntilMs = this.#now() + 100;
+      this.#suppressVoicePlaybackUntilMs = this.#now() + DIGITAL_VOICE_RESUME_GUARD_MS;
+    }
+  }
+
+  async #waitForPlaybackDeadline(
+    deadlineMs: number,
+    firstSignal: AbortSignal,
+    secondSignal: AbortSignal,
+  ): Promise<void> {
+    while (true) {
+      assertNotAborted(firstSignal, secondSignal);
+      const remainingMs = deadlineMs - this.#monotonicNow();
+      if (remainingMs <= 0) {
+        return;
+      }
+      await this.#delayPlayback(remainingMs, firstSignal, secondSignal);
     }
   }
 

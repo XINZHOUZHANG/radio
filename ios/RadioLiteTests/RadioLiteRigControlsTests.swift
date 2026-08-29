@@ -15,6 +15,7 @@ final class RadioLiteRigControlsTests: XCTestCase {
         XCTAssertEqual(response.controls.map(\.id), [
             "level:RFPOWER",
             "function:NB",
+            "function:TUNER",
             "passband:CURRENT",
             "level:FUTUREGAIN",
         ])
@@ -43,6 +44,12 @@ final class RadioLiteRigControlsTests: XCTestCase {
         XCTAssertEqual(noiseBlankerDisplay.options.map(\.label), ["关闭", "开启"])
         XCTAssertTrue(noiseBlankerDisplay.writable)
         XCTAssertNil(noiseBlankerDisplay.lockedReason)
+
+        let tuner = try XCTUnwrap(response.controls.first { $0.id == "function:TUNER" })
+        let tunerDisplay = tuner.displayState(isTransmitting: false)
+        XCTAssertEqual(tunerDisplay.label, "机内天调接入")
+        XCTAssertTrue(tunerDisplay.writable)
+        XCTAssertFalse(tuner.displayState(isTransmitting: true).writable)
 
         let filter = try XCTUnwrap(response.controls.first { $0.id == "passband:CURRENT" })
         let filterDisplay = filter.displayState(isTransmitting: false)
@@ -180,6 +187,85 @@ final class RadioLiteRigControlsTests: XCTestCase {
         )
     }
 
+    func testTunerButtonTapStartsAndStopsAOneShotTune() {
+        XCTAssertEqual(
+            RadioLiteTunerInteractionPolicy.action(isTuning: false, tuneSupported: true),
+            .start
+        )
+        XCTAssertEqual(
+            RadioLiteTunerInteractionPolicy.action(isTuning: true, tuneSupported: true),
+            .stop
+        )
+        XCTAssertEqual(
+            RadioLiteTunerInteractionPolicy.action(isTuning: false, tuneSupported: false),
+            .unavailable
+        )
+    }
+
+    func testOnlyAnOrdinaryTuningCompletionRestoresTheTunerSwitch() {
+        XCTAssertTrue(
+            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
+                after: .userRelease,
+                switchAvailable: true
+            )
+        )
+        XCTAssertFalse(
+            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
+                after: .connectionLoss,
+                switchAvailable: true
+            )
+        )
+        XCTAssertFalse(
+            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
+                after: .operatorCancellation,
+                switchAvailable: true
+            )
+        )
+        XCTAssertFalse(
+            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
+                after: .userRelease,
+                switchAvailable: false
+            )
+        )
+    }
+
+    func testPendingTunerSwitchReengageBelongsToTheExactRadioAndTransmitEpochs() {
+        let ownership = RadioLiteTunerSwitchReengageOwnership(
+            radioId: "main",
+            startupEpoch: 7,
+            completionEpoch: 8
+        )
+
+        XCTAssertTrue(
+            ownership.isCurrent(
+                radioId: "main",
+                startupEpoch: 7,
+                currentEpoch: 8
+            )
+        )
+        XCTAssertFalse(
+            ownership.isCurrent(
+                radioId: "backup",
+                startupEpoch: 7,
+                currentEpoch: 8
+            )
+        )
+        XCTAssertFalse(
+            ownership.isCurrent(
+                radioId: "main",
+                startupEpoch: 6,
+                currentEpoch: 8
+            )
+        )
+        XCTAssertFalse(
+            ownership.isCurrent(
+                radioId: "main",
+                startupEpoch: 7,
+                currentEpoch: 9
+            )
+        )
+    }
+
     private var controlsPayload: Data {
         Data(#"""
         {
@@ -210,6 +296,17 @@ final class RadioLiteRigControlsTests: XCTestCase {
               "unit":"boolean",
               "transmitLocked":false,
               "futureBooleanStyle":"toggle"
+            },
+            {
+              "id":"function:TUNER",
+              "kind":"function",
+              "token":"TUNER",
+              "value":0,
+              "minimum":0,
+              "maximum":1,
+              "step":1,
+              "unit":"boolean",
+              "transmitLocked":true
             },
             {
               "id":"passband:CURRENT",
