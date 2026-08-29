@@ -228,10 +228,11 @@ shows the resolved endpoints and overrides.
 
 ### 7. SSTV and Radiofax
 
-The service integrates the MIT-licensed Rasterwave codec through its maintained
-Node binding when a compatible prebuilt binary exists. If the binding cannot be
-installed for Node 24/Debian, it is built as a pinned service-side helper; the
-iOS app never embeds the native Node module.
+The service integrates the MIT-licensed Rasterwave 0.1.0 Rust crate through a
+pinned service-side helper; the iOS app never embeds the codec. Upstream
+documentation confirms the streaming Rust codec but does not currently expose
+a stable published Node binding for Node 24/Debian, so a native addon or
+prebuilt npm package is not a delivery prerequisite.
 
 SSTV RX consumes the existing shared 12/16 kHz PCM capture, auto-detects VIS,
 and publishes session metadata plus progressive compressed image-row events.
