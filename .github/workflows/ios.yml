@@ -158,7 +158,9 @@ jobs:
           shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
             > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
       - name: Upload unsigned IPA
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_ipa }}
+        if: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.upload_ipa) ||
+              (github.event_name == 'push' && contains(github.event.head_commit.message, '[upload-ipa]')) }}
         uses: actions/upload-artifact@v4
         with:
           name: Radio-Lite-Debug-unsigned-${{ github.sha }}
