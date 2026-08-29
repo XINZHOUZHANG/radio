@@ -60,6 +60,101 @@ final class RadioLiteFTMessageTests: XCTestCase {
         XCTAssertEqual(resolver.country(for: "F4ABC"), "broad")
     }
 
+    func testDecodeMetadataFormatsTheRequestedChineseCallsignExamples() {
+        let examples: [(callsign: String, distance: Int, expected: String)] = [
+            ("BI8SCQ", 1_401, "中国 · 云南 · 1401 km"),
+            ("BG8HNC", 832, "中国 · 重庆 · 832 km"),
+            ("BU2GF", 972, "中国 · 台湾 · 972 km"),
+        ]
+
+        for example in examples {
+            XCTAssertEqual(
+                RadioLiteFTDecodeMetadataFormatter.text(
+                    sender: example.callsign,
+                    distanceKilometers: example.distance
+                ),
+                example.expected,
+                example.callsign
+            )
+        }
+    }
+
+    func testMainlandCallsignRegionLookupCoversEveryAllocationRange() {
+        let expectedRegions = [
+            "BG1AAA": "北京",
+            "BG2AAA": "黑龙江",
+            "BG2IAA": "吉林",
+            "BG2QAA": "辽宁",
+            "BG3AAA": "天津",
+            "BG3GAA": "内蒙古",
+            "BG3MAA": "河北",
+            "BG3SAA": "山西",
+            "BG4AAA": "上海",
+            "BG4IAA": "山东",
+            "BG4QAA": "江苏",
+            "BG5AAA": "浙江",
+            "BG5IAA": "江西",
+            "BG5QAA": "福建",
+            "BG6AAA": "安徽",
+            "BG6IAA": "河南",
+            "BG6QAA": "湖北",
+            "BG7AAA": "湖南",
+            "BG7IAA": "广东",
+            "BG7QAA": "广西",
+            "BG7YAA": "海南",
+            "BG8AAA": "四川",
+            "BG8GAA": "重庆",
+            "BG8MAA": "贵州",
+            "BG8SAA": "云南",
+            "BG9AAA": "陕西",
+            "BG9GAA": "甘肃",
+            "BG9MAA": "宁夏",
+            "BG9SAA": "青海",
+            "BG0AAA": "新疆",
+            "BG0GAA": "西藏",
+        ]
+
+        for (callsign, expectedRegion) in expectedRegions {
+            XCTAssertEqual(
+                RadioLiteCallsignCountryResolver.offline.location(for: callsign)?.region,
+                expectedRegion,
+                callsign
+            )
+        }
+    }
+
+    func testDecodeMetadataOmitsUnavailableRegionAndLegacyDuplicateFields() {
+        XCTAssertEqual(
+            RadioLiteFTDecodeMetadataFormatter.text(
+                sender: "JA1ABC",
+                distanceKilometers: 2_001
+            ),
+            "日本 · 2001 km"
+        )
+        XCTAssertEqual(
+            RadioLiteFTDecodeMetadataFormatter.text(
+                sender: "QZ0ZZZ",
+                distanceKilometers: 321
+            ),
+            "未知地区 · 321 km"
+        )
+        XCTAssertEqual(
+            RadioLiteFTDecodeMetadataFormatter.text(
+                sender: nil,
+                distanceKilometers: nil
+            ),
+            nil
+        )
+
+        let metadata = RadioLiteFTDecodeMetadataFormatter.text(
+            sender: "BI8SCQ",
+            distanceKilometers: 1_401
+        )
+        XCTAssertFalse(metadata?.contains("BI8SCQ") == true)
+        XCTAssertFalse(metadata?.contains("OM") == true)
+        XCTAssertFalse(metadata?.contains("大圆") == true)
+    }
+
     func testOfflineCountryLookupCoversMajorCallsignPrefixFamilies() {
         let expectedCountries = [
             "K1ABC": "美国",
