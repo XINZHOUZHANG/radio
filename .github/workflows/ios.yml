@@ -158,6 +158,7 @@ jobs:
           shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
             > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
       - name: Upload unsigned IPA
+        # Push uploads require both a matching path change and [upload-ipa] in the head commit.
         if: >-
           ${{ (github.event_name == 'workflow_dispatch' && inputs.upload_ipa) ||
               (github.event_name == 'push' && contains(github.event.head_commit.message, '[upload-ipa]')) }}
