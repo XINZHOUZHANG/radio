@@ -17,31 +17,21 @@ import {
   HamlibRig,
   InternalTunerUnsupportedError,
   isTransmitLockedRigControlId,
-  type HamlibRigControl,
-  type HamlibRigState,
 } from "./hamlib-rig.ts";
+import { HamlibDriver } from "./hamlib-driver.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
+import type {
+  RadioControl,
+  RadioDriver,
+  RadioModeState,
+  RadioState,
+} from "./radio-driver.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
 import {
   RigRuntimeSupervisor,
-  RigRuntimeSupervisorCleanupUncertainError,
   type ManagedRigctldExit,
 } from "./runtime-supervisor.ts";
 import { RigctldTransport, RigReportError } from "./transport.ts";
-
-export type RigControl = {
-  readState(): Promise<HamlibRigState>;
-  readControls(): Promise<HamlibRigControl[]>;
-  setFrequency(frequencyHz: number): Promise<number>;
-  setMode(mode: string, passbandHz?: number): Promise<{ mode: string; passbandHz: number }>;
-  setControl(id: string, value: number): Promise<HamlibRigControl>;
-  setPtt(enabled: boolean): Promise<boolean>;
-  writePtt(enabled: boolean): Promise<void>;
-  readPtt(): Promise<boolean>;
-  supportsInternalTuner(): Promise<boolean>;
-  startInternalTuner(): Promise<void>;
-  writeInternalTuner(enabled: boolean): Promise<void>;
-};
 
 export class HardwareTransmitDisabledError extends Error {}
 export class TransmitPermissionError extends Error {}
@@ -64,38 +54,42 @@ export class RadioRuntime {
   readonly control: ControlLeaseManager;
   readonly interlock: TransmitInterlock;
   readonly supervisor: RigRuntimeSupervisor;
-  readonly #rig: RigControl;
+  readonly #driver: RadioDriver;
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
+  #initializePromise: Promise<void> | null = null;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(
     profile: RadioProfile,
-    rig: RigControl,
+    driver: RadioDriver,
     closeDependencies: () => Promise<void> = async () => undefined,
     now: () => number = Date.now,
     options: RadioRuntimeOptions = {},
   ) {
     this.profile = profile;
-    this.#rig = rig;
+    this.#driver = driver;
     this.control = new ControlLeaseManager({ now });
-    const driver: TransmitDriver = {
+    const transmitDriver: TransmitDriver = {
       activate: async (mode) => {
         if (mode === "tuning") {
-          await this.#rig.startInternalTuner();
+          await this.#driver.invokeAction("action:TUNER");
         } else {
-          await this.#rig.setPtt(true);
+          await this.#driver.writePtt(true);
+          if (!(await this.#driver.readPtt())) {
+            throw new Error("PTT read-back mismatch");
+          }
         }
       },
       deactivate: async () => undefined,
       emergencyOff: async () => {
-        await this.#rig.writePtt(false);
+        await this.#driver.writePtt(false);
       },
       readPtt: async () => {
-        return this.#rig.readPtt();
+        return this.#driver.readPtt();
       },
     };
-    this.interlock = new TransmitInterlock(driver, { now });
+    this.interlock = new TransmitInterlock(transmitDriver, { now });
     const safetyEvents = options.safetyEvents ?? new SafetyEventHub({
       configuredRadioIds: () => [profile.id],
     });
@@ -103,7 +97,7 @@ export class RadioRuntime {
       radioId: profile.id,
       interlock: this.interlock,
       safetyEvents,
-      recoveryTransport: () => driver,
+      recoveryTransport: () => transmitDriver,
       startManaged: options.startManaged,
       restartManaged: options.restartManaged,
       closeManaged: closeDependencies,
@@ -115,31 +109,35 @@ export class RadioRuntime {
   }
 
   async initialize(): Promise<void> {
-    try {
-      await this.supervisor.startupObserve();
-    } catch (error) {
-      if (
-        !this.profile.hardwareTxEnabled &&
-        this.profile.ptt.method === "None" &&
-        error instanceof RigReportError &&
-        error.report === -11
-      ) {
-        return;
+    this.#initializePromise ??= (async () => {
+      try {
+        await this.#driver.initialize();
+        await this.supervisor.startupObserve();
+      } catch (error) {
+        if (
+          !this.profile.hardwareTxEnabled &&
+          this.profile.ptt.method === "None" &&
+          error instanceof RigReportError &&
+          error.report === -11
+        ) {
+          return;
+        }
+        throw error;
       }
-      throw error;
-    }
+    })();
+    await this.#initializePromise;
   }
 
-  readState(): Promise<HamlibRigState> {
-    return this.#rig.readState();
+  readState(): Promise<RadioState> {
+    return this.#driver.readState();
   }
 
-  readControls(): Promise<HamlibRigControl[]> {
-    return this.#rig.readControls();
+  readControls(): Promise<RadioControl[]> {
+    return this.#driver.readControls();
   }
 
-  supportsInternalTuner(): Promise<boolean> {
-    return this.#rig.supportsInternalTuner();
+  async supportsInternalTuner(): Promise<boolean> {
+    return (await this.#driver.capabilities()).supportsInternalTuner;
   }
 
   async acquireControl(
@@ -181,7 +179,7 @@ export class RadioRuntime {
 
   async setFrequency(ownerId: string, controlToken: string, frequencyHz: number): Promise<number> {
     this.control.assertValid(ownerId, controlToken);
-    return this.#rig.setFrequency(frequencyHz);
+    return this.#driver.setFrequency(frequencyHz);
   }
 
   async setMode(
@@ -189,9 +187,9 @@ export class RadioRuntime {
     controlToken: string,
     mode: string,
     passbandHz = 0,
-  ): Promise<{ mode: string; passbandHz: number }> {
+  ): Promise<RadioModeState> {
     this.control.assertValid(ownerId, controlToken);
-    return this.#rig.setMode(mode, passbandHz);
+    return this.#driver.setMode(mode, passbandHz);
   }
 
   async setControl(
@@ -199,7 +197,7 @@ export class RadioRuntime {
     controlToken: string,
     controlId: string,
     value: number,
-  ): Promise<HamlibRigControl> {
+  ): Promise<RadioControl> {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, controlToken);
       if (
@@ -210,7 +208,7 @@ export class RadioRuntime {
           "transmit-sensitive radio controls are locked while transmitting",
         );
       }
-      return this.#rig.setControl(controlId, value);
+      return this.#driver.setControl(controlId, value);
     });
   }
 
@@ -222,7 +220,7 @@ export class RadioRuntime {
   ): Promise<TransmitLease> {
     return this.#serialize(async () => {
       const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
-      if (mode === "tuning" && !(await this.#rig.supportsInternalTuner())) {
+      if (mode === "tuning" && !(await this.supportsInternalTuner())) {
         throw new InternalTunerUnsupportedError(
           "radio does not support internal tuning via Hamlib TUNE",
         );
@@ -290,16 +288,21 @@ export class RadioRuntime {
     }
     clearInterval(this.#safetyTimer);
     const closing = (async () => {
+      const failures: unknown[] = [];
       try {
         await this.supervisor.close();
       } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await this.#driver.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length > 0) {
         throw new RadioRuntimeCleanupUncertainError(
-          "radio de-key or dependency cleanup could not be confirmed",
-          {
-            cause: error instanceof RigRuntimeSupervisorCleanupUncertainError
-              ? error
-              : new AggregateError([error]),
-          },
+          "radio de-key, driver, or dependency cleanup could not be confirmed",
+          { cause: new AggregateError(failures) },
         );
       }
     })();
@@ -691,9 +694,9 @@ async function createDefaultRadioRuntime(
       });
   runtime = new RadioRuntime(
     profile,
-    new HamlibRig(transport, {
+    new HamlibDriver(new HamlibRig(transport, {
       pttMethod: profile.ptt.method,
-    }),
+    })),
     async () => {
       const failures: unknown[] = [];
       try {

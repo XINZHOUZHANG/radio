@@ -9,7 +9,8 @@ import type { RadioProfile } from "../src/config/types.ts";
 import { DigitalRadioController, type DigitalSlotScheduler } from "../src/digital/controller.ts";
 import { DummyDigitalWorker } from "../src/digital/dummy-worker.ts";
 import { AdifLogStore } from "../src/log/adif-log-store.ts";
-import { RadioRuntime, type RigControl } from "../src/rig/radio-runtime.ts";
+import { RadioRuntime } from "../src/rig/radio-runtime.ts";
+import type { RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
 import { InvalidLeaseError } from "../src/safety/transmit-interlock.ts";
 
 test("automatic digital controller uses the interlock and logs one completed FT8 QSO", async (context) => {
@@ -426,13 +427,16 @@ class ManualSlotScheduler implements DigitalSlotScheduler {
   }
 }
 
-class DigitalFakeRig implements RigControl {
+class DigitalFakeRig implements RadioDriver {
   frequencyHz = 14_074_000;
   mode = "USB";
   passbandHz = 3_000;
   ptt = false;
   readonly pttEvents: boolean[] = [];
 
+  async initialize() {}
+  async close() {}
+  async capabilities() { return { canTransmit: true, supportsInternalTuner: true }; }
   async readState() {
     return {
       frequencyHz: this.frequencyHz,
@@ -441,6 +445,7 @@ class DigitalFakeRig implements RigControl {
       ptt: this.ptt,
     };
   }
+  async readTelemetry(_mode: "receive" | "transmit") { return {}; }
   async setFrequency(value: number) { this.frequencyHz = value; return value; }
   async setMode(value: string, passband = 0) {
     this.mode = value;
@@ -461,8 +466,12 @@ class DigitalFakeRig implements RigControl {
   async startInternalTuner() {}
   async writeInternalTuner(_value: boolean) {}
   async readControls() { return []; }
-  async setControl(_id: string, _value: number): Promise<never> {
+  async setControl(_id: string, _value: RadioControlValue): Promise<never> {
     throw new Error("digital controller test rig has no adjustable controls");
+  }
+  async invokeAction(id: string) {
+    if (id !== "action:TUNER") throw new Error("action unavailable");
+    await this.startInternalTuner();
   }
 }
 

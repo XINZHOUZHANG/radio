@@ -8,6 +8,7 @@ import type { PublicUser } from "../src/auth/user-store.ts";
 import { parseRadioProfile } from "../src/config/types.ts";
 import { ControlBusyError } from "../src/control/control-lease.ts";
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
+import { HamlibDriver } from "../src/rig/hamlib-driver.ts";
 import { HamlibRig } from "../src/rig/hamlib-rig.ts";
 import {
   HardwareTransmitDisabledError,
@@ -18,11 +19,11 @@ import {
   RadioRuntimeRegistry,
   RadioRuntimeRegistryClosedError,
   TransmitPermissionError,
-  type RigControl,
 } from "../src/rig/radio-runtime.ts";
+import type { RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
 import { RigReportError } from "../src/rig/transport.ts";
 
-class FakeRig implements RigControl {
+class FakeRig implements RadioDriver {
   frequencyHz = 14_074_000;
   mode = "USB";
   passbandHz = 3_000;
@@ -35,7 +36,11 @@ class FakeRig implements RigControl {
   ]);
   readonly events: string[] = [];
 
+  async initialize() {}
+  async close() {}
+  async capabilities() { return { canTransmit: true, supportsInternalTuner: true }; }
   async readState() { return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
+  async readTelemetry(_mode: "receive" | "transmit") { return {}; }
   async setFrequency(value: number) { this.frequencyHz = value; this.events.push(`frequency:${value}`); return value; }
   async setMode(value: string, passband = 0) { this.mode = value; this.passbandHz = passband || 2_400; this.events.push(`mode:${value}`); return { mode: this.mode, passbandHz: this.passbandHz }; }
   async setPtt(value: boolean) {
@@ -70,12 +75,17 @@ class FakeRig implements RigControl {
       transmitLocked: id === "level:RFPOWER",
     }));
   }
-  async setControl(id: string, value: number) {
+  async setControl(id: string, value: RadioControlValue) {
+    if (typeof value !== "number") throw new Error("control value must be numeric");
     const control = (await this.readControls()).find((candidate) => candidate.id === id);
     if (control === undefined) throw new Error("control unavailable");
     this.controls.set(id, value);
     this.events.push(`control:${id}:${value}`);
     return { ...control, value };
+  }
+  async invokeAction(id: string) {
+    if (id !== "action:TUNER") throw new Error("action unavailable");
+    await this.startInternalTuner();
   }
 }
 
@@ -84,7 +94,8 @@ class DeferredControlRig extends FakeRig {
   readonly allowControlWrite = deferred<void>();
   pttWhenControlWritten: boolean | null = null;
 
-  async setControl(id: string, value: number) {
+  async setControl(id: string, value: RadioControlValue) {
+    if (typeof value !== "number") throw new Error("control value must be numeric");
     const control = (await this.readControls()).find((candidate) => candidate.id === id);
     if (control === undefined) throw new Error("control unavailable");
     this.controlWriteStarted.resolve();
@@ -207,7 +218,7 @@ test("receive-only PTT None runtime starts without treating display cache as evi
   };
   const runtime = new RadioRuntime(
     receiveOnlyProfile,
-    new HamlibRig(requester, { pttMethod: "None" }),
+    new HamlibDriver(new HamlibRig(requester, { pttMethod: "None" })),
   );
 
   await runtime.initialize();
@@ -246,7 +257,7 @@ test("runtime voice dekey sends one OFF write and one strict PTT read", async ()
 
 test("runtime transmit start retains PTT ON readback", async () => {
   const requester = new RecordingHamlibRequester();
-  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
   await runtime.initialize();
   const operator = user("u1", "operator", true);
   const control = await runtime.acquireControl("device-a", operator);
@@ -267,7 +278,7 @@ test("runtime transmit start retains PTT ON readback", async () => {
 test("runtime voice and digital dekey use one OFF write and one strict PTT read", async () => {
   for (const mode of ["voice", "digital"] as const) {
     const requester = new RecordingHamlibRequester();
-    const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+    const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
     await runtime.initialize();
     const operator = user(`operator-${mode}`, "operator", true);
     const control = await runtime.acquireControl(`device-${mode}`, operator);
@@ -288,7 +299,7 @@ test("runtime voice and digital dekey use one OFF write and one strict PTT read"
 
 test("runtime tuning stop dekeys safely without disabling the persistent tuner switch", async (context) => {
   const requester = new RecordingHamlibRequester();
-  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
   context.after(() => runtime.close().catch(() => undefined));
   await runtime.initialize();
   const operator = user("tuner-operator", "operator", true);
@@ -318,7 +329,7 @@ test("runtime tuning stop dekeys safely without disabling the persistent tuner s
 test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch", async (context) => {
   const requester = new RecordingHamlibRequester();
   requester.writableFunctions = "NB NR";
-  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
   context.after(() => runtime.close().catch(() => undefined));
   await runtime.initialize();
   const operator = user("tune-only-operator", "operator", true);
@@ -343,7 +354,7 @@ test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch",
 
 test("runtime exposes cached internal-tuner capability without steady-state CAT polling", async (context) => {
   const requester = new RecordingHamlibRequester();
-  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
   context.after(() => runtime.close().catch(() => undefined));
   await runtime.initialize();
   requester.clear();
@@ -357,7 +368,7 @@ test("runtime exposes cached internal-tuner capability without steady-state CAT 
 test("runtime rejects unsupported tuning before reserving a transmit activation", async (context) => {
   const requester = new RecordingHamlibRequester();
   requester.vfoOperations = "CPY TOGGLE";
-  const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
+  const runtime = new RadioRuntime(profile(true), new HamlibDriver(new HamlibRig(requester)));
   context.after(() => runtime.close().catch(() => undefined));
   await runtime.initialize();
   const operator = user("unsupported-tuner", "operator", true);
@@ -379,30 +390,27 @@ test("runtime rejects unsupported tuning before reserving a transmit activation"
   assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
 });
 
-test("PTT None command cache cannot clear a runtime dekey latch", async (context) => {
+test("PTT None command cache cannot establish a transmit lease without strict read-back", async (context) => {
   const requester = new RecordingHamlibRequester();
   requester.pttUnavailable = true;
   const runtime = new RadioRuntime(
     profile(true),
-    new HamlibRig(requester, { pttMethod: "None" }),
+    new HamlibDriver(new HamlibRig(requester, { pttMethod: "None" })),
   );
   context.after(() => runtime.close().catch(() => undefined));
   const operator = user("ptt-none-operator", "operator", true);
   const control = await runtime.acquireControl("device-ptt-none", operator);
-  const transmit = await runtime.startTransmit(
-    "device-ptt-none",
-    operator,
-    control.lease.token,
-    "voice",
-  );
-  requester.clear();
-
   await assert.rejects(
-    runtime.stopTransmit("device-ptt-none", transmit.leaseToken),
+    runtime.startTransmit(
+      "device-ptt-none",
+      operator,
+      control.lease.token,
+      "voice",
+    ),
     /read-back|RPRT -11/u,
   );
 
-  assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"]);
+  assert.deepEqual(requester.commands, ["\\set_ptt 1", "\\get_ptt", "\\set_ptt 0", "\\get_ptt"]);
   assert.equal(runtime.interlock.snapshot().state, "fault");
   assert.equal(runtime.interlock.snapshot().dekeyRequired, true);
 });

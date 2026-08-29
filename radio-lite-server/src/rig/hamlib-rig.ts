@@ -1,5 +1,6 @@
 import type { PttMethod } from "../config/types.ts";
 import type { RigResponse } from "./extended-protocol.ts";
+import type { RadioControl, RadioState } from "./radio-driver.ts";
 import { RigReportError, type RigRequestOptions } from "./transport.ts";
 
 export type RigRequester = {
@@ -16,26 +17,15 @@ const SAFETY_READ_REQUEST = {
   source: "ptt-off",
 } as const satisfies RigRequestOptions;
 
-export type HamlibRigState = {
-  frequencyHz: number;
-  mode: string;
-  passbandHz: number;
-  ptt: boolean;
-};
+export type HamlibRigState = RadioState;
 
 export type HamlibRigControlKind = "level" | "function" | "passband";
 export type HamlibRigControlUnit = "ratio" | "decibel" | "index" | "boolean" | "hertz";
 
-export type HamlibRigControl = {
-  id: string;
+export type HamlibRigControl = RadioControl & {
   kind: HamlibRigControlKind;
-  token: string;
   value: number;
-  minimum: number;
-  maximum: number;
-  step: number;
   unit: HamlibRigControlUnit;
-  transmitLocked: boolean;
 };
 
 type HamlibRigControlDefinition = Omit<HamlibRigControl, "value">;

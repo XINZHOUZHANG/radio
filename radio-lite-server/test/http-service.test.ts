@@ -23,8 +23,8 @@ import { RigModeError } from "../src/rig/hamlib-rig.ts";
 import {
   RadioRuntime,
   RadioRuntimeCleanupUncertainError,
-  type RigControl,
 } from "../src/rig/radio-runtime.ts";
+import type { RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
 import { RadioLiteService } from "../src/server/radio-lite-service.ts";
 
 test("HTTP service completes setup, login, pairing and radio configuration", async (context) => {
@@ -895,7 +895,7 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-class ApiFakeRig implements RigControl {
+class ApiFakeRig implements RadioDriver {
   frequencyHz = 14_074_000;
   mode = "USB";
   passbandHz = 3_000;
@@ -908,6 +908,9 @@ class ApiFakeRig implements RigControl {
     ["level:AF", 0.4],
   ]);
 
+  async initialize() {}
+  async close() {}
+  async capabilities() { return { canTransmit: true, supportsInternalTuner: this.supportsTuner }; }
   async readState() {
     return {
       frequencyHz: this.frequencyHz,
@@ -916,6 +919,7 @@ class ApiFakeRig implements RigControl {
       ptt: this.ptt,
     };
   }
+  async readTelemetry(_mode: "receive" | "transmit") { return {}; }
   async setFrequency(value: number) { this.frequencyHz = value; return value; }
   async setMode(value: string, passband = 0) {
     if (value === this.rejectedMode) {
@@ -944,10 +948,15 @@ class ApiFakeRig implements RigControl {
       transmitLocked: id === "level:RFPOWER",
     }));
   }
-  async setControl(id: string, value: number) {
+  async setControl(id: string, value: RadioControlValue) {
+    if (typeof value !== "number") throw new Error("control value must be numeric");
     const control = (await this.readControls()).find((candidate) => candidate.id === id);
     if (control === undefined) throw new Error("control unavailable");
     this.controls.set(id, value);
     return { ...control, value };
+  }
+  async invokeAction(id: string) {
+    if (id !== "action:TUNER") throw new Error("action unavailable");
+    await this.startInternalTuner();
   }
 }
