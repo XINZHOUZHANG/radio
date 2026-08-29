@@ -45,7 +45,16 @@ export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
   return endpoint.backend === "alsa"
     ? {
         file: "arecord",
-        args: ["-q", "-D", endpoint.id, "-t", "raw", "-f", "S16_LE", "-c", "1", "-r", String(SAMPLE_RATE)],
+        args: [
+          "-q",
+          "-D", endpoint.id,
+          "-t", "raw",
+          "-f", "S16_LE",
+          "-c", "1",
+          "-r", String(SAMPLE_RATE),
+          "--buffer-time=80000",
+          "--period-time=20000",
+        ],
       }
     : {
         file: "parec",
@@ -65,7 +74,16 @@ export function playbackCommand(endpoint: AudioEndpoint): MediaCommand {
   return endpoint.backend === "alsa"
     ? {
         file: "aplay",
-        args: ["-q", "-D", endpoint.id, "-t", "raw", "-f", "S16_LE", "-c", "1", "-r", String(SAMPLE_RATE)],
+        args: [
+          "-q",
+          "-D", endpoint.id,
+          "-t", "raw",
+          "-f", "S16_LE",
+          "-c", "1",
+          "-r", String(SAMPLE_RATE),
+          "--buffer-time=80000",
+          "--period-time=20000",
+        ],
       }
     : {
         file: "pacat",
@@ -98,7 +116,7 @@ export function opusEncoderCommand(bitrate: number): MediaCommand {
       `--raw-chan=${CHANNELS}`,
       "--framesize=20",
       `--bitrate=${Math.round(bitrate / 1_000)}`,
-      "--max-delay=20",
+      "--max-delay=0",
       "-",
       "-",
     ],

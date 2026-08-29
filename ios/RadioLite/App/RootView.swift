@@ -2,14 +2,21 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @State private var showsRestoreEscape = false
 
     var body: some View {
         Group {
             switch session.phase {
             case .launching:
                 launchView
-            case .signedOut, .authenticating:
+            case .signedOut:
                 RadioLiteLoginView()
+            case .authenticating:
+                if session.isRestoringSession {
+                    launchView
+                } else {
+                    RadioLiteLoginView()
+                }
             case .ready:
                 RadioLiteShellView()
             case .failed(let message):
@@ -53,7 +60,28 @@ struct RootView: View {
                     .font(.title2.weight(.semibold))
                 ProgressView()
                     .tint(RadioPalette.accent)
+                if showsRestoreEscape {
+                    Text("上次服务器响应较慢，可继续等待或换一个地址")
+                        .font(.caption)
+                        .foregroundStyle(RadioPalette.muted)
+                        .multilineTextAlignment(.center)
+                    Button("换服务器") {
+                        session.cancelSessionRestore()
+                    }
+                    .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
+                }
             }
+            .padding(.horizontal, 28)
+        }
+        .task {
+            showsRestoreEscape = false
+            do {
+                try await Task.sleep(for: .seconds(RadioLiteStartupRestorePolicy.escapeDelay))
+            } catch {
+                return
+            }
+            guard session.isRestoringSession else { return }
+            withAnimation(.snappy) { showsRestoreEscape = true }
         }
     }
 

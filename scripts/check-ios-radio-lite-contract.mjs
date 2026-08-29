@@ -12,6 +12,8 @@ const service = read('radio-lite-server', 'src', 'server', 'radio-lite-service.t
 const protocol = read('radio-lite-server', 'PROTOCOL.md');
 const http = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteHTTPClient.swift');
 const session = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteSession.swift');
+const server = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteServer.swift');
+const rootView = read('ios', 'RadioLite', 'App', 'RootView.swift');
 const voicePTTStartup = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteVoicePTTStartup.swift');
 const credentialRefresh = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteCredentialRefreshCoordinator.swift');
 const operationEpoch = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteOperationEpoch.swift');
@@ -49,12 +51,19 @@ assert(backgroundTransition.includes('media.setSpectrumVisible(decision.spectrum
 assert(!backgroundTransition.includes('isAppActive = true'));
 assert(rigControls.includes('enum RadioLiteTunerTapAction'));
 assert(rigControls.includes('enum RadioLiteTunerInteractionPolicy'));
-assert(rigControls.includes('struct RadioLiteTunerSwitchReengageOwnership'));
+assert(rigControls.includes('reflectingSuccessfulTuneStart('));
+assert(rigControls.includes('static func tunerSwitch(in controls:'));
+assert(rigControls.includes('static func generalControls(in controls:'));
 assert(rigControls.includes('case "TUNER": return "机内天调接入"'));
 assert(radioView.includes('RadioLiteTunerInteractionPolicy.action('));
-assert(session.includes('shouldReengageSwitch('));
-assert(session.includes('finishTunerSwitchReengageAfterStop('));
+assert(radioView.includes('Toggle("机内天调接入", isOn: tunerSwitchBinding)'));
+assert(rigControlsView.includes('RadioLiteTunerInteractionPolicy.generalControls('));
+assert(session.includes('reflectSuccessfulTunerStart(radioId:'));
 assert(session.includes('endTuning(reason: .operatorCancellation)'));
+assert(server.includes('configuration.waitsForConnectivity = false'));
+assert(server.includes('static let deadline: TimeInterval = 10'));
+assert(session.includes('func cancelSessionRestore()'));
+assert(rootView.includes('Button("换服务器")'));
 
 const httpPaths = [
   '/healthz',

@@ -298,8 +298,8 @@ struct RadioLitePlaybackQueueState: Equatable, Sendable {
         scheduledBuffers = 0
     }
 
-    func requiresRecovery(engineRunning: Bool, playerPlaying: Bool) -> Bool {
-        scheduledBuffers >= maximumBuffers && (!engineRunning || !playerPlaying)
+    func requiresRecovery(engineRunning _: Bool, playerPlaying _: Bool) -> Bool {
+        scheduledBuffers >= maximumBuffers
     }
 
     func shouldStartPlayback(playerPlaying: Bool) -> Bool {
@@ -372,7 +372,7 @@ final class RadioLiteAudioEngine: ObservableObject {
     private var captureEpochState = RadioLiteCaptureEpochState()
     private var microphoneProcessor = RadioLiteMicrophoneProcessor()
     private var microphoneTelemetryLimiter = AudioTelemetryLimiter(minimumInterval: 0.1)
-    private var playbackQueue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
+    private var playbackQueue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 12)
     private var playbackSuspension = RadioLitePlaybackSuspensionState()
 
     init(notificationCenter: NotificationCenter = .default) {
@@ -441,6 +441,11 @@ final class RadioLiteAudioEngine: ObservableObject {
         if !isCapturingMicrophone {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
+    }
+
+    func discardBufferedPlayback() {
+        guard isMonitoring else { return }
+        flushPlaybackQueue()
     }
 
     @discardableResult

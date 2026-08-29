@@ -322,13 +322,13 @@ final class AudioRuntimePolicyTests: XCTestCase {
         XCTAssertNotNil(queue.enqueue(), "a recovered queue must accept the next live packet")
     }
 
-    func testHealthyFullPlaybackQueueUsesBackpressureWithoutResettingPlayback() {
-        var queue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 25)
-        for _ in 0..<25 { _ = queue.enqueue() }
+    func testFullPlaybackQueueRequestsLiveEdgeRecoveryEvenWhilePlayerIsRunning() {
+        var queue = RadioLitePlaybackQueueState(targetBuffers: 3, maximumBuffers: 12)
+        for _ in 0..<12 { _ = queue.enqueue() }
 
-        XCTAssertFalse(queue.requiresRecovery(engineRunning: true, playerPlaying: true))
+        XCTAssertTrue(queue.requiresRecovery(engineRunning: true, playerPlaying: true))
         XCTAssertNil(queue.enqueue())
-        XCTAssertEqual(queue.scheduledBuffers, 25)
+        XCTAssertEqual(queue.scheduledBuffers, 12)
     }
 
     func testLocalPTTReleaseResumesPlaybackWithoutWaitingForRemoteStopDispatch() {

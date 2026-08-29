@@ -21,6 +21,15 @@ final class RadioLiteServerTests: XCTestCase {
         XCTAssertEqual(request.timeoutInterval, 300)
         XCTAssertEqual(configuration.timeoutIntervalForRequest, 300)
         XCTAssertEqual(configuration.timeoutIntervalForResource, 300)
-        XCTAssertTrue(configuration.waitsForConnectivity)
+        XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+
+    func testStartupRestoreUsesAShortIndependentDeadlineAndOffersAnEscape() {
+        XCTAssertEqual(RadioLiteStartupRestorePolicy.deadline, 10)
+        XCTAssertEqual(RadioLiteStartupRestorePolicy.escapeDelay, 3)
+        XCTAssertEqual(
+            RadioLiteStartupRestorePolicy.timeoutMessage(serverAddress: "http://100.64.0.10:8787"),
+            "无法连接到上次使用的服务器 http://100.64.0.10:8787，请检查网络或换一个地址"
+        )
     }
 }

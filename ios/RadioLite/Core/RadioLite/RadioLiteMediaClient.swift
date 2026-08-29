@@ -97,6 +97,48 @@ enum RadioLiteMediaFailurePresentation: Equatable, Sendable {
     }
 }
 
+enum RadioLiteAudioFrameDisposition: Equatable, Sendable {
+    case accept
+    case discardAndFlush
+    case discard
+}
+
+struct RadioLiteAudioFreshnessState: Equatable, Sendable {
+    private let maximumExcessDelayMicroseconds: Double
+    private var bestTransitMicroseconds: Double?
+    private var isDiscarding = false
+
+    init(maximumExcessDelayMicroseconds: UInt64 = 400_000) {
+        self.maximumExcessDelayMicroseconds = Double(maximumExcessDelayMicroseconds)
+    }
+
+    mutating func disposition(
+        timestampMicroseconds: UInt64,
+        receivedAtMicroseconds: UInt64
+    ) -> RadioLiteAudioFrameDisposition {
+        let transit = Double(receivedAtMicroseconds) - Double(timestampMicroseconds)
+        guard transit.isFinite else { return .accept }
+        if bestTransitMicroseconds == nil || transit < bestTransitMicroseconds! {
+            bestTransitMicroseconds = transit
+            isDiscarding = false
+            return .accept
+        }
+        guard let bestTransitMicroseconds,
+              transit - bestTransitMicroseconds > maximumExcessDelayMicroseconds else {
+            isDiscarding = false
+            return .accept
+        }
+        if isDiscarding { return .discard }
+        isDiscarding = true
+        return .discardAndFlush
+    }
+
+    mutating func reset() {
+        bestTransitMicroseconds = nil
+        isDiscarding = false
+    }
+}
+
 enum RadioLiteMediaLivenessFailure: LocalizedError, Equatable, Sendable {
     case channelStalled
     case audioStalled
@@ -202,6 +244,7 @@ final class RadioLiteMediaClient: ObservableObject {
     private var subscriptionOwnershipState = RadioLiteMediaSubscriptionOwnershipState()
     private var spectrumHistoryBuffer = RadioLiteSpectrumHistory()
     private var spectrumAGC = RadioLiteSpectrumAGC()
+    private var audioFreshness = RadioLiteAudioFreshnessState()
     private var liveness = RadioLiteMediaLivenessState(
         connectedAt: ProcessInfo.processInfo.systemUptime
     )
@@ -221,6 +264,7 @@ final class RadioLiteMediaClient: ObservableObject {
             self.audio.stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
             self.subscribedRadioId = nil
             self.radioSlot = nil
+            self.audioFreshness.reset()
             self.liveness.subscriptionEnded()
             self.clearSpectrum(keepingCapability: false)
             self.state = .failed(error.localizedDescription)
@@ -234,6 +278,7 @@ final class RadioLiteMediaClient: ObservableObject {
         subscriptionOwnershipState.invalidate()
         subscribedRadioId = nil
         radioSlot = nil
+        audioFreshness.reset()
         state = .connecting
         do {
             let welcome = try await channel.connect(
@@ -289,6 +334,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
         radioSlot = UInt8(slot)
         subscribedRadioId = radioId
+        audioFreshness.reset()
         liveness.subscriptionStarted(at: ProcessInfo.processInfo.systemUptime)
         self.policy = policy
         self.spectrumCapability = spectrumCapability
@@ -312,6 +358,7 @@ final class RadioLiteMediaClient: ObservableObject {
         }
         subscribedRadioId = nil
         radioSlot = nil
+        audioFreshness.reset()
         liveness.subscriptionEnded()
         clearSpectrum(keepingCapability: false)
     }
@@ -326,6 +373,7 @@ final class RadioLiteMediaClient: ObservableObject {
         state = .disconnected
         subscribedRadioId = nil
         radioSlot = nil
+        audioFreshness.reset()
         liveness.subscriptionEnded()
         policy = nil
         clearSpectrum(keepingCapability: false)
@@ -413,6 +461,21 @@ final class RadioLiteMediaClient: ObservableObject {
             if let expectedSlot = radioSlot, frame.radioSlot != expectedSlot { return }
             switch frame.kind {
             case .audioDownlink:
+                let receivedAtMicroseconds = UInt64(
+                    ProcessInfo.processInfo.systemUptime * 1_000_000
+                )
+                switch audioFreshness.disposition(
+                    timestampMicroseconds: frame.timestampMicroseconds,
+                    receivedAtMicroseconds: receivedAtMicroseconds
+                ) {
+                case .discardAndFlush:
+                    audio.discardBufferedPlayback()
+                    return
+                case .discard:
+                    return
+                case .accept:
+                    break
+                }
                 if audio.receiveOpusPacket(frame.payload) {
                     liveness.receivedAudio(at: ProcessInfo.processInfo.systemUptime)
                 }

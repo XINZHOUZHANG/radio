@@ -62,6 +62,16 @@ test("system media commands pass configured device ids as literal argv without a
   assert.ok(!capture.args.includes("sh"));
 });
 
+test("ALSA worker commands bound capture and playback buffering for live radio", () => {
+  const capture = captureCommand({ backend: "alsa", id: "plughw:CARD=FT710,DEV=0" });
+  const playback = playbackCommand({ backend: "alsa", id: "plughw:CARD=FT710,DEV=0" });
+
+  assert.ok(capture.args.includes("--buffer-time=80000"));
+  assert.ok(capture.args.includes("--period-time=20000"));
+  assert.ok(playback.args.includes("--buffer-time=80000"));
+  assert.ok(playback.args.includes("--period-time=20000"));
+});
+
 test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => {
   assert.deepEqual(
     captureCommand({ backend: "pulse", id: "alsa_input.usb-radio" }),
@@ -99,6 +109,7 @@ test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => 
   assert.deepEqual(encoder.args.slice(0, 3), ["-i0", "-o0", "opusenc"]);
   assert.ok(encoder.args.includes("--framesize=20"));
   assert.ok(encoder.args.includes("--bitrate=12"));
+  assert.ok(encoder.args.includes("--max-delay=0"));
   assert.throws(() => opusEncoderCommand(100_000), /bitrate/u);
 });
 

@@ -87,11 +87,7 @@ export class RadioRuntime {
           await this.#rig.setPtt(true);
         }
       },
-      deactivate: async (mode) => {
-        if (mode === "tuning") {
-          await this.#rig.writeInternalTuner(false);
-        }
-      },
+      deactivate: async () => undefined,
       emergencyOff: async () => {
         await this.#rig.writePtt(false);
       },

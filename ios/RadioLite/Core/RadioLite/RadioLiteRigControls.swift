@@ -111,6 +111,42 @@ struct RadioLiteRigControl: Codable, Identifiable, Equatable, Sendable {
         try container.encode(transmitLocked, forKey: .transmitLocked)
     }
 
+    func replacingValue(_ replacement: Double) -> Self {
+        Self(
+            id: id,
+            kind: kind,
+            token: token,
+            value: replacement,
+            minimum: minimum,
+            maximum: maximum,
+            step: step,
+            unit: unit,
+            transmitLocked: transmitLocked
+        )
+    }
+
+    private init(
+        id: String,
+        kind: Kind,
+        token: String,
+        value: Double,
+        minimum: Double,
+        maximum: Double,
+        step: Double,
+        unit: Unit,
+        transmitLocked: Bool
+    ) {
+        self.id = id
+        self.kind = kind
+        self.token = token
+        self.value = value
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self.unit = unit
+        self.transmitLocked = transmitLocked
+    }
+
     func displayState(isTransmitting: Bool) -> RadioLiteRigControlDisplayState {
         let unsupported: Bool
         if case .unknown = kind { unsupported = true } else { unsupported = false }
@@ -254,27 +290,20 @@ enum RadioLiteTunerInteractionPolicy {
         return isTuning ? .stop : .start
     }
 
-    static func shouldReengageSwitch(
-        after reason: RadioLiteVoicePTTStopReason,
-        switchAvailable: Bool
-    ) -> Bool {
-        switchAvailable && reason == .userRelease
+    static func reflectingSuccessfulTuneStart(
+        in controls: [RadioLiteRigControl]
+    ) -> [RadioLiteRigControl] {
+        controls.map { control in
+            control.id == "function:TUNER" ? control.replacingValue(1) : control
+        }
     }
-}
 
-struct RadioLiteTunerSwitchReengageOwnership: Equatable, Sendable {
-    let radioId: String
-    let startupEpoch: UInt64
-    let completionEpoch: UInt64
+    static func tunerSwitch(in controls: [RadioLiteRigControl]) -> RadioLiteRigControl? {
+        controls.first { $0.id == "function:TUNER" }
+    }
 
-    func isCurrent(
-        radioId candidateRadioId: String,
-        startupEpoch candidateStartupEpoch: UInt64,
-        currentEpoch: UInt64
-    ) -> Bool {
-        radioId == candidateRadioId
-            && startupEpoch == candidateStartupEpoch
-            && completionEpoch == currentEpoch
+    static func generalControls(in controls: [RadioLiteRigControl]) -> [RadioLiteRigControl] {
+        controls.filter { $0.id != "function:TUNER" }
     }
 }
 

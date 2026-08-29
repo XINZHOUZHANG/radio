@@ -73,7 +73,7 @@ enum RadioLiteNetworkPolicy {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
-        configuration.waitsForConnectivity = true
+        configuration.waitsForConnectivity = false
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         return configuration
@@ -84,5 +84,14 @@ enum RadioLiteNetworkPolicy {
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
         return request
+    }
+}
+
+enum RadioLiteStartupRestorePolicy {
+    static let deadline: TimeInterval = 10
+    static let escapeDelay: TimeInterval = 3
+
+    static func timeoutMessage(serverAddress: String) -> String {
+        "无法连接到上次使用的服务器 \(serverAddress)，请检查网络或换一个地址"
     }
 }

@@ -64,6 +64,7 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var isVoicePTTHeld = false
     @Published private(set) var isTuning = false
     @Published private(set) var isWorking = false
+    @Published private(set) var isRestoringSession = false
     @Published private(set) var digitalActionStatus: String?
     @Published var errorMessage: String?
     @Published private(set) var noticeMessage: String?
@@ -88,11 +89,12 @@ final class RadioLiteSession: ObservableObject {
     private let credentialRefreshCoordinator = RadioLiteCredentialRefreshCoordinator()
     private var credentialAccountOwnershipState = RadioLiteCredentialAccountOwnershipState()
     private var authenticationOwnershipState = RadioLiteAuthenticationOwnershipState()
+    private var startupRestoreTask: Task<Void, Never>?
+    private var startupRestoreDeadlineTask: Task<Void, Never>?
     private var mediaRetryTask: Task<Void, Never>?
     private var mediaRetryOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTStartupTask: Task<Void, Never>?
     private var tuningStartupTask: Task<Void, Never>?
-    private var tunerSwitchReengageOwnership: RadioLiteTunerSwitchReengageOwnership?
     private var receiveAudioStartupTask: Task<Void, Never>?
     private var receiveAudioStartupOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTReceiveRestoreState = RadioLiteVoicePTTReceiveRestoreState()
@@ -197,10 +199,69 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func restoreSession() async {
+        if let startupRestoreTask {
+            await startupRestoreTask.value
+            return
+        }
         let authenticationOwnership = authenticationOwnershipState.begin()
         prepareForAuthentication()
         phase = .launching
+        isRestoringSession = true
         errorMessage = nil
+        let restoreTask = Task { @MainActor [weak self] in
+            await self?.restoreStoredSession(authenticationOwnership: authenticationOwnership)
+        }
+        startupRestoreTask = restoreTask
+        let deadlineTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(RadioLiteStartupRestorePolicy.deadline))
+            } catch {
+                return
+            }
+            self?.cancelSessionRestore(
+                expectedOwnership: authenticationOwnership,
+                message: RadioLiteStartupRestorePolicy.timeoutMessage(
+                    serverAddress: self?.serverAddress ?? "上次保存的地址"
+                )
+            )
+        }
+        startupRestoreDeadlineTask = deadlineTask
+        await restoreTask.value
+        guard authenticationOwnershipState.isCurrent(authenticationOwnership) else { return }
+        startupRestoreTask = nil
+        startupRestoreDeadlineTask?.cancel()
+        startupRestoreDeadlineTask = nil
+        isRestoringSession = false
+    }
+
+    func cancelSessionRestore() {
+        guard let ownership = authenticationOwnershipState.currentOwnership else { return }
+        cancelSessionRestore(
+            expectedOwnership: ownership,
+            message: "已停止连接上次服务器，请输入可用的服务器地址"
+        )
+    }
+
+    private func cancelSessionRestore(
+        expectedOwnership: RadioLiteAuthenticationOwnership,
+        message: String
+    ) {
+        guard startupRestoreTask != nil,
+              authenticationOwnershipState.isCurrent(expectedOwnership) else { return }
+        startupRestoreTask?.cancel()
+        startupRestoreTask = nil
+        startupRestoreDeadlineTask?.cancel()
+        startupRestoreDeadlineTask = nil
+        authenticationOwnershipState.invalidate()
+        prepareForAuthentication()
+        isRestoringSession = false
+        phase = .signedOut
+        errorMessage = message
+    }
+
+    private func restoreStoredSession(
+        authenticationOwnership: RadioLiteAuthenticationOwnership
+    ) async {
         do {
             guard let stored = try credentialStore.load() else {
                 try requireCurrentAuthentication(authenticationOwnership)
@@ -1211,7 +1272,6 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
             return
         }
-        tunerSwitchReengageOwnership = nil
         voicePTTReleaseState.beginTransmit()
         voicePTTReceiveResumeTask?.cancel()
         voicePTTReceiveResumeTask = nil
@@ -1240,17 +1300,13 @@ final class RadioLiteSession: ObservableObject {
                     throw RadioLiteHTTPError.invalidResponse
                 }
                 startedToken = transmitToken
+                self.reflectSuccessfulTunerStart(radioId: radioId)
                 guard !Task.isCancelled,
                       self.isTuning,
                       self.transmitEpoch.owns(generation) else {
-                    let stopped = await self.stopRemoteTransmit(
+                    _ = await self.stopRemoteTransmit(
                         radioId: radioId,
                         transmitToken: transmitToken
-                    )
-                    await self.finishTunerSwitchReengageAfterStop(
-                        stopped: stopped,
-                        radioId: radioId,
-                        startupEpoch: generation
                     )
                     return
                 }
@@ -1275,14 +1331,9 @@ final class RadioLiteSession: ObservableObject {
                     }
                 }
                 if let startedToken {
-                    let stopped = await self.stopRemoteTransmit(
+                    _ = await self.stopRemoteTransmit(
                         radioId: radioId,
                         transmitToken: startedToken
-                    )
-                    await self.finishTunerSwitchReengageAfterStop(
-                        stopped: stopped,
-                        radioId: radioId,
-                        startupEpoch: generation
                     )
                 }
             }
@@ -1298,64 +1349,29 @@ final class RadioLiteSession: ObservableObject {
     }
 
     private func endTuning(reason: RadioLiteVoicePTTStopReason) {
-        if reason != .userRelease {
-            tunerSwitchReengageOwnership = nil
-        }
         guard isTuning || tuningStartupTask != nil else { return }
         let transmitToken = activeTransmitToken
         let radioId = selectedRadioId
-        let startupEpoch = transmitEpoch.current
         guard stopLocalTransmit() else { return }
-        let completionEpoch = transmitEpoch.current
-        if let radioId,
-           RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
-            after: reason,
-            switchAvailable: rigControls.contains { $0.id == "function:TUNER" }
-           ) {
-            tunerSwitchReengageOwnership = RadioLiteTunerSwitchReengageOwnership(
-                radioId: radioId,
-                startupEpoch: startupEpoch,
-                completionEpoch: completionEpoch
-            )
-        }
         finishReceiveMonitoringAfterTransmit(reason: reason)
         guard let transmitToken, let radioId else { return }
         Task { [weak self] in
             guard let self else { return }
-            let stopped = await self.stopRemoteTransmit(
+            _ = await self.stopRemoteTransmit(
                 radioId: radioId,
                 transmitToken: transmitToken
-            )
-            await self.finishTunerSwitchReengageAfterStop(
-                stopped: stopped,
-                radioId: radioId,
-                startupEpoch: startupEpoch
             )
         }
     }
 
-    private func finishTunerSwitchReengageAfterStop(
-        stopped: Bool,
-        radioId: String,
-        startupEpoch: UInt64
-    ) async {
-        guard let ownership = tunerSwitchReengageOwnership,
-              ownership.startupEpoch == startupEpoch else { return }
-        tunerSwitchReengageOwnership = nil
-        guard stopped,
-              ownership.isCurrent(
-                radioId: radioId,
-                startupEpoch: startupEpoch,
-                currentEpoch: transmitEpoch.current
-              ),
-              isAppActive,
-              selectedRadioId == radioId,
-              controlToken != nil,
-              !isVoicePTTHeld,
-              !isTuning,
-              rigControls.contains(where: { $0.id == "function:TUNER" }) else { return }
-        replaceRigState(ptt: false)
-        _ = await setRigControl("function:TUNER", value: 1)
+    private func reflectSuccessfulTunerStart(radioId: String) {
+        guard selectedRadioId == radioId else { return }
+        let generation = rigControlCatalogue.generation
+        let updated = RadioLiteTunerInteractionPolicy.reflectingSuccessfulTuneStart(
+            in: rigControlCatalogue.controls
+        )
+        guard rigControlCatalogue.publish(updated, generation: generation) else { return }
+        rigControls = rigControlCatalogue.controls
     }
 
     func refreshDigitalSnapshot(

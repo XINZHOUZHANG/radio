@@ -2,6 +2,40 @@ import XCTest
 @testable import RadioLite
 
 final class RadioLiteMediaFrameTests: XCTestCase {
+    func testAudioFreshnessDropsGrowingBacklogRelativeToTheBestObservedTransitTime() {
+        var freshness = RadioLiteAudioFreshnessState(maximumExcessDelayMicroseconds: 400_000)
+
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 1_000_000, receivedAtMicroseconds: 1_100_000),
+            .accept
+        )
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 1_020_000, receivedAtMicroseconds: 1_550_001),
+            .discardAndFlush
+        )
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 1_040_000, receivedAtMicroseconds: 1_570_001),
+            .discard
+        )
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 1_060_000, receivedAtMicroseconds: 1_170_000),
+            .accept
+        )
+    }
+
+    func testAudioFreshnessUsesRelativeDelaySoServerClockOffsetDoesNotRejectLiveAudio() {
+        var freshness = RadioLiteAudioFreshnessState(maximumExcessDelayMicroseconds: 400_000)
+
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 5_000_000, receivedAtMicroseconds: 1_000_000),
+            .accept
+        )
+        XCTAssertEqual(
+            freshness.disposition(timestampMicroseconds: 5_020_000, receivedAtMicroseconds: 1_020_000),
+            .accept
+        )
+    }
+
     func testAudioFrameMatchesRadioLiteNetworkByteOrder() throws {
         let value = RadioLiteMediaFrame(
             kind: .audioUplink,

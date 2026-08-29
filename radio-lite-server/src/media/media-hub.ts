@@ -151,6 +151,7 @@ type DigitalAudioSubscription = {
 };
 
 const MAX_OPUS_PACKET_BYTES = 1_500;
+const MAX_LIVE_MEDIA_BUFFER_BYTES = 2 * 1_024;
 
 export class MediaHub {
   readonly #radios: () => RadioConfigFile;
@@ -176,7 +177,7 @@ export class MediaHub {
     this.#stopVoiceTransmit = options.stopVoiceTransmit;
     this.#now = options.now ?? Date.now;
     this.#maxBufferedBytes = positiveInteger(
-      options.maxBufferedBytes ?? 64 * 1_024,
+      options.maxBufferedBytes ?? MAX_LIVE_MEDIA_BUFFER_BYTES,
       "maximum buffered media bytes",
     );
     this.#uplinkBindTimeoutMs = positiveInteger(

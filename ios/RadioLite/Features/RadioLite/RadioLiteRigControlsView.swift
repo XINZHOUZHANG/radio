@@ -24,27 +24,31 @@ struct RadioLiteRigControlsView: View {
                     .accessibilityLabel("刷新 Hamlib 控件")
                 }
 
-                if session.rigControls.isEmpty {
+                if generalControls.isEmpty {
                     ContentUnavailableView(
                         "没有可调控件",
                         systemImage: "dial.low",
-                        description: Text("当前电台未报告可安全读写的 Hamlib 控件，可点右上角重新读取。")
+                        description: Text("当前电台未报告其他可安全读写的 Hamlib 控件，可点右上角重新读取。")
                     )
                     .frame(maxWidth: .infinity)
                 } else {
-                    ForEach(session.rigControls) { control in
+                    ForEach(generalControls) { control in
                         RadioLiteRigControlRow(
                             control: control,
                             isTransmitting: isTransmitting,
                             hasControl: hasControl
                         )
-                        if control.id != session.rigControls.last?.id {
+                        if control.id != generalControls.last?.id {
                             Divider().overlay(Color.white.opacity(0.08))
                         }
                     }
                 }
             }
         }
+    }
+
+    private var generalControls: [RadioLiteRigControl] {
+        RadioLiteTunerInteractionPolicy.generalControls(in: session.rigControls)
     }
 
     private func refresh() async {

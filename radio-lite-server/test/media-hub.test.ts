@@ -340,7 +340,7 @@ test("downlink and spectrum frames broadcast without accumulating stale media", 
   context.after(() => fixture.hub.close());
   const fast = fixture.connect("fast", "device:a", "user-a");
   const slow = fixture.connect("slow", "device:b", "user-b");
-  slow.bufferedAmount = 100_000;
+  slow.bufferedAmount = 2_049;
   await fixture.hub.subscribe("fast", "main", true);
   await fixture.hub.subscribe("slow", "main", true);
 

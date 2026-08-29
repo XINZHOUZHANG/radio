@@ -202,66 +202,43 @@ final class RadioLiteRigControlsTests: XCTestCase {
         )
     }
 
-    func testOnlyAnOrdinaryTuningCompletionRestoresTheTunerSwitch() {
-        XCTAssertTrue(
-            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
-                after: .userRelease,
-                switchAvailable: true
-            )
+    func testSuccessfulTuneStartReflectsThePersistentTunerSwitchWithoutAnotherCATWrite() throws {
+        let response = try JSONDecoder().decode(
+            RadioLiteRigControlsResponse.self,
+            from: controlsPayload
         )
-        XCTAssertFalse(
-            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
-                after: .connectionLoss,
-                switchAvailable: true
-            )
+
+        let updated = RadioLiteTunerInteractionPolicy.reflectingSuccessfulTuneStart(
+            in: response.controls
         )
-        XCTAssertFalse(
-            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
-                after: .operatorCancellation,
-                switchAvailable: true
-            )
-        )
-        XCTAssertFalse(
-            RadioLiteTunerInteractionPolicy.shouldReengageSwitch(
-                after: .userRelease,
-                switchAvailable: false
-            )
+
+        XCTAssertEqual(updated.map(\.id), response.controls.map(\.id))
+        XCTAssertEqual(updated.first { $0.id == "function:TUNER" }?.value, 1)
+        XCTAssertEqual(
+            updated.first { $0.id == "level:RFPOWER" }?.value,
+            response.controls.first { $0.id == "level:RFPOWER" }?.value
         )
     }
 
-    func testPendingTunerSwitchReengageBelongsToTheExactRadioAndTransmitEpochs() {
-        let ownership = RadioLiteTunerSwitchReengageOwnership(
-            radioId: "main",
-            startupEpoch: 7,
-            completionEpoch: 8
+    func testTunerSwitchPresentationUsesTheDiscoveredPersistentHamlibControl() throws {
+        let response = try JSONDecoder().decode(
+            RadioLiteRigControlsResponse.self,
+            from: controlsPayload
         )
 
-        XCTAssertTrue(
-            ownership.isCurrent(
-                radioId: "main",
-                startupEpoch: 7,
-                currentEpoch: 8
-            )
+        let tuner = try XCTUnwrap(
+            RadioLiteTunerInteractionPolicy.tunerSwitch(in: response.controls)
         )
+
+        XCTAssertEqual(tuner.id, "function:TUNER")
+        XCTAssertEqual(tuner.value, 0)
         XCTAssertFalse(
-            ownership.isCurrent(
-                radioId: "backup",
-                startupEpoch: 7,
-                currentEpoch: 8
-            )
+            RadioLiteTunerInteractionPolicy.generalControls(in: response.controls)
+                .contains { $0.id == "function:TUNER" }
         )
-        XCTAssertFalse(
-            ownership.isCurrent(
-                radioId: "main",
-                startupEpoch: 6,
-                currentEpoch: 8
-            )
-        )
-        XCTAssertFalse(
-            ownership.isCurrent(
-                radioId: "main",
-                startupEpoch: 7,
-                currentEpoch: 9
+        XCTAssertNil(
+            RadioLiteTunerInteractionPolicy.tunerSwitch(
+                in: response.controls.filter { $0.id != "function:TUNER" }
             )
         )
     }

@@ -7,6 +7,8 @@ struct RadioLiteRadioView: View {
     @AppStorage("radio-lite.receive-audio.has-visited") private var hasVisitedRadioPage = false
     @AppStorage("radio-lite.receive-audio.explicit-choice") private var receiveMonitoringChoice = -1
     @State private var frequencyMHz = "14.074000"
+    @State private var pendingTunerSwitchValue: Bool?
+    @State private var isTunerSwitchSubmitting = false
     @FocusState private var frequencyFocused: Bool
 
     private let modes = RadioLiteRigMode.allCases
@@ -206,6 +208,27 @@ struct RadioLiteRadioView: View {
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                 }
             }
+            if let tunerSwitch {
+                HStack(spacing: 10) {
+                    Label("机内天调接入", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if isTunerSwitchSubmitting {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(tunerSwitchIsOn ? "已接入" : "旁路")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(tunerSwitchIsOn ? RadioPalette.accent : RadioPalette.muted)
+                    Toggle("机内天调接入", isOn: tunerSwitchBinding)
+                        .labelsHidden()
+                        .tint(RadioPalette.accent)
+                        .disabled(!canSetTunerSwitch)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
             HStack(spacing: 12) {
                 RadioLiteHoldButton(
                     title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
@@ -272,6 +295,36 @@ struct RadioLiteRadioView: View {
 
     private var isTransmitting: Bool {
         session.isVoicePTTHeld || session.isTuning || session.rigState?.ptt == true
+    }
+
+    private var tunerSwitch: RadioLiteRigControl? {
+        RadioLiteTunerInteractionPolicy.tunerSwitch(in: session.rigControls)
+    }
+
+    private var tunerSwitchIsOn: Bool {
+        pendingTunerSwitchValue ?? ((tunerSwitch?.value ?? 0) >= 0.5)
+    }
+
+    private var canSetTunerSwitch: Bool {
+        session.hasControl && !isTransmitting && !isTunerSwitchSubmitting
+    }
+
+    private var tunerSwitchBinding: Binding<Bool> {
+        Binding(
+            get: { tunerSwitchIsOn },
+            set: { enabled in setTunerSwitch(enabled) }
+        )
+    }
+
+    private func setTunerSwitch(_ enabled: Bool) {
+        guard canSetTunerSwitch else { return }
+        pendingTunerSwitchValue = enabled
+        isTunerSwitchSubmitting = true
+        Task {
+            _ = await session.setRigControl("function:TUNER", value: enabled ? 1 : 0)
+            pendingTunerSwitchValue = nil
+            isTunerSwitchSubmitting = false
+        }
     }
 
     private func syncFrequency() {

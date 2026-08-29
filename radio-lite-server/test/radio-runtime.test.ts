@@ -286,7 +286,7 @@ test("runtime voice and digital dekey use one OFF write and one strict PTT read"
   }
 });
 
-test("runtime tuning starts with the cached Hamlib TUNE action and dekeys safely", async (context) => {
+test("runtime tuning stop dekeys safely without disabling the persistent tuner switch", async (context) => {
   const requester = new RecordingHamlibRequester();
   const runtime = new RadioRuntime(profile(true), new HamlibRig(requester));
   context.after(() => runtime.close().catch(() => undefined));
@@ -311,11 +311,8 @@ test("runtime tuning starts with the cached Hamlib TUNE action and dekeys safely
 
   await runtime.stopTransmit("device-tuner", transmit.leaseToken);
 
-  assert.deepEqual(requester.commands, [
-    "\\set_func TUNER 0",
-    "\\set_ptt 0",
-    "\\get_ptt",
-  ]);
+  assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"]);
+  assert.equal(requester.tuner, true);
 });
 
 test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch", async (context) => {
@@ -501,7 +498,7 @@ test("runtime enforces account permission and explicit hardware TX switch", asyn
   assert.equal(rig.ptt, false);
 });
 
-test("tuner is mutually exclusive with voice and disconnect releases both TX and control", async (context) => {
+test("tuner is mutually exclusive with voice and disconnect dekeys without bypassing ATU", async (context) => {
   const rig = new FakeRig();
   const runtime = new RadioRuntime(profile(true), rig);
   context.after(() => runtime.close());
@@ -515,7 +512,7 @@ test("tuner is mutually exclusive with voice and disconnect releases both TX and
     /cannot start/u,
   );
   await runtime.ownerDisconnected("device-a");
-  assert.equal(rig.tuner, false);
+  assert.equal(rig.tuner, true);
   assert.equal(rig.ptt, false);
   assert.equal(runtime.control.snapshot(), null);
 });
