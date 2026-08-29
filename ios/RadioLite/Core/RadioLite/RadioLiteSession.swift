@@ -126,6 +126,14 @@ final class RadioLiteSession: ObservableObject {
         audio.onCaptureInterrupted = { [weak self] in
             self?.handleAudioSessionInterruption()
         }
+        audio.onAudioReconfigurationDetected = { [weak self] microphoneWasCapturing in
+            guard let self,
+                  microphoneWasCapturing || self.isVoicePTTHeld || self.isTuning else { return }
+            self.presentNotice(
+                "音频设备发生变化，当前发射已安全停止；请确认耳机或蓝牙连接后重新发射",
+                deduplicationKey: "audio.route-change.transmit-stopped"
+            )
+        }
         audio.onReceiveMayResume = { [weak self] in
             self?.resumeReceiveAudioAfterInterruption()
         }
@@ -1032,11 +1040,14 @@ final class RadioLiteSession: ObservableObject {
                         transmitGeneration: generation,
                         reason: .transmitFailure
                     )
-                    _ = self.stopLocalTransmit(expectedEpoch: generation)
+                    let stopped = self.stopLocalTransmit(expectedEpoch: generation)
                     if self.media.subscribedRadioId != radioId { self.scheduleMediaRetry() }
                     self.errorMessage = "PTT 启动失败：\(error.localizedDescription)"
-                    if let receiveRestore {
-                        await self.restoreOrRetryReceiveAudioAfterVoicePTT(receiveRestore)
+                    if stopped {
+                        self.finishReceiveMonitoringAfterTransmit(
+                            reason: .transmitFailure,
+                            voicePTTRestore: receiveRestore
+                        )
                     }
                 }
                 if let startedToken {
@@ -1063,7 +1074,7 @@ final class RadioLiteSession: ObservableObject {
             audioInterruptionReceiveRestore = nil
         }
         endVoicePTT(reason: .audioInterruption)
-        endTuning()
+        endTuning(reason: .audioInterruption)
     }
 
     private func resumeReceiveAudioAfterInterruption() {
@@ -1125,44 +1136,61 @@ final class RadioLiteSession: ObservableObject {
             )
         }
         _ = stopLocalTransmit(resumeMonitoringAfterCapture: false)
-        let releaseOwnership = voicePTTReleaseState.beginRelease()
-        if isAppActive, reason.restoresReceiveMonitoring,
-           voicePTTReleaseState.mayResume(
-               releaseOwnership,
-               voicePTTHeld: isVoicePTTHeld,
-               tuning: isTuning,
-               capturingMicrophone: audio.isCapturingMicrophone
-           ) {
-            audio.resumeAfterLocalTransmitRelease()
-            voicePTTReceiveResumeTask?.cancel()
-            voicePTTReceiveResumeTask = nil
-            if let receiveRestore {
-                voicePTTReceiveResumeTask = Task { [weak self] in
-                    guard let self,
-                          self.voicePTTReleaseState.mayResume(
-                              releaseOwnership,
-                              voicePTTHeld: self.isVoicePTTHeld,
-                              tuning: self.isTuning,
-                              capturingMicrophone: self.audio.isCapturingMicrophone
-                          ) else { return }
-                    await self.restoreOrRetryReceiveAudioAfterVoicePTT(receiveRestore)
-                    if self.voicePTTReleaseState.mayResume(
-                        releaseOwnership,
-                        voicePTTHeld: self.isVoicePTTHeld,
-                        tuning: self.isTuning,
-                        capturingMicrophone: self.audio.isCapturingMicrophone
-                    ) {
-                        self.voicePTTReceiveResumeTask = nil
-                    }
-                }
-            } else if audioInterruptionReceiveRestore != nil {
-                resumeReceiveAudioAfterInterruption()
-            }
-        }
+        finishReceiveMonitoringAfterTransmit(
+            reason: reason,
+            voicePTTRestore: receiveRestore
+        )
         if let transmitToken, let radioId {
             Task { [weak self] in
                 await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
             }
+        }
+    }
+
+    private func finishReceiveMonitoringAfterTransmit(
+        reason: RadioLiteVoicePTTStopReason,
+        voicePTTRestore: RadioLiteReceiveMonitoringOwnership? = nil
+    ) {
+        let releaseOwnership = voicePTTReleaseState.beginRelease()
+        guard isAppActive, reason.restoresReceiveMonitoring,
+              voicePTTReleaseState.mayResume(
+                  releaseOwnership,
+                  voicePTTHeld: isVoicePTTHeld,
+                  tuning: isTuning,
+                  capturingMicrophone: audio.isCapturingMicrophone
+              ) else { return }
+
+        audio.resumeAfterLocalTransmitRelease()
+        voicePTTReceiveResumeTask?.cancel()
+        voicePTTReceiveResumeTask = nil
+        switch RadioLiteTransmitReceiveRecoverySource.select(
+            voicePTTRestore: voicePTTRestore,
+            audioInterruptionRestore: audioInterruptionReceiveRestore
+        ) {
+        case .voicePTT:
+            guard let voicePTTRestore else { return }
+            voicePTTReceiveResumeTask = Task { [weak self] in
+                guard let self,
+                      self.voicePTTReleaseState.mayResume(
+                          releaseOwnership,
+                          voicePTTHeld: self.isVoicePTTHeld,
+                          tuning: self.isTuning,
+                          capturingMicrophone: self.audio.isCapturingMicrophone
+                      ) else { return }
+                await self.restoreOrRetryReceiveAudioAfterVoicePTT(voicePTTRestore)
+                if self.voicePTTReleaseState.mayResume(
+                    releaseOwnership,
+                    voicePTTHeld: self.isVoicePTTHeld,
+                    tuning: self.isTuning,
+                    capturingMicrophone: self.audio.isCapturingMicrophone
+                ) {
+                    self.voicePTTReceiveResumeTask = nil
+                }
+            }
+        case .audioInterruption:
+            resumeReceiveAudioAfterInterruption()
+        case .none:
+            break
         }
     }
 
@@ -1228,8 +1256,11 @@ final class RadioLiteSession: ObservableObject {
                 if !Task.isCancelled,
                    self.isTuning,
                    self.transmitEpoch.owns(generation) {
-                    _ = self.stopLocalTransmit(expectedEpoch: generation)
+                    let stopped = self.stopLocalTransmit(expectedEpoch: generation)
                     self.errorMessage = "机内天调启动失败：\(error.localizedDescription)"
+                    if stopped {
+                        self.finishReceiveMonitoringAfterTransmit(reason: .transmitFailure)
+                    }
                 }
                 if let startedToken {
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: startedToken)
@@ -1239,10 +1270,15 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func endTuning() {
+        endTuning(reason: .userRelease)
+    }
+
+    private func endTuning(reason: RadioLiteVoicePTTStopReason) {
         guard isTuning || tuningStartupTask != nil else { return }
         let transmitToken = activeTransmitToken
         let radioId = selectedRadioId
-        _ = stopLocalTransmit()
+        guard stopLocalTransmit() else { return }
+        finishReceiveMonitoringAfterTransmit(reason: reason)
         guard let transmitToken, let radioId else { return }
         Task { [weak self] in await self?.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken) }
     }
@@ -1919,9 +1955,10 @@ final class RadioLiteSession: ObservableObject {
                     )
                     guard self.stopLocalTransmit(expectedEpoch: generation) else { return }
                     self.errorMessage = "发射心跳中断：\(error.localizedDescription)"
-                    if let receiveRestore {
-                        await self.restoreOrRetryReceiveAudioAfterVoicePTT(receiveRestore)
-                    }
+                    self.finishReceiveMonitoringAfterTransmit(
+                        reason: .transmitFailure,
+                        voicePTTRestore: receiveRestore
+                    )
                     await self.stopRemoteTransmit(radioId: radioId, transmitToken: transmitToken)
                     return
                 }

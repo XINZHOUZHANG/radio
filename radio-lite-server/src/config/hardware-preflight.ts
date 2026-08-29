@@ -1,5 +1,9 @@
 import { createServer } from "node:net";
+import { constants } from "node:fs";
+import { access } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 
+import { requiredSystemMediaExecutables } from "../media/system-media-worker.ts";
 import type { RigResponse } from "../rig/extended-protocol.ts";
 import { ManagedRigctldProcess } from "../rig/managed-process.ts";
 import { rigctldTarget, type RigctldTarget } from "../rig/rigctld-command.ts";
@@ -41,6 +45,7 @@ export type HardwarePreflightOptions = {
   now?: () => number;
   openRig?: (profile: RadioProfile) => Promise<ReadOnlyRigSession>;
   discover?: () => Promise<HardwareDiscoveryResult>;
+  commandAvailable?: (executable: string) => Promise<boolean>;
 };
 
 const READ_ONLY_COMMANDS = [
@@ -61,12 +66,14 @@ export class HardwarePreflight implements HardwarePreflightRunner {
   readonly #now: () => number;
   readonly #openRig: (profile: RadioProfile) => Promise<ReadOnlyRigSession>;
   readonly #discover: () => Promise<HardwareDiscoveryResult>;
+  readonly #commandAvailable: (executable: string) => Promise<boolean>;
 
   constructor(options: HardwarePreflightOptions = {}) {
     this.#now = options.now ?? Date.now;
     this.#openRig = options.openRig ?? openDefaultReadOnlyRig;
     const discovery = new HardwareDiscovery();
     this.#discover = options.discover ?? (() => discovery.discover());
+    this.#commandAvailable = options.commandAvailable ?? commandAvailableOnPath;
   }
 
   async test(profile: RadioProfile): Promise<HardwarePreflightResult> {
@@ -74,6 +81,17 @@ export class HardwarePreflight implements HardwarePreflightRunner {
       return dummyResult(profile, this.#now());
     }
 
+    const requirements = requiredSystemMediaExecutables(profile);
+    const missingAudioInputCommands = await missingCommands(
+      requirements.audioInput,
+      this.#commandAvailable,
+    );
+    const missingAudioOutputCommands = await missingCommands(
+      requirements.audioOutput,
+      this.#commandAvailable,
+    );
+    const managedRigctldAvailable = profile.connection.kind !== "managed-serial" ||
+      await this.#commandAvailable("rigctld");
     const audioPromise = this.#discover()
       .then((value) => ({ value, error: null }))
       .catch((error: unknown) => ({ value: null, error }));
@@ -82,48 +100,63 @@ export class HardwarePreflight implements HardwarePreflightRunner {
     let capabilities: HardwarePreflightCheck;
     let closeFailed = false;
     let closeFailure: unknown = null;
-    try {
-      session = await this.#openRig(profile);
-      const frequency = await session.request(READ_ONLY_COMMANDS[0]);
-      const mode = await session.request(READ_ONLY_COMMANDS[1]);
-      const frequencyHz = integerField(frequency, "Frequency", 0);
-      const modeName = textField(mode, "Mode", 0);
-      const passbandHz = integerField(mode, "Passband", 1);
-      cat = {
-        id: "cat",
-        status: "passed",
-        message: "CAT connection and frequency/mode readback succeeded",
-        details: {
-          frequencyHz: String(frequencyHz),
-          mode: modeName,
-          passbandHz: String(passbandHz),
-        },
-      };
-      capabilities = await readCapabilities(session);
-    } catch (error) {
-      if (error instanceof HardwarePreflightCleanupUncertainError) {
-        throw error;
-      }
-      const message = safeErrorMessage(error, "CAT readback failed");
+    if (!managedRigctldAvailable) {
       cat = {
         id: "cat",
         status: "failed",
-        message,
-        details: {},
+        message: "Required managed rigctld executable is not available on the service PATH",
+        details: { executable: "rigctld" },
       };
       capabilities = {
         id: "capabilities",
         status: "failed",
-        message: "Capabilities were not queried because CAT readback failed",
+        message: "Capabilities were not queried because managed rigctld is unavailable",
         details: {},
       };
-    } finally {
-      if (session !== null) {
-        try {
-          await session.close();
-        } catch (error) {
-          closeFailed = true;
-          closeFailure = error;
+    } else {
+      try {
+        session = await this.#openRig(profile);
+        const frequency = await session.request(READ_ONLY_COMMANDS[0]);
+        const mode = await session.request(READ_ONLY_COMMANDS[1]);
+        const frequencyHz = integerField(frequency, "Frequency", 0);
+        const modeName = textField(mode, "Mode", 0);
+        const passbandHz = integerField(mode, "Passband", 1);
+        cat = {
+          id: "cat",
+          status: "passed",
+          message: "CAT connection and frequency/mode readback succeeded",
+          details: {
+            frequencyHz: String(frequencyHz),
+            mode: modeName,
+            passbandHz: String(passbandHz),
+          },
+        };
+        capabilities = await readCapabilities(session);
+      } catch (error) {
+        if (error instanceof HardwarePreflightCleanupUncertainError) {
+          throw error;
+        }
+        const message = safeErrorMessage(error, "CAT readback failed");
+        cat = {
+          id: "cat",
+          status: "failed",
+          message,
+          details: {},
+        };
+        capabilities = {
+          id: "capabilities",
+          status: "failed",
+          message: "Capabilities were not queried because CAT readback failed",
+          details: {},
+        };
+      } finally {
+        if (session !== null) {
+          try {
+            await session.close();
+          } catch (error) {
+            closeFailed = true;
+            closeFailure = error;
+          }
         }
       }
     }
@@ -151,6 +184,7 @@ export class HardwarePreflight implements HardwarePreflightRunner {
       audio.value?.audioInputs ?? null,
       audio.error,
       audio.value?.warnings ?? [],
+      missingAudioInputCommands,
     );
     const audioOutput = audioCheck(
       "audioOutput",
@@ -158,6 +192,7 @@ export class HardwarePreflight implements HardwarePreflightRunner {
       audio.value?.audioOutputs ?? null,
       audio.error,
       audio.value?.warnings ?? [],
+      missingAudioOutputCommands,
     );
     const checks = [cat, capabilities, audioInput, audioOutput];
     return {
@@ -210,11 +245,20 @@ function audioCheck(
   devices: HardwareDiscoveryResult["audioInputs"] | null,
   discoveryError: unknown,
   discoveryWarnings: readonly string[],
+  missingExecutables: readonly string[],
 ): HardwarePreflightCheck {
   const details: Record<string, string> = {
     backend: endpoint.backend,
     id: endpoint.id,
   };
+  if (missingExecutables.length > 0) {
+    return {
+      id,
+      status: "failed",
+      message: `Required system executable is unavailable: ${missingExecutables.join(", ")}`,
+      details: { ...details, missingExecutables: missingExecutables.join(",") },
+    };
+  }
   if (devices === null) {
     return {
       id,
@@ -248,6 +292,31 @@ function audioCheck(
     message: "Configured audio endpoint was found",
     details: { ...details, discovered: "true", label: matched.label },
   };
+}
+
+async function missingCommands(
+  executables: readonly string[],
+  commandAvailable: (executable: string) => Promise<boolean>,
+): Promise<string[]> {
+  const missing: string[] = [];
+  for (const executable of executables) {
+    if (!await commandAvailable(executable)) {
+      missing.push(executable);
+    }
+  }
+  return missing;
+}
+
+async function commandAvailableOnPath(executable: string): Promise<boolean> {
+  const pathEntries = process.env.PATH?.split(delimiter) ?? [];
+  return (await Promise.all(pathEntries.map(async (directory) => {
+    try {
+      await access(join(directory, executable), constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }))).some(Boolean);
 }
 
 function dummyResult(profile: RadioProfile, testedAtMs: number): HardwarePreflightResult {

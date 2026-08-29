@@ -32,7 +32,7 @@ import {
   TransmitPermissionError,
   type RadioRuntimeFactory,
 } from "../rig/radio-runtime.ts";
-import { RigModeError } from "../rig/hamlib-rig.ts";
+import { InternalTunerUnsupportedError, RigModeError } from "../rig/hamlib-rig.ts";
 import { RigReportError, RigTransportError } from "../rig/transport.ts";
 import { InvalidLeaseError, InterlockConflictError } from "../safety/transmit-interlock.ts";
 import { decodeMediaFrame, MediaFrameError, MediaKind } from "../media/frame.ts";
@@ -1674,6 +1674,12 @@ function mapControlError(error: unknown): { code: string; message: string } {
     return {
       code: error.reason === "rejected" ? "rig_mode_rejected" : "rig_mode_unconfirmed",
       message: error.message,
+    };
+  }
+  if (error instanceof InternalTunerUnsupportedError) {
+    return {
+      code: "tuner_unsupported",
+      message: "电台不支持通过 Hamlib TUNE 启动机内天调",
     };
   }
   if (error instanceof DigitalWorkerUnavailableError) {

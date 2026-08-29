@@ -1,5 +1,8 @@
 name: Radio Lite iOS client
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -15,6 +18,12 @@ on:
       - .github/workflows/ios.yml
   pull_request:
   workflow_dispatch:
+    inputs:
+      upload_ipa:
+        description: Upload the unsigned IPA as a temporary Actions artifact
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -97,3 +106,67 @@ jobs:
       - name: Publish Swift compiler diagnostics
         if: failure()
         run: python3 scripts/annotate-xcodebuild.py xcodebuild.log
+
+  unsigned-device-ipa:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/RadioLite/project.yml
+      - name: Build unsigned iPhone application
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/RadioLite/RadioLite.xcodeproj \
+            -scheme RadioLite \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/RadioLiteDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            2>&1 | tee xcodebuild-device.log
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/RadioLiteDerivedData/Build/Products/Debug-iphoneos/RadioLite.app"
+          PACKAGE_ROOT="$RUNNER_TEMP/RadioLiteUnsigned"
+          test -d "$APP_PATH"
+          SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
+          BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
+          [[ "$SHORT_VERSION" =~ ^[0-9]+(\.[0-9]+){2}$ ]]
+          [[ "$BUILD_VERSION" =~ ^[1-9][0-9]*$ ]]
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP_PATH/Info.plist")" = "true"
+          if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP_PATH/Info.plist" >/dev/null 2>&1; then
+            echo "::error::NSAllowsLocalNetworking makes iOS ignore NSAllowsArbitraryLoads"
+            exit 1
+          fi
+          mkdir -p "$PACKAGE_ROOT/Payload"
+          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/RadioLite.app"
+          (
+            cd "$PACKAGE_ROOT"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" Payload
+          )
+          shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
+            > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
+      - name: Upload unsigned IPA
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_ipa }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Radio-Lite-Debug-unsigned-${{ github.sha }}
+          path: |
+            Radio-Lite-Debug-unsigned.ipa
+            Radio-Lite-Debug-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish Swift compiler diagnostics
+        if: failure() && hashFiles('xcodebuild-device.log') != ''
+        run: python3 scripts/annotate-xcodebuild.py xcodebuild-device.log

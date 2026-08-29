@@ -510,6 +510,28 @@ final class RadioLiteConcurrencyOwnershipTests: XCTestCase {
         )
     }
 
+    func testTransmitReleaseFallsBackToPendingAudioInterruptionRestore() {
+        let pendingInterruption = RadioLiteReceiveMonitoringOwnership(
+            radioId: "main",
+            generation: 7
+        )
+
+        XCTAssertEqual(
+            RadioLiteTransmitReceiveRecoverySource.select(
+                voicePTTRestore: nil,
+                audioInterruptionRestore: pendingInterruption
+            ),
+            .audioInterruption
+        )
+        XCTAssertEqual(
+            RadioLiteTransmitReceiveRecoverySource.select(
+                voicePTTRestore: pendingInterruption,
+                audioInterruptionRestore: pendingInterruption
+            ),
+            .voicePTT
+        )
+    }
+
     func testAudioInterruptionInvalidatesQueuedUserReleaseReceiveRestore() {
         var intent = RadioLiteReceiveMonitoringIntent()
         intent.setDesired(true)

@@ -37,6 +37,7 @@ const networkProfile: RadioProfile = {
 test("Dummy hardware preflight succeeds deterministically without opening hardware", async () => {
   let opened = false;
   let discovered = false;
+  let commandsProbed = false;
   const preflight = new HardwarePreflight({
     now: () => 12_345,
     openRig: async () => {
@@ -47,12 +48,17 @@ test("Dummy hardware preflight succeeds deterministically without opening hardwa
       discovered = true;
       throw new Error("Dummy must not inspect host hardware");
     },
+    commandAvailable: async () => {
+      commandsProbed = true;
+      throw new Error("Dummy must not probe system commands");
+    },
   });
 
   const result = await preflight.test(dummyProfile);
 
   assert.equal(opened, false);
   assert.equal(discovered, false);
+  assert.equal(commandsProbed, false);
   assert.equal(result.profileId, "dummy");
   assert.equal(result.testedAtMs, 12_345);
   assert.equal(result.readOnly, true);
@@ -84,6 +90,7 @@ test("real-radio preflight issues only read commands and reports CAT, capabiliti
       return session;
     },
     discover: async () => discoveryWithAudio(),
+    commandAvailable: async () => true,
   });
 
   const result = await preflight.test(networkProfile);
@@ -126,6 +133,7 @@ test("preflight returns actionable failed and warning checks instead of saving o
       audioOutputs: [],
       warnings: ["audio_discovery_unavailable"],
     }),
+    commandAvailable: async () => true,
   });
 
   const result = await preflight.test(networkProfile);
@@ -157,6 +165,7 @@ test("preflight distinguishes an empty audio inventory from unavailable enumerat
       audioOutputs: [],
       warnings: [],
     }),
+    commandAvailable: async () => true,
   });
 
   const result = await preflight.test(networkProfile);
@@ -184,6 +193,7 @@ test("managed preflight reports uncertain cleanup so the serial device can remai
       close: async () => { throw new Error("child exit could not be confirmed"); },
     }),
     discover: async () => discoveryWithAudio(),
+    commandAvailable: async () => true,
   });
 
   await assert.rejects(
@@ -234,6 +244,123 @@ test("network preflight preserves the external rigctld target without creating a
   });
 });
 
+test("preflight probes the exact ALSA media commands needed by each audio direction", async () => {
+  const commands: string[] = [];
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => discoveryWithAudio(),
+    commandAvailable: async (command) => {
+      commands.push(command);
+      return true;
+    },
+  });
+
+  const result = await preflight.test(networkProfile);
+
+  assert.equal(result.overallStatus, "passed");
+  assert.deepEqual(commands, ["arecord", "stdbuf", "opusenc", "stdbuf", "opusdec", "aplay"]);
+});
+
+test("preflight probes the exact PulseAudio media commands needed by each audio direction", async () => {
+  const commands: string[] = [];
+  const pulseProfile: RadioProfile = {
+    ...networkProfile,
+    audioInput: { backend: "pulse", id: "rx" },
+    audioOutput: { backend: "pulse", id: "tx" },
+  };
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => ({
+      ...discoveryWithAudio(),
+      audioInputs: [{ backend: "pulse", direction: "input", id: "rx", label: "Pulse RX" }],
+      audioOutputs: [{ backend: "pulse", direction: "output", id: "tx", label: "Pulse TX" }],
+    }),
+    commandAvailable: async (command) => {
+      commands.push(command);
+      return true;
+    },
+  });
+
+  const result = await preflight.test(pulseProfile);
+
+  assert.equal(result.overallStatus, "passed");
+  assert.deepEqual(commands, ["parec", "stdbuf", "opusenc", "stdbuf", "opusdec", "pacat"]);
+});
+
+test("a missing input command fails only the audio-input preflight check", async () => {
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => discoveryWithAudio(),
+    commandAvailable: async (command) => command !== "arecord",
+  });
+
+  const result = await preflight.test(networkProfile);
+
+  const input = result.checks.find((check) => check.id === "audioInput");
+  const output = result.checks.find((check) => check.id === "audioOutput");
+  assert.equal(result.overallStatus, "failed");
+  assert.equal(input?.status, "failed");
+  assert.match(input?.message ?? "", /arecord/u);
+  assert.equal(output?.status, "passed");
+});
+
+test("a missing output command fails only the audio-output preflight check", async () => {
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => discoveryWithAudio(),
+    commandAvailable: async (command) => command !== "aplay",
+  });
+
+  const result = await preflight.test(networkProfile);
+
+  const input = result.checks.find((check) => check.id === "audioInput");
+  const output = result.checks.find((check) => check.id === "audioOutput");
+  assert.equal(result.overallStatus, "failed");
+  assert.equal(input?.status, "passed");
+  assert.equal(output?.status, "failed");
+  assert.match(output?.message ?? "", /aplay/u);
+});
+
+test("a managed serial profile reports missing rigctld without opening it", async () => {
+  const profile: RadioProfile = {
+    ...networkProfile,
+    connection: { kind: "managed-serial", devicePath: "/dev/ttyUSB0", baudRate: 38_400 },
+  };
+  let opened = false;
+  const preflight = new HardwarePreflight({
+    openRig: async () => {
+      opened = true;
+      return readOnlySession();
+    },
+    discover: async () => discoveryWithAudio(),
+    commandAvailable: async (command) => command !== "rigctld",
+  });
+
+  const result = await preflight.test(profile);
+
+  assert.equal(opened, false);
+  assert.equal(result.overallStatus, "failed");
+  assert.equal(result.checks.find((check) => check.id === "cat")?.status, "failed");
+  assert.match(result.checks.find((check) => check.id === "cat")?.message ?? "", /rigctld/u);
+});
+
+test("a network rigctld profile does not require a local rigctld executable", async () => {
+  const commands: string[] = [];
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => discoveryWithAudio(),
+    commandAvailable: async (command) => {
+      commands.push(command);
+      return command !== "rigctld";
+    },
+  });
+
+  const result = await preflight.test(networkProfile);
+
+  assert.equal(result.overallStatus, "passed");
+  assert(!commands.includes("rigctld"));
+});
+
 function responseFor(command: string): RigResponse {
   switch (command) {
   case "\\get_freq":
@@ -251,6 +378,13 @@ function responseFor(command: string): RigResponse {
   default:
     throw new Error(`unexpected command: ${command}`);
   }
+}
+
+function readOnlySession(): ReadOnlyRigSession {
+  return {
+    request: async (command) => responseFor(command),
+    close: async () => undefined,
+  };
 }
 
 function response(command: string, fields: Record<string, string>): RigResponse {

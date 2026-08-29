@@ -102,6 +102,33 @@ export function opusDecoderCommand(): MediaCommand {
   };
 }
 
+export function requiredSystemMediaExecutables(
+  profile: Pick<RadioProfile, "audioInput" | "audioOutput">,
+): { audioInput: string[]; audioOutput: string[] } {
+  const encoder = opusEncoderCommand(20_000);
+  const decoder = opusDecoderCommand();
+  return {
+    audioInput: [
+      captureCommand(profile.audioInput).file,
+      encoder.file,
+      wrappedExecutable(encoder, "Opus encoder"),
+    ],
+    audioOutput: [
+      decoder.file,
+      wrappedExecutable(decoder, "Opus decoder"),
+      playbackCommand(profile.audioOutput).file,
+    ],
+  };
+}
+
+function wrappedExecutable(command: MediaCommand, role: string): string {
+  const executable = command.args[2];
+  if (executable === undefined || executable.length === 0) {
+    throw new Error(`${role} command is missing its wrapped executable`);
+  }
+  return executable;
+}
+
 export const createSystemMediaWorker: MediaWorkerFactory = async (
   profile,
   _radioSlot,

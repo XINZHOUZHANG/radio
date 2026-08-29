@@ -23,11 +23,32 @@ enum RadioLiteAudioError: LocalizedError {
 enum RadioLiteAudioInterruptionAction: Equatable, Sendable {
     case stopCaptureAndTransmit
     case resumeReceiveOnly
+    case reconfigureAudio(RadioLiteAudioReconfiguration)
     case ignore
+}
+
+enum RadioLiteAudioRouteChangeKind: Equatable, Sendable {
+    case newDeviceAvailable
+    case oldDeviceUnavailable
+    case categoryChange
+    case wakeFromSleep
+    case noSuitableRouteForCategory
+    case routeConfigurationChange
+}
+
+enum RadioLiteAudioReconfiguration: Equatable, Sendable {
+    case route(RadioLiteAudioRouteChangeKind)
+    case engine
 }
 
 enum RadioLiteAudioInterruptionPolicy {
     static func action(for notification: Notification) -> RadioLiteAudioInterruptionAction {
+        if notification.name == .AVAudioEngineConfigurationChange {
+            return .reconfigureAudio(.engine)
+        }
+        if let routeChange = routeChangeKind(for: notification) {
+            return .reconfigureAudio(.route(routeChange))
+        }
         if notification.name == AVAudioSession.mediaServicesWereLostNotification
             || notification.name == AVAudioSession.mediaServicesWereResetNotification {
             return .stopCaptureAndTransmit
@@ -48,7 +69,30 @@ enum RadioLiteAudioInterruptionPolicy {
         return AVAudioSession.InterruptionType(rawValue: rawValue)
     }
 
+    static func routeChangeKind(for notification: Notification) -> RadioLiteAudioRouteChangeKind? {
+        guard notification.name == AVAudioSession.routeChangeNotification,
+              let rawValue = unsignedInteger(
+                  notification.userInfo?[AVAudioSessionRouteChangeReasonKey]
+              ),
+              let reason = AVAudioSession.RouteChangeReason(rawValue: rawValue) else {
+            return nil
+        }
+        switch reason {
+        case .newDeviceAvailable: return .newDeviceAvailable
+        case .oldDeviceUnavailable: return .oldDeviceUnavailable
+        case .categoryChange: return .categoryChange
+        case .wakeFromSleep: return .wakeFromSleep
+        case .noSuitableRouteForCategory: return .noSuitableRouteForCategory
+        case .routeConfigurationChange: return .routeConfigurationChange
+        default: return nil
+        }
+    }
+
     private static func interruptionTypeRawValue(_ value: Any?) -> UInt? {
+        unsignedInteger(value)
+    }
+
+    private static func unsignedInteger(_ value: Any?) -> UInt? {
         if let rawValue = value as? UInt { return rawValue }
         return (value as? NSNumber)?.uintValue
     }
@@ -73,31 +117,58 @@ private final class RadioLiteNotificationObservationBag {
     }
 }
 
+private struct RadioLiteAudioReconfigurationGate {
+    // iOS commonly emits route and engine notifications for one hardware change.
+    static let cooldown: TimeInterval = 0.25
+
+    private var lastDeliveryUptime: TimeInterval?
+
+    func isCoolingDown(at uptime: TimeInterval) -> Bool {
+        guard let lastDeliveryUptime else { return false }
+        return uptime < lastDeliveryUptime + Self.cooldown
+    }
+
+    mutating func recordDelivery(at uptime: TimeInterval) {
+        lastDeliveryUptime = uptime
+    }
+}
+
 @MainActor
 final class RadioLiteAudioInterruptionObserver {
     private let observationBag: RadioLiteNotificationObservationBag
+    private let monotonicTime: @MainActor () -> TimeInterval
     private let onStopCaptureAndTransmit: @MainActor () -> Void
     private let onMediaServicesReset: @MainActor () -> Void
+    private let onAudioReconfiguration: @MainActor (RadioLiteAudioReconfiguration) -> Bool
     private let onReceiveMayResume: @MainActor () -> Void
     private var stopDeliveredForCurrentEpisode = false
+    private var audioReconfigurationGate = RadioLiteAudioReconfigurationGate()
 
     init(
         notificationCenter: NotificationCenter = .default,
+        monotonicTime: @escaping @MainActor () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
         onStopCaptureAndTransmit: @escaping @MainActor () -> Void,
         onMediaServicesReset: @escaping @MainActor () -> Void,
+        onAudioReconfiguration: @escaping @MainActor (RadioLiteAudioReconfiguration) -> Bool,
         onReceiveMayResume: @escaping @MainActor () -> Void
     ) {
         let observationBag = RadioLiteNotificationObservationBag(
             notificationCenter: notificationCenter
         )
         self.observationBag = observationBag
+        self.monotonicTime = monotonicTime
         self.onStopCaptureAndTransmit = onStopCaptureAndTransmit
         self.onMediaServicesReset = onMediaServicesReset
+        self.onAudioReconfiguration = onAudioReconfiguration
         self.onReceiveMayResume = onReceiveMayResume
         for name in [
             AVAudioSession.interruptionNotification,
             AVAudioSession.mediaServicesWereLostNotification,
             AVAudioSession.mediaServicesWereResetNotification,
+            AVAudioSession.routeChangeNotification,
+            .AVAudioEngineConfigurationChange,
         ] {
             let observer = notificationCenter.addObserver(
                 forName: name,
@@ -118,14 +189,25 @@ final class RadioLiteAudioInterruptionObserver {
 
     private func receive(_ notification: Notification) {
         let action = RadioLiteAudioInterruptionPolicy.action(for: notification)
-        if action == .resumeReceiveOnly {
+        switch action {
+        case .resumeReceiveOnly:
             rearm()
             onReceiveMayResume()
             return
-        }
-        if action == .stopCaptureAndTransmit, !stopDeliveredForCurrentEpisode {
-            stopDeliveredForCurrentEpisode = true
-            onStopCaptureAndTransmit()
+        case .stopCaptureAndTransmit:
+            if !stopDeliveredForCurrentEpisode {
+                stopDeliveredForCurrentEpisode = true
+                onStopCaptureAndTransmit()
+            }
+        case .reconfigureAudio(let change):
+            let uptime = monotonicTime()
+            guard !audioReconfigurationGate.isCoolingDown(at: uptime) else { return }
+            if onAudioReconfiguration(change) {
+                audioReconfigurationGate.recordDelivery(at: uptime)
+            }
+            return
+        case .ignore:
+            return
         }
         if notification.name == AVAudioSession.mediaServicesWereResetNotification {
             onMediaServicesReset()
@@ -265,6 +347,7 @@ final class RadioLiteAudioEngine: ObservableObject {
     }
 
     var onCaptureInterrupted: (@MainActor () -> Void)?
+    var onAudioReconfigurationDetected: (@MainActor (_ microphoneWasCapturing: Bool) -> Void)?
     var onReceiveMayResume: (@MainActor () -> Void)?
     var onReceivePlaybackStarted: (@MainActor () -> Void)?
 
@@ -279,6 +362,7 @@ final class RadioLiteAudioEngine: ObservableObject {
     private var captureEngine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var audioSessionInterruptionObserver: RadioLiteAudioInterruptionObserver?
+    private var isHandlingAudioReconfiguration = false
     private var codec: RadioLiteOpusCodec?
     private var configuredOpusBitrate = 20_000
     private var inputTapInstalled = false
@@ -303,6 +387,9 @@ final class RadioLiteAudioEngine: ObservableObject {
             },
             onMediaServicesReset: { [weak self] in
                 self?.rebuildAudioResourcesAfterMediaServicesReset()
+            },
+            onAudioReconfiguration: { [weak self] change in
+                self?.handleAudioReconfiguration(change) ?? false
             },
             onReceiveMayResume: { [weak self] in
                 self?.onReceiveMayResume?()
@@ -690,6 +777,25 @@ final class RadioLiteAudioEngine: ObservableObject {
         _ = stopMicrophoneCapture(resumeMonitoringAfterCapture: false)
         stopMonitoring()
         onCaptureInterrupted?()
+    }
+
+    private func handleAudioReconfiguration(_ change: RadioLiteAudioReconfiguration) -> Bool {
+        guard !isHandlingAudioReconfiguration else { return false }
+        if change == .route(.categoryChange) {
+            let session = AVAudioSession.sharedInstance()
+            let expectedMode = microphoneProcessingMode.configuration.audioSessionMode
+            guard session.category != .playAndRecord || session.mode != expectedMode else {
+                return false
+            }
+        }
+
+        isHandlingAudioReconfiguration = true
+        defer { isHandlingAudioReconfiguration = false }
+        let interruptedTransmit = isCapturingMicrophone
+        onAudioReconfigurationDetected?(interruptedTransmit)
+        handleAudioSessionInterruption()
+        onReceiveMayResume?()
+        return true
     }
 
     private func requestMicrophonePermission() async -> Bool {

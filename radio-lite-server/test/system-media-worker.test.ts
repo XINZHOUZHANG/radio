@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { MediaKind, type MediaFrame } from "../src/media/frame.ts";
 import { OggOpusPacketReader, OggOpusWriter } from "../src/media/ogg-opus.ts";
+import * as systemMedia from "../src/media/system-media-worker.ts";
 import {
   captureCommand,
   opusDecoderCommand,
@@ -13,6 +14,41 @@ import {
   playbackCommand,
   SystemMediaWorker,
 } from "../src/media/system-media-worker.ts";
+
+test("system media executable requirements follow each configured audio backend", () => {
+  const requirements = (systemMedia as Record<string, unknown>).requiredSystemMediaExecutables;
+  assert.equal(typeof requirements, "function");
+  const requiredSystemMediaExecutables = requirements as (
+    profile: { audioInput: { backend: "alsa" | "pulse"; id: string }; audioOutput: { backend: "alsa" | "pulse"; id: string } },
+  ) => { audioInput: string[]; audioOutput: string[] };
+  const cases = [
+    {
+      input: { backend: "alsa" as const, id: "hw:1,0" },
+      output: { backend: "alsa" as const, id: "hw:2,0" },
+      expectedInput: ["arecord", "stdbuf", "opusenc"],
+      expectedOutput: ["stdbuf", "opusdec", "aplay"],
+    },
+    {
+      input: { backend: "pulse" as const, id: "radio-source" },
+      output: { backend: "pulse" as const, id: "radio-sink" },
+      expectedInput: ["parec", "stdbuf", "opusenc"],
+      expectedOutput: ["stdbuf", "opusdec", "pacat"],
+    },
+    {
+      input: { backend: "pulse" as const, id: "radio-source" },
+      output: { backend: "alsa" as const, id: "hw:2,0" },
+      expectedInput: ["parec", "stdbuf", "opusenc"],
+      expectedOutput: ["stdbuf", "opusdec", "aplay"],
+    },
+  ];
+
+  for (const value of cases) {
+    assert.deepEqual(
+      requiredSystemMediaExecutables({ audioInput: value.input, audioOutput: value.output }),
+      { audioInput: value.expectedInput, audioOutput: value.expectedOutput },
+    );
+  }
+});
 
 test("system media commands pass configured device ids as literal argv without a shell", () => {
   const suspicious = "hw:Radio;touch /tmp/not-executed";

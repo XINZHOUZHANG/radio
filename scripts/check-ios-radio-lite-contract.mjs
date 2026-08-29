@@ -165,9 +165,23 @@ assert(audio.includes('return type == .began ? .stopCaptureAndTransmit : .resume
 assert(audio.includes('final class RadioLiteAudioInterruptionObserver'));
 assert(audio.includes('final class RadioLiteNotificationObservationBag'));
 assert(audio.includes('stopDeliveredForCurrentEpisode'));
+assert(audio.includes('struct RadioLiteAudioReconfigurationGate'));
+assert(audio.includes('static let cooldown: TimeInterval = 0.25'));
+assert(audio.includes('monotonicTime: @escaping @MainActor () -> TimeInterval'));
+assert(audio.includes('audioReconfigurationGate.isCoolingDown(at: uptime)'));
+assert(!audio.includes('audioReconfigurationDeliveredForCurrentEpisode'));
 assert(!audio.includes('resetDeliveredForCurrentEpisode'));
-assert(audio.includes('action == .resumeReceiveOnly'));
+assert(audio.includes('case .resumeReceiveOnly:'));
 assert(audio.includes('func rearm()'));
+const interruptionObserver = audio.slice(
+  audio.indexOf('final class RadioLiteAudioInterruptionObserver'),
+  audio.indexOf('struct RadioLiteMicrophoneCaptureOwnership'),
+);
+const rearm = interruptionObserver.slice(
+  interruptionObserver.indexOf('func rearm()'),
+  interruptionObserver.indexOf('private func receive('),
+);
+assert(!rearm.includes('audioReconfigurationGate'));
 assert(/func startMonitoring\(\) throws \{\n\s*audioSessionInterruptionObserver\?\.rearm\(\)/u.test(audio));
 assert(audio.includes('resumeMonitoringAfterCapture: false'));
 assert(audio.includes('onCaptureInterrupted?()'));
@@ -217,22 +231,60 @@ assert(!endVoicePTT.includes('onDispatchCompleted:'));
 const localTransmitStop = endVoicePTT.indexOf(
   '_ = stopLocalTransmit(resumeMonitoringAfterCapture: false)',
 );
-const localPlaybackResume = endVoicePTT.indexOf(
-  'audio.resumeAfterLocalTransmitRelease()',
-);
-const receiveRestoreTask = endVoicePTT.indexOf(
-  'self.voicePTTReceiveResumeTask = Task',
-);
+const finishReceiveCall = endVoicePTT.indexOf('finishReceiveMonitoringAfterTransmit(');
 const remoteTransmitStop = endVoicePTT.indexOf('stopRemoteTransmit');
 assert(localTransmitStop >= 0);
-assert(localPlaybackResume > localTransmitStop);
-assert(receiveRestoreTask < 0 || localPlaybackResume < receiveRestoreTask);
+assert(finishReceiveCall > localTransmitStop);
 assert(remoteTransmitStop >= 0);
-assert(localPlaybackResume < remoteTransmitStop);
+assert(finishReceiveCall < remoteTransmitStop);
+const finishReceiveMonitoring = session.slice(
+  session.indexOf('private func finishReceiveMonitoringAfterTransmit('),
+  session.indexOf('func beginTuning()'),
+);
+const localPlaybackResume = finishReceiveMonitoring.indexOf(
+  'audio.resumeAfterLocalTransmitRelease()',
+);
+const receiveRestoreTask = finishReceiveMonitoring.indexOf(
+  'voicePTTReceiveResumeTask = Task',
+);
+assert(localPlaybackResume >= 0);
+assert(receiveRestoreTask < 0 || localPlaybackResume < receiveRestoreTask);
+const audioInterruptionHandler = session.slice(
+  session.indexOf('private func handleAudioSessionInterruption()'),
+  session.indexOf('private func resumeReceiveAudioAfterInterruption()'),
+);
+assert(audioInterruptionHandler.includes('endTuning(reason: .audioInterruption)'));
+const endTuning = session.slice(
+  session.indexOf('func endTuning()'),
+  session.indexOf('func refreshDigitalSnapshot('),
+);
+assert(endTuning.includes('endTuning(reason: .userRelease)'));
+const tuningLocalStop = endTuning.indexOf('guard stopLocalTransmit() else { return }');
+const tuningReceiveRecovery = endTuning.indexOf('finishReceiveMonitoringAfterTransmit(');
+const tuningRemoteStop = endTuning.indexOf('stopRemoteTransmit');
+assert(tuningLocalStop >= 0);
+assert(tuningReceiveRecovery > tuningLocalStop);
+assert(tuningRemoteStop > tuningReceiveRecovery);
+const beginTuning = session.slice(
+  session.indexOf('func beginTuning()'),
+  session.indexOf('func endTuning()'),
+);
+assert(beginTuning.includes('finishReceiveMonitoringAfterTransmit('));
+assert(beginTuning.includes('reason: .transmitFailure'));
+const transmitHeartbeat = session.slice(
+  session.indexOf('private func startTransmitHeartbeat('),
+  session.indexOf('private func stopRemoteTransmit('),
+);
+assert(transmitHeartbeat.includes('finishReceiveMonitoringAfterTransmit('));
+assert(transmitHeartbeat.includes('reason: .transmitFailure'));
 assert(socket.includes('onDispatchCompleted?(.success(()))'));
 assert(media.includes('struct RadioLiteMediaLivenessState'));
 assert(microphonePolicy.includes('struct RadioLiteMicrophoneProcessor'));
 assert(audio.includes('microphoneProcessor.processFrame'));
+assert(audio.includes('AVAudioSession.routeChangeNotification'));
+assert(audio.includes('.AVAudioEngineConfigurationChange'));
+assert(audio.includes('onAudioReconfiguration'));
+assert(audio.includes('handleAudioReconfiguration'));
 assert(models.includes('let supportsInternalTuner: Bool?'));
 assert(service.includes('supportsInternalTuner'));
 assert(models.includes('case dataUpper = "DATA-U"'));

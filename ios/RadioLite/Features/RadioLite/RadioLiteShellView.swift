@@ -1,5 +1,22 @@
 import SwiftUI
 
+enum RadioLiteScenePhaseAction: Equatable, Sendable {
+    case becameActive
+    case enteredBackground
+    case none
+}
+
+enum RadioLiteScenePhasePolicy {
+    static func action(for phase: ScenePhase) -> RadioLiteScenePhaseAction {
+        switch phase {
+        case .active: .becameActive
+        case .background: .enteredBackground
+        case .inactive: .none
+        @unknown default: .none
+        }
+    }
+}
+
 struct RadioLiteShellView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var session: RadioLiteSession
@@ -18,10 +35,13 @@ struct RadioLiteShellView: View {
         .tint(RadioPalette.accent)
         .background(RadioPalette.background)
         .onChange(of: scenePhase) { _, value in
-            if value == .active {
+            switch RadioLiteScenePhasePolicy.action(for: value) {
+            case .becameActive:
                 session.appDidBecomeActive()
-            } else {
+            case .enteredBackground:
                 session.appDidEnterBackground()
+            case .none:
+                break
             }
         }
     }

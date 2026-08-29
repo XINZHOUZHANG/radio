@@ -264,6 +264,21 @@ enum RadioLiteVoicePTTStopReason: Equatable, Sendable {
     }
 }
 
+enum RadioLiteTransmitReceiveRecoverySource: Equatable, Sendable {
+    case voicePTT
+    case audioInterruption
+    case none
+
+    static func select(
+        voicePTTRestore: RadioLiteReceiveMonitoringOwnership?,
+        audioInterruptionRestore: RadioLiteReceiveMonitoringOwnership?
+    ) -> Self {
+        if voicePTTRestore != nil { return .voicePTT }
+        if audioInterruptionRestore != nil { return .audioInterruption }
+        return .none
+    }
+}
+
 struct RadioLiteRadioConfigurationReconnectOwnership: Equatable, Sendable {
     let radioId: String
     let epoch: UInt64

@@ -386,6 +386,20 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.commandId, "state-with-capabilities");
   assert.equal(reply.state.supportsInternalTuner, true);
 
+  rig.supportsTuner = false;
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "tx.start",
+    radioId: "main",
+    controlToken,
+    mode: "tuning",
+    commandId: "unsupported-internal-tuner",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.requestType, "tx.start");
+  assert.equal(reply.code, "tuner_unsupported");
+  assert.equal(reply.message, "电台不支持通过 Hamlib TUNE 启动机内天调");
+  rig.supportsTuner = true;
+
   const preflightCallsBeforeBusyCheck = testedProfiles.length;
   response = await postJson(
     `${base}/api/v1/hardware/test`,
@@ -887,6 +901,7 @@ class ApiFakeRig implements RigControl {
   passbandHz = 3_000;
   ptt = false;
   tuner = false;
+  supportsTuner = true;
   rejectedMode: string | null = null;
   controls = new Map<string, number>([
     ["level:RFPOWER", 0.5],
@@ -913,7 +928,7 @@ class ApiFakeRig implements RigControl {
   async setPtt(value: boolean) { this.ptt = value; return value; }
   async writePtt(value: boolean) { this.ptt = value; }
   async readPtt() { return this.ptt; }
-  async supportsInternalTuner() { return true; }
+  async supportsInternalTuner() { return this.supportsTuner; }
   async startInternalTuner() { this.tuner = true; }
   async writeInternalTuner(value: boolean) { this.tuner = value; }
   async readControls() {
