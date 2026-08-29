@@ -227,8 +227,8 @@ final class RadioLiteFTMessageTests: XCTestCase {
 
             // Asia.
             "YB1ABC": "印度尼西亚",
-            "BV2ABC": "中国台湾",
-            "VR2ABC": "中国香港",
+            "BV2ABC": "中国",
+            "VR2ABC": "中国",
             "DU1ABC": "菲律宾",
             "HS0ABC": "泰国",
             "9V1ABC": "新加坡",

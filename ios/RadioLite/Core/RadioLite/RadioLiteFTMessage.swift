@@ -79,10 +79,46 @@ struct RadioLiteFTMessage: Equatable, Sendable {
     }
 }
 
+struct RadioLiteCallsignLocation: Equatable, Sendable {
+    let country: String
+    let region: String?
+}
+
+enum RadioLiteFTDecodeMetadataFormatter {
+    static func text(
+        sender: String?,
+        distanceKilometers: Int?
+    ) -> String? {
+        var components: [String] = []
+        if let sender {
+            if let location = RadioLiteCallsignCountryResolver.offline.location(for: sender) {
+                components.append(location.country)
+                if let region = location.region,
+                   region != location.country {
+                    components.append(region)
+                }
+            } else {
+                components.append("未知地区")
+            }
+        }
+        if let distanceKilometers {
+            components.append("\(distanceKilometers) km")
+        }
+        return components.isEmpty ? nil : components.joined(separator: " · ")
+    }
+}
+
 struct RadioLiteCallsignCountryResolver: Sendable {
     struct Entry: Equatable, Sendable {
         let prefix: String
         let country: String
+        let region: String?
+
+        init(prefix: String, country: String, region: String? = nil) {
+            self.prefix = prefix
+            self.country = country
+            self.region = region
+        }
     }
 
     static let offline: RadioLiteCallsignCountryResolver = {
@@ -165,8 +201,9 @@ struct RadioLiteCallsignCountryResolver: Sendable {
         // Asia and the Middle East.
         catalog.append(contentsOf:
         entries(country: "印度尼西亚", prefixes: ["YB", "YC", "YD", "YE", "YF", "YG", "YH", "7A", "7B", "7C", "7D", "7E", "7F", "7G", "7H", "7I", "8A", "8B", "8C", "8D", "8E", "8F", "8G", "8H", "8I"])
-        + entries(country: "中国台湾", prefixes: ["BM", "BN", "BO", "BP", "BQ", "BU", "BV", "BW", "BX"])
-        + entries(country: "中国香港", prefixes: ["VR2"])
+        + entries(country: "中国", region: "台湾", prefixes: ["BM", "BN", "BO", "BP", "BQ", "BU", "BV", "BW", "BX"])
+        + entries(country: "中国", region: "香港", prefixes: ["VR2"])
+        + entries(country: "中国", region: "澳门", prefixes: ["XX9"])
         + entries(country: "菲律宾", prefixes: ["DU", "DV", "DW", "DX", "DY", "DZ", "4D", "4E", "4F", "4G", "4H", "4I"])
         + entries(country: "泰国", prefixes: ["HS", "E2"])
         + entries(country: "新加坡", prefixes: ["9V", "S6"])
@@ -264,14 +301,20 @@ struct RadioLiteCallsignCountryResolver: Sendable {
 
     init(entries: [Entry]) {
         self.entries = entries
-            .map { Entry(prefix: $0.prefix.uppercased(), country: $0.country) }
+            .map {
+                Entry(
+                    prefix: $0.prefix.uppercased(),
+                    country: $0.country,
+                    region: $0.region
+                )
+            }
             .sorted {
                 if $0.prefix.count == $1.prefix.count { return $0.prefix < $1.prefix }
                 return $0.prefix.count > $1.prefix.count
             }
     }
 
-    func country(for callsign: String) -> String? {
+    func location(for callsign: String) -> RadioLiteCallsignLocation? {
         let normalized = callsign
             .uppercased()
             .trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
@@ -293,19 +336,111 @@ struct RadioLiteCallsignCountryResolver: Sendable {
         var visited: Set<String> = []
         for candidate in likelyMainCallsigns + fallbackSegments + [normalized]
         where visited.insert(candidate).inserted {
-            if let country = entries.first(where: { candidate.hasPrefix($0.prefix) })?.country {
-                return country
+            if let entry = entries.first(where: { candidate.hasPrefix($0.prefix) }) {
+                let region = entry.region
+                    ?? (entry.country == "中国"
+                        ? RadioLiteChineseCallsignRegion.region(for: candidate)
+                        : nil)
+                return RadioLiteCallsignLocation(country: entry.country, region: region)
             }
         }
         return nil
+    }
+
+    func country(for callsign: String) -> String? {
+        location(for: callsign)?.country
     }
 
     func countryLabel(for callsign: String) -> String {
         country(for: callsign) ?? "未知地区"
     }
 
-    private static func entries(country: String, prefixes: [String]) -> [Entry] {
-        prefixes.map { Entry(prefix: $0, country: country) }
+    private static func entries(
+        country: String,
+        region: String? = nil,
+        prefixes: [String]
+    ) -> [Entry] {
+        prefixes.map { Entry(prefix: $0, country: country, region: region) }
+    }
+}
+
+private enum RadioLiteChineseCallsignRegion {
+    private static let mainlandStationTypeLetters: Set<Character> = [
+        "A", "D", "G", "H", "I", "J",
+    ]
+
+    static func region(for callsign: String) -> String? {
+        let characters = Array(callsign.uppercased())
+        guard characters.count >= 4,
+              characters[0] == "B",
+              mainlandStationTypeLetters.contains(characters[1]),
+              let district = characters[2].wholeNumberValue else { return nil }
+        let suffixInitial = characters[3]
+        let allocations: [(ClosedRange<Character>, String)]
+        switch district {
+        case 1:
+            allocations = [("A"..."X", "北京")]
+        case 2:
+            allocations = [
+                ("A"..."H", "黑龙江"),
+                ("I"..."P", "吉林"),
+                ("Q"..."X", "辽宁"),
+            ]
+        case 3:
+            allocations = [
+                ("A"..."F", "天津"),
+                ("G"..."L", "内蒙古"),
+                ("M"..."R", "河北"),
+                ("S"..."X", "山西"),
+            ]
+        case 4:
+            allocations = [
+                ("A"..."H", "上海"),
+                ("I"..."P", "山东"),
+                ("Q"..."X", "江苏"),
+            ]
+        case 5:
+            allocations = [
+                ("A"..."H", "浙江"),
+                ("I"..."P", "江西"),
+                ("Q"..."X", "福建"),
+            ]
+        case 6:
+            allocations = [
+                ("A"..."H", "安徽"),
+                ("I"..."P", "河南"),
+                ("Q"..."X", "湖北"),
+            ]
+        case 7:
+            allocations = [
+                ("A"..."H", "湖南"),
+                ("I"..."P", "广东"),
+                ("Q"..."X", "广西"),
+                ("Y"..."Z", "海南"),
+            ]
+        case 8:
+            allocations = [
+                ("A"..."F", "四川"),
+                ("G"..."L", "重庆"),
+                ("M"..."R", "贵州"),
+                ("S"..."X", "云南"),
+            ]
+        case 9:
+            allocations = [
+                ("A"..."F", "陕西"),
+                ("G"..."L", "甘肃"),
+                ("M"..."R", "宁夏"),
+                ("S"..."X", "青海"),
+            ]
+        case 0:
+            allocations = [
+                ("A"..."F", "新疆"),
+                ("G"..."L", "西藏"),
+            ]
+        default:
+            return nil
+        }
+        return allocations.first { $0.0.contains(suffixInitial) }?.1
     }
 }
 

@@ -233,19 +233,14 @@ struct RadioLiteFT8View: View {
         let message = RadioLiteFTMessage.parse(decode.message)
         let emphasis = message.emphasis(myCallsign: stationCallsign)
         let tint = decodeTint(emphasis)
-        let country = message.sender.map {
-            RadioLiteCallsignCountryResolver.offline.countryLabel(for: $0)
-        }
         let distance = RadioLiteMaidenheadDistance.kilometers(
             from: stationGrid,
             to: message.grid
         )
-        let metadata: [String] = [
-            message.sender,
-            country,
-            message.grid,
-            distance.map { "\($0) km 大圆" },
-        ].compactMap { $0 }
+        let metadata = RadioLiteFTDecodeMetadataFormatter.text(
+            sender: message.sender,
+            distanceKilometers: distance
+        )
         return HStack(alignment: .top, spacing: 10) {
             Text(String(format: "%+.0f", decode.snrDb))
                 .font(.caption.monospacedDigit().weight(.bold))
@@ -256,8 +251,8 @@ struct RadioLiteFT8View: View {
                     .font(.subheadline.monospaced().weight(emphasis == .normal ? .regular : .semibold))
                     .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.82) : Color.white)
                     .lineLimit(2)
-                if !metadata.isEmpty {
-                    Text(metadata.joined(separator: " · "))
+                if let metadata {
+                    Text(metadata)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(tint.opacity(emphasis == .normal ? 0.68 : 0.9))
                         .lineLimit(2)
