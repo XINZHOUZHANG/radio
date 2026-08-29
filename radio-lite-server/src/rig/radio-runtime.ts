@@ -16,7 +16,6 @@ import {
 import {
   HamlibRig,
   InternalTunerUnsupportedError,
-  isTransmitLockedRigControlId,
 } from "./hamlib-rig.ts";
 import { HamlibDriver } from "./hamlib-driver.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
@@ -58,6 +57,7 @@ export class RadioRuntime {
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
   #initializePromise: Promise<void> | null = null;
+  #controlsById: ReadonlyMap<string, RadioControl> | null = null;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -86,6 +86,9 @@ export class RadioRuntime {
         await this.#driver.writePtt(false);
       },
       readPtt: async () => {
+        return this.#driver.readPtt({ purpose: "off-recovery" });
+      },
+      observePtt: async () => {
         return this.#driver.readPtt();
       },
     };
@@ -110,8 +113,8 @@ export class RadioRuntime {
 
   async initialize(): Promise<void> {
     this.#initializePromise ??= (async () => {
+      await this.#driver.initialize();
       try {
-        await this.#driver.initialize();
         await this.supervisor.startupObserve();
       } catch (error) {
         if (
@@ -132,8 +135,10 @@ export class RadioRuntime {
     return this.#driver.readState();
   }
 
-  readControls(): Promise<RadioControl[]> {
-    return this.#driver.readControls();
+  async readControls(): Promise<RadioControl[]> {
+    const controls = await this.#driver.readControls();
+    this.#controlsById = new Map(controls.map((control) => [control.id, control]));
+    return controls;
   }
 
   async supportsInternalTuner(): Promise<boolean> {
@@ -200,13 +205,13 @@ export class RadioRuntime {
   ): Promise<RadioControl> {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, controlToken);
-      if (
-        this.supervisor.snapshot().lease !== null &&
-        isTransmitLockedRigControlId(controlId)
-      ) {
-        throw new RigControlTransmitLockedError(
-          "transmit-sensitive radio controls are locked while transmitting",
-        );
+      if (this.supervisor.snapshot().lease !== null) {
+        const control = await this.#controlMetadata(controlId);
+        if (control?.transmitLocked !== false) {
+          throw new RigControlTransmitLockedError(
+            "transmit-sensitive or unknown radio controls are locked while transmitting",
+          );
+        }
       }
       return this.#driver.setControl(controlId, value);
     });
@@ -344,6 +349,18 @@ export class RadioRuntime {
     const result = this.#tail.then(operation, operation);
     this.#tail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  async #controlMetadata(id: string): Promise<RadioControl | undefined> {
+    if (this.#controlsById === null) {
+      try {
+        const controls = await this.readControls();
+        this.#controlsById = new Map(controls.map((control) => [control.id, control]));
+      } catch {
+        return undefined;
+      }
+    }
+    return this.#controlsById.get(id);
   }
 }
 

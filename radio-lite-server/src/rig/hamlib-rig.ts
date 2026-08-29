@@ -16,6 +16,7 @@ const SAFETY_READ_REQUEST = {
   priority: "safety",
   source: "ptt-off",
 } as const satisfies RigRequestOptions;
+const CONTROL_READ_REQUEST = { source: "control" } as const satisfies RigRequestOptions;
 
 export type HamlibRigState = RadioState;
 
@@ -282,8 +283,17 @@ export class HamlibRig {
 
   /** Read physical PTT evidence directly from Hamlib; command cache is never evidence. */
   async readPtt(): Promise<boolean> {
+    return this.#readPtt(SAFETY_READ_REQUEST);
+  }
+
+  /** Read physical PTT evidence for an ordinary control operation. */
+  async readPttForControl(): Promise<boolean> {
+    return this.#readPtt(CONTROL_READ_REQUEST);
+  }
+
+  async #readPtt(options: RigRequestOptions): Promise<boolean> {
     const confirmed = booleanField(
-      await this.#transport.request("\\get_ptt", SAFETY_READ_REQUEST),
+      await this.#transport.request("\\get_ptt", options),
       "PTT",
     );
     this.#lastCommandedPttForDisplayOnly = confirmed;

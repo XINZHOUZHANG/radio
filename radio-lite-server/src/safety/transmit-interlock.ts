@@ -29,6 +29,7 @@ export type InterlockSnapshot = {
 
 export type TransmitDriver = DeKeyTransport & {
   activate(mode: TransmitMode): Promise<void>;
+  observePtt?(): Promise<boolean>;
 };
 
 export type TransmitInterlockOptions = {
@@ -107,7 +108,9 @@ export class TransmitInterlock {
   }
 
   async startupObserve(): Promise<void> {
-    const observed = await this.#driver.readPtt();
+    const observed = this.#driver.observePtt === undefined
+      ? await this.#driver.readPtt()
+      : await this.#driver.observePtt();
     if (typeof observed !== "boolean") {
       throw new Error("PTT read-back is malformed");
     }

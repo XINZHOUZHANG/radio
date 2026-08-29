@@ -17,6 +17,7 @@ import { RadioRuntime } from "../src/rig/radio-runtime.ts";
 import type { RadioProfile } from "../src/config/types.ts";
 import type { PublicUser } from "../src/auth/user-store.ts";
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
+import type { RigRequestOptions } from "../src/rig/transport.ts";
 
 class FakeRadioDriver implements RadioDriver {
   initializeCalls = 0;
@@ -80,9 +81,14 @@ class FakeRadioDriver implements RadioDriver {
 
 class RecordingRequester implements RigRequester {
   readonly commands: string[] = [];
+  readonly requests: Array<{ command: string; options: RigRequestOptions | undefined }> = [];
 
-  async request(command: string): Promise<RigResponse> {
+  async request(command: string, options?: RigRequestOptions): Promise<RigResponse> {
     this.commands.push(command);
+    this.requests.push({ command, options });
+    if (command === "\\get_ptt") {
+      return { command: "get_ptt", fields: new Map([["PTT", "0"]]), values: [], report: 0 };
+    }
     return { command: command.slice(1), fields: new Map(), values: [], report: 0 };
   }
 }
@@ -112,6 +118,23 @@ test("HamlibDriver never maps RFPOWER to measured RF power", async () => {
 
   assert.equal(sample.rfPowerRatio, undefined);
   assert.equal(requester.commands.includes("\\get_level RFPOWER"), false);
+});
+
+test("HamlibDriver uses ordinary PTT evidence for ON confirmation and safety evidence for OFF recovery", async () => {
+  const requester = new RecordingRequester();
+  const driver = new HamlibDriver(new HamlibRig(requester));
+
+  await driver.writePtt(true);
+  await driver.readPtt();
+  await driver.readPtt({ purpose: "off-recovery" });
+
+  assert.deepEqual(
+    requester.requests.filter((request) => request.command === "\\get_ptt").map((request) => request.options),
+    [
+      { source: "control" },
+      { priority: "safety", source: "ptt-off" },
+    ],
+  );
 });
 
 function profile(): RadioProfile {

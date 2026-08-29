@@ -6,6 +6,7 @@ import type {
   RadioDriver,
   RadioMeterSample,
   RadioModeState,
+  RadioPttReadOptions,
   RadioReadOptions,
   RadioState,
 } from "./radio-driver.ts";
@@ -70,8 +71,10 @@ export class HamlibDriver implements RadioDriver {
     return this.#rig.writePtt(enabled);
   }
 
-  readPtt(): Promise<boolean> {
-    return this.#rig.readPtt();
+  readPtt(options?: RadioPttReadOptions): Promise<boolean> {
+    return options?.purpose === "off-recovery"
+      ? this.#rig.readPtt()
+      : this.#rig.readPttForControl();
   }
 
   async #loadCapabilities(): Promise<RadioCapabilities> {

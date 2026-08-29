@@ -42,6 +42,10 @@ export type RadioReadOptions = {
   source?: "telemetry" | "control";
 };
 
+export type RadioPttReadOptions = {
+  purpose?: "off-recovery";
+};
+
 export interface RadioDriver {
   initialize(): Promise<void>;
   close(): Promise<void>;
@@ -54,5 +58,5 @@ export interface RadioDriver {
   setControl(id: string, value: RadioControlValue): Promise<RadioControl>;
   invokeAction(id: string): Promise<void>;
   writePtt(enabled: boolean): Promise<void>;
-  readPtt(): Promise<boolean>;
+  readPtt(options?: RadioPttReadOptions): Promise<boolean>;
 }

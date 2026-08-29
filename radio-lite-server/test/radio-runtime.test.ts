@@ -20,7 +20,7 @@ import {
   RadioRuntimeRegistryClosedError,
   TransmitPermissionError,
 } from "../src/rig/radio-runtime.ts";
-import type { RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
+import type { RadioControl, RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
 import { RigReportError } from "../src/rig/transport.ts";
 
 class FakeRig implements RadioDriver {
@@ -62,7 +62,7 @@ class FakeRig implements RadioDriver {
     this.tuner = value;
     this.events.push(`tuner-write:${value}`);
   }
-  async readControls() {
+  async readControls(): Promise<RadioControl[]> {
     return [...this.controls].map(([id, value]) => ({
       id,
       kind: "level" as const,
@@ -129,6 +129,35 @@ class FailingDeKeyRig extends FakeRig {
       throw new Error("PTT read failed");
     }
     return super.readPtt();
+  }
+}
+
+class InitializationFailingRig extends FakeRig {
+  override async initialize() {
+    throw new RigReportError("driver_initialize", -11);
+  }
+}
+
+class NonHamlibLockedControlRig extends FakeRig {
+  setControlCalls = 0;
+
+  override async readControls() {
+    return [{
+      id: "vendor:TX_LOCKED",
+      kind: "level" as const,
+      token: "TX_LOCKED",
+      value: 1,
+      minimum: 0,
+      maximum: 1,
+      step: 1,
+      unit: "boolean" as const,
+      transmitLocked: true,
+    }];
+  }
+
+  override async setControl(id: string, value: RadioControlValue) {
+    this.setControlCalls += 1;
+    return super.setControl(id, value);
   }
 }
 
@@ -207,6 +236,20 @@ test("startup observation failure closes dependencies without writing PTT OFF", 
   assert.equal(dependencyCloseCount, 1);
   assert.equal(rig.ptt, true);
   assert.deepEqual(rig.events, ["ptt-read:error"]);
+});
+
+test("receive-only initialization does not swallow a driver initialization failure", async () => {
+  const rig = new InitializationFailingRig();
+  const runtime = new RadioRuntime(
+    { ...profile(false), ptt: { method: "None" } },
+    rig,
+  );
+
+  await assert.rejects(runtime.initialize(), (error: unknown) =>
+    error instanceof RigReportError && error.report === -11 && /driver_initialize/u.test(error.message),
+  );
+  assert.deepEqual(rig.events, []);
+  await runtime.close();
 });
 
 test("receive-only PTT None runtime starts without treating display cache as evidence", async () => {
@@ -553,6 +596,27 @@ test("runtime locks transmit-sensitive Hamlib adjustments only while transmittin
     0.25,
   );
   assert.equal(power.value, 0.25);
+});
+
+test("runtime locks neutral control descriptors and fails closed for unknown controls while transmitting", async (context) => {
+  const rig = new NonHamlibLockedControlRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("u1", "operator", true);
+  const control = await runtime.acquireControl("device-a", operator);
+  const tx = await runtime.startTransmit("device-a", operator, control.lease.token, "voice");
+
+  await assert.rejects(
+    runtime.setControl("device-a", control.lease.token, "vendor:TX_LOCKED", 0),
+    RigControlTransmitLockedError,
+  );
+  await assert.rejects(
+    runtime.setControl("device-a", control.lease.token, "vendor:UNKNOWN", 0),
+    RigControlTransmitLockedError,
+  );
+  assert.equal(rig.setControlCalls, 0);
+  await runtime.stopTransmit("device-a", tx.leaseToken);
 });
 
 test("runtime does not key PTT while a transmit-sensitive control write is pending", async (context) => {
