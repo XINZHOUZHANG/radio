@@ -235,37 +235,61 @@ export class HamlibRig {
     return controls;
   }
 
-  async setControl(id: string, value: number): Promise<HamlibRigControl> {
-    if (!Number.isFinite(value)) {
-      throw new Error("control value must be finite");
-    }
+  async setControl(id: string, value: RadioControlValue): Promise<HamlibRigControl> {
     const definition = (await this.#discoverControlDefinitions())
       .find((candidate) => candidate.id === id);
     if (definition === undefined) {
       throw new Error(`control ${id} is unavailable`);
     }
-    validateControlValue(definition, value);
-
     if (definition.access !== "read-write") {
       throw new Error(`control ${id} is not writable`);
     }
+    const normalized = normalizeControlValue(definition, value);
+    return this.#writeAndConfirmControl(definition, normalized);
+  }
+
+  async #writeAndConfirmControl(
+    definition: HamlibRigControlDefinition,
+    normalized: Exclude<RadioControlValue, null>,
+  ): Promise<HamlibRigControl> {
+    const numeric = () => numericControlValue(normalized);
     if (definition.kind === "level") {
-      await this.#transport.request(`\\set_level ${definition.token} ${formatRigNumber(value)}`);
+      await this.#transport.request(
+        "\\set_level " + definition.token + " " + formatRigNumber(numeric()),
+      );
     } else if (definition.kind === "function") {
-      await this.#transport.request(`\\set_func ${definition.token} ${value}`);
+      await this.#transport.request(
+        "\\set_func " + definition.token + " " + (normalized === true ? "1" : "0"),
+      );
+    } else if (definition.kind === "mode") {
+      const current = await this.#transport.request("\\get_mode");
+      const confirmed = await this.setMode(
+        stringControlValue(normalized),
+        integerField(current, "Passband"),
+      );
+      return { ...definition, value: normalizeHamlibMode(confirmed.mode) };
     } else if (definition.kind === "passband") {
-      const mode = await this.#transport.request("\\get_mode");
-      await this.setMode(tokenField(mode, "Mode"), value);
+      const current = await this.#transport.request("\\get_mode");
+      const confirmed = await this.setMode(tokenField(current, "Mode"), numeric());
+      return { ...definition, value: confirmed.passbandHz };
     } else {
-      throw new Error(`control ${id} requires an explicit command adapter`);
+      const command = operationWriteCommand(definition.id, normalized);
+      if (command === null) {
+        throw new Error("control " + definition.id + " requires an explicit command adapter");
+      }
+      await this.#transport.request(command);
     }
 
-    const confirmedValue = await this.#readControlValue(definition);
-    const confirmed = typeof confirmedValue === "boolean" ? Number(confirmedValue) : confirmedValue;
-    const tolerance = Math.max((definition.step ?? 0) / 2, 1e-6);
-    if (typeof confirmed !== "number" || Math.abs(confirmed - value) > tolerance) {
+    let confirmedValue: RadioControlValue;
+    try {
+      confirmedValue = await this.#readControlValue(definition);
+    } catch (error) {
+      if (!(error instanceof RigReportError) || error.report !== -11) throw error;
+      confirmedValue = normalized;
+    }
+    if (!controlValuesMatch(definition, normalized, confirmedValue)) {
       throw new Error(
-        `control read-back mismatch: requested ${value}, received ${confirmed}`,
+        "control read-back mismatch: requested " + normalized + ", received " + confirmedValue,
       );
     }
     return { ...definition, value: confirmedValue };
@@ -489,12 +513,13 @@ export class HamlibRig {
   }
 
   async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
-    const [readableLevels, writableLevels, readableFunctions, writableFunctions] =
+    const [readableLevels, writableLevels, readableFunctions, writableFunctions, modes] =
       await Promise.all([
         this.#discoverTelemetryMeters(),
         this.#queryCapabilityTokens("\\set_level ?", "Level", TELEMETRY_REQUEST),
         this.#queryCapabilityTokens("\\get_func ?", "Func", TELEMETRY_REQUEST),
         this.#discoverWritableFunctions(),
+        this.#queryCapabilityTokens("\\set_mode ?", "Mode", TELEMETRY_REQUEST),
       ]);
     const readableLevelSet = readableLevels ?? new Set<string>();
     const writableLevelSet = writableLevels ?? new Set<string>();
@@ -502,8 +527,12 @@ export class HamlibRig {
     const writableFunctionSet = writableFunctions ?? new Set<string>();
     const candidates = await this.#controlCatalogue.discover({
       levels: [...readableLevelSet],
-      functions: [...readableFunctionSet],
-      operations: ["PASSBAND"],
+      functions: [...new Set([...readableFunctionSet, ...writableFunctionSet])],
+      operations: [
+        "MODE", "PASSBAND", "SPLIT", "RIT", "XIT", "TUNING_STEP",
+        "REPEATER_SHIFT", "REPEATER_OFFSET", "CTCSS", "DCS",
+      ],
+      modes: modes === null ? [] : [...modes],
     });
     const usable = candidates.filter((definition) => {
       if (definition.kind === "level") {
@@ -569,17 +598,179 @@ export class HamlibRig {
     options?: RigRequestOptions,
   ): Promise<RadioControlValue> {
     if (definition.kind === "action") return null;
+    if (definition.kind === "mode") {
+      return normalizeHamlibMode(tokenField(
+        await this.#transport.request("\\get_mode", options),
+        "Mode",
+      ));
+    }
     if (definition.kind === "passband") {
       return integerField(
         await this.#transport.request("\\get_mode", options),
         "Passband",
       );
     }
+    const operationRead = operationReadCommand(definition.id);
+    if (operationRead !== null) {
+      const response = await this.#transport.request(operationRead, options);
+      if (definition.id === "operation:SPLIT") {
+        return numericResponseValue(response, "Split") !== 0;
+      }
+      if (definition.id === "repeater:SHIFT") {
+        return normalizedRepeaterShift(responseValue(response, "Rptr Shift"));
+      }
+      return numericResponseValue(response, operationReadField(definition.id));
+    }
     const command = definition.kind === "level" ? "get_level" : "get_func";
     const response = await this.#transport.request(`\\${command} ${definition.token}`, options);
     const value = numericResponseValue(response, definition.token);
     return definition.kind === "function" ? value !== 0 : value;
   }
+}
+
+function normalizeControlValue(
+  definition: HamlibRigControlDefinition,
+  value: RadioControlValue,
+): Exclude<RadioControlValue, null> {
+  let normalized: Exclude<RadioControlValue, null>;
+  if (definition.kind === "mode") {
+    if (typeof value !== "string") throw new Error("mode control value must be a string");
+    normalized = normalizeHamlibMode(value);
+  } else if (definition.id === "operation:SPLIT") {
+    if (typeof value !== "boolean") throw new Error("split control value must be boolean");
+    normalized = value;
+  } else if (definition.kind === "function") {
+    if (typeof value === "boolean") {
+      normalized = value;
+    } else if (value === 0 || value === 1) {
+      normalized = value !== 0;
+    } else {
+      throw new Error("function control value must be boolean or legacy 0/1");
+    }
+  } else if (definition.id === "repeater:SHIFT") {
+    if (typeof value !== "string") throw new Error("repeater shift must be a string");
+    normalized = value.trim().toUpperCase();
+  } else {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error("control value must be finite numeric data");
+    }
+    normalized = value;
+  }
+
+  if (
+    definition.options !== undefined &&
+    definition.options.length > 0 &&
+    !definition.options.some((option) => option.value === normalized)
+  ) {
+    throw new Error("control value is not an available option");
+  }
+  if (typeof normalized === "number") validateNumericControlValue(definition, normalized);
+  return normalized;
+}
+
+function validateNumericControlValue(
+  definition: HamlibRigControlDefinition,
+  value: number,
+): void {
+  const minimum = definition.minimum;
+  const maximum = definition.maximum;
+  const step = definition.step;
+  if (minimum === undefined || maximum === undefined || step === undefined) {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error("numeric enum control value must be an integer");
+    }
+    return;
+  }
+  const epsilon = Math.max(Math.abs(step) * 1e-6, 1e-9);
+  if (value < minimum - epsilon || value > maximum + epsilon) {
+    throw new Error("control value is outside " + minimum + ".." + maximum);
+  }
+  const steps = (value - minimum) / step;
+  if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+    throw new Error("control value must use step " + step);
+  }
+  if (definition.kind === "passband" && !Number.isSafeInteger(value)) {
+    throw new Error("passband control value must be an integer");
+  }
+}
+
+function numericControlValue(value: Exclude<RadioControlValue, null>): number {
+  if (typeof value !== "number") throw new Error("normalized control value is not numeric");
+  return value;
+}
+
+function stringControlValue(value: Exclude<RadioControlValue, null>): string {
+  if (typeof value !== "string") throw new Error("normalized control value is not a string");
+  return value;
+}
+
+function controlValuesMatch(
+  definition: HamlibRigControlDefinition,
+  requested: Exclude<RadioControlValue, null>,
+  confirmed: RadioControlValue,
+): boolean {
+  if (typeof requested === "number" && typeof confirmed === "number") {
+    return Math.abs(confirmed - requested) <= Math.max((definition.step ?? 0) / 2, 1e-6);
+  }
+  return requested === confirmed;
+}
+
+function operationWriteCommand(
+  id: string,
+  value: Exclude<RadioControlValue, null>,
+): string | null {
+  if (id === "operation:SPLIT") return "\\set_split_vfo " + (value === true ? "1" : "0") + " VFOB";
+  if (id === "operation:RIT") return "\\set_rit " + formatRigNumber(numericControlValue(value));
+  if (id === "operation:XIT") return "\\set_xit " + formatRigNumber(numericControlValue(value));
+  if (id === "operation:TUNING_STEP") return "\\set_ts " + formatRigNumber(numericControlValue(value));
+  if (id === "repeater:SHIFT") return "\\set_rptr_shift " + hamlibRepeaterShift(stringControlValue(value));
+  if (id === "repeater:OFFSET") return "\\set_rptr_offs " + formatRigNumber(numericControlValue(value));
+  if (id === "repeater:CTCSS") return "\\set_ctcss_tone " + formatRigNumber(numericControlValue(value));
+  if (id === "repeater:DCS") return "\\set_dcs_code " + formatRigNumber(numericControlValue(value));
+  return null;
+}
+
+function operationReadCommand(id: string): string | null {
+  if (id === "operation:SPLIT") return "\\get_split_vfo";
+  if (id === "operation:RIT") return "\\get_rit";
+  if (id === "operation:XIT") return "\\get_xit";
+  if (id === "operation:TUNING_STEP") return "\\get_ts";
+  if (id === "repeater:SHIFT") return "\\get_rptr_shift";
+  if (id === "repeater:OFFSET") return "\\get_rptr_offs";
+  if (id === "repeater:CTCSS") return "\\get_ctcss_tone";
+  if (id === "repeater:DCS") return "\\get_dcs_code";
+  return null;
+}
+
+function operationReadField(id: string): string {
+  if (id === "operation:RIT") return "RIT";
+  if (id === "operation:XIT") return "XIT";
+  if (id === "operation:TUNING_STEP") return "Tuning Step";
+  if (id === "repeater:OFFSET") return "Rptr Offset";
+  if (id === "repeater:CTCSS") return "CTCSS Tone";
+  if (id === "repeater:DCS") return "DCS Code";
+  return "Value";
+}
+
+function hamlibRepeaterShift(value: string): string {
+  if (value === "PLUS") return "+";
+  if (value === "MINUS") return "-";
+  return "None";
+}
+
+function normalizedRepeaterShift(value: string): string {
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "+" || normalized === "PLUS") return "PLUS";
+  if (normalized === "-" || normalized === "MINUS") return "MINUS";
+  if (normalized === "NONE") return "NONE";
+  throw new Error("get_rptr_shift response has invalid repeater shift");
+}
+
+function responseValue(response: RigResponse, field: string): string {
+  const value = response.values[0] ?? response.fields.get(field) ??
+    response.fields.values().next().value;
+  if (value === undefined) throw new Error(response.command + " response has no value");
+  return value;
 }
 
 function parseLevelGranularity(
@@ -597,29 +788,6 @@ function parseLevelGranularity(
     return null;
   }
   return { minimum, maximum, step };
-}
-
-function validateControlValue(definition: HamlibRigControlDefinition, value: number): void {
-  const minimum = definition.minimum;
-  const maximum = definition.maximum;
-  const step = definition.step;
-  if (minimum === undefined || maximum === undefined || step === undefined) {
-    throw new Error("control does not report usable numeric bounds");
-  }
-  const epsilon = Math.max(Math.abs(step) * 1e-6, 1e-9);
-  if (value < minimum - epsilon || value > maximum + epsilon) {
-    throw new Error(`control value is outside ${definition.minimum}..${definition.maximum}`);
-  }
-  const steps = (value - minimum) / step;
-  if (Math.abs(steps - Math.round(steps)) > 1e-6) {
-    throw new Error(`control value must use step ${step}`);
-  }
-  if (definition.kind === "function" && value !== 0 && value !== 1) {
-    throw new Error("function control value must be 0 or 1");
-  }
-  if (definition.kind === "passband" && !Number.isSafeInteger(value)) {
-    throw new Error("passband control value must be an integer");
-  }
 }
 
 function formatRigNumber(value: number): string {

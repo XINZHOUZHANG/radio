@@ -21,6 +21,7 @@ import { HamlibDriver } from "./hamlib-driver.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
 import type {
   RadioControl,
+  RadioControlValue,
   RadioDriver,
   RadioModeState,
   RadioState,
@@ -240,7 +241,7 @@ export class RadioRuntime {
     ownerId: string,
     controlToken: string,
     controlId: string,
-    value: number,
+    value: RadioControlValue,
   ): Promise<RadioControl> {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, controlToken);
@@ -260,36 +261,37 @@ export class RadioRuntime {
     });
   }
 
+  async invokeAction(
+    ownerId: string,
+    user: PublicUser,
+    controlToken: string,
+    actionId: string,
+  ): Promise<TransmitLease> {
+    return this.#serialize(async () => {
+      this.control.assertValid(ownerId, controlToken);
+      const action = await this.#controlMetadata(actionId);
+      if (action?.access !== "action") {
+        throw new Error("action " + actionId + " is unavailable");
+      }
+      if (this.supervisor.snapshot().lease !== null && action.transmitLocked) {
+        throw new RigControlTransmitLockedError(
+          "transmit-sensitive radio actions are locked while transmitting",
+        );
+      }
+      if (actionId !== "action:TUNER") {
+        throw new Error("action " + actionId + " is unavailable");
+      }
+      return this.#startTransmit(ownerId, user, controlToken, "tuning");
+    });
+  }
+
   async startTransmit(
     ownerId: string,
     user: PublicUser,
     controlToken: string,
     mode: TransmitMode,
   ): Promise<TransmitLease> {
-    return this.#serialize(async () => {
-      const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
-      if (mode === "tuning" && !(await this.supportsInternalTuner())) {
-        throw new InternalTunerUnsupportedError(
-          "radio does not support internal tuning via Hamlib TUNE",
-        );
-      }
-      const permit = await this.supervisor.reserveTransmitStart({
-        radioId: this.profile.id,
-        ownerId,
-        userId: user.id,
-        mode,
-        controlLeaseRevision: controlLease.acquiredAtMs,
-        profileRevision: 1,
-      });
-      try {
-        return await this.supervisor.commitTransmitStart(permit, () => {
-          this.#assertTransmitAdmission(ownerId, user, controlToken);
-        });
-      } catch (error) {
-        this.supervisor.abandonTransmitStart(permit, "transmit start failed");
-        throw error;
-      }
-    });
+    return this.#serialize(() => this.#startTransmit(ownerId, user, controlToken, mode));
   }
 
   async heartbeatTransmit(
@@ -387,6 +389,36 @@ export class RadioRuntime {
       throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
     }
     return controlLease;
+  }
+
+  async #startTransmit(
+    ownerId: string,
+    user: PublicUser,
+    controlToken: string,
+    mode: TransmitMode,
+  ): Promise<TransmitLease> {
+    const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
+    if (mode === "tuning" && !(await this.supportsInternalTuner())) {
+      throw new InternalTunerUnsupportedError(
+        "radio does not support internal tuning via Hamlib TUNE",
+      );
+    }
+    const permit = await this.supervisor.reserveTransmitStart({
+      radioId: this.profile.id,
+      ownerId,
+      userId: user.id,
+      mode,
+      controlLeaseRevision: controlLease.acquiredAtMs,
+      profileRevision: 1,
+    });
+    try {
+      return await this.supervisor.commitTransmitStart(permit, () => {
+        this.#assertTransmitAdmission(ownerId, user, controlToken);
+      });
+    } catch (error) {
+      this.supervisor.abandonTransmitStart(permit, "transmit start failed");
+      throw error;
+    }
   }
 
   #serialize<T>(operation: () => Promise<T>): Promise<T> {

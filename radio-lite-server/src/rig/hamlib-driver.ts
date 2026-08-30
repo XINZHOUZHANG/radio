@@ -73,9 +73,6 @@ export class HamlibDriver implements RadioDriver {
   }
 
   async setControl(id: string, value: RadioControlValue): Promise<RadioControl> {
-    if (typeof value !== "number") {
-      throw new Error("Hamlib flat controls require a numeric value");
-    }
     return this.#rig.setControl(id, value);
   }
 

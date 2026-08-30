@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import type { PublicUser } from "../src/auth/user-store.ts";
 import { parseRadioProfile } from "../src/config/types.ts";
-import { ControlBusyError } from "../src/control/control-lease.ts";
+import { ControlBusyError, InvalidControlLeaseError } from "../src/control/control-lease.ts";
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
 import { HamlibDriver } from "../src/rig/hamlib-driver.ts";
 import { HamlibRig } from "../src/rig/hamlib-rig.ts";
@@ -39,6 +39,7 @@ class FakeRig implements RadioDriver {
   readStateCalls = 0;
   readControlsCalls = 0;
   readonly telemetryModes: Array<"receive" | "transmit"> = [];
+  invokeActionCalls = 0;
 
   async initialize() {}
   async close() {}
@@ -71,7 +72,7 @@ class FakeRig implements RadioDriver {
   }
   async readControls(): Promise<RadioControl[]> {
     this.readControlsCalls += 1;
-    return [...this.controls].map(([id, value]) => ({
+    const controls: RadioControl[] = [...this.controls].map(([id, value]) => ({
       id,
       kind: "level" as const,
       token: id.split(":")[1]!,
@@ -82,6 +83,17 @@ class FakeRig implements RadioDriver {
       unit: "ratio" as const,
       transmitLocked: id === "level:RFPOWER",
     }));
+    controls.push({
+      id: "action:TUNER",
+      kind: "action" as const,
+      token: "TUNER",
+      group: "rf" as const,
+      access: "action" as const,
+      presentation: "button" as const,
+      value: null,
+      transmitLocked: true,
+    });
+    return controls;
   }
   async setControl(id: string, value: RadioControlValue) {
     if (typeof value !== "number") throw new Error("control value must be numeric");
@@ -92,6 +104,7 @@ class FakeRig implements RadioDriver {
     return { ...control, value };
   }
   async invokeAction(id: string) {
+    this.invokeActionCalls += 1;
     if (id !== "action:TUNER") throw new Error("action unavailable");
     await this.startInternalTuner();
   }
@@ -202,6 +215,19 @@ class NonHamlibLockedControlRig extends FakeRig {
       maximum: 1,
       step: 1,
       unit: "boolean" as const,
+      transmitLocked: true,
+    }, {
+      id: "repeater:OFFSET",
+      kind: "operation" as const,
+      token: "REPEATER_OFFSET",
+      group: "repeater" as const,
+      access: "read-write" as const,
+      presentation: "offset" as const,
+      value: 600_000,
+      minimum: 0,
+      maximum: 100_000_000,
+      step: 1,
+      unit: "hertz" as const,
       transmitLocked: true,
     }];
   }
@@ -732,6 +758,70 @@ test("runtime locks transmit-sensitive Hamlib adjustments only while transmittin
     0.25,
   );
   assert.equal(power.value, 0.25);
+});
+
+test("runtime blocks transmit-locked operation before driver invocation", async (context) => {
+  const rig = new NonHamlibLockedControlRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("operation-owner", "operator", true);
+  const control = await runtime.acquireControl("operation-device", operator);
+  await assert.rejects(
+    runtime.setControl("operation-device", "invalid-token", "repeater:OFFSET", 600_000),
+    InvalidControlLeaseError,
+  );
+  assert.equal(rig.setControlCalls, 0);
+  const tx = await runtime.startTransmit(
+    "operation-device",
+    operator,
+    control.lease.token,
+    "voice",
+  );
+
+  await assert.rejects(
+    runtime.setControl("operation-device", control.lease.token, "repeater:OFFSET", 600_000),
+    RigControlTransmitLockedError,
+  );
+
+  assert.equal(rig.setControlCalls, 0);
+  await runtime.stopTransmit("operation-device", tx.leaseToken);
+});
+
+test("runtime admits tuner actions only through a valid lease and tuning interlock", async (context) => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("action-owner", "operator", true);
+  const control = await runtime.acquireControl("action-device", operator);
+
+  await assert.rejects(
+    runtime.invokeAction("action-device", operator, "invalid-token", "action:TUNER"),
+    InvalidControlLeaseError,
+  );
+  assert.equal(rig.invokeActionCalls, 0);
+
+  const transmit = await runtime.invokeAction(
+    "action-device",
+    operator,
+    control.lease.token,
+    "action:TUNER",
+  );
+  assert.equal(transmit.mode, "tuning");
+  assert.equal(runtime.interlock.snapshot().state, "tuning");
+  assert.equal(rig.invokeActionCalls, 1);
+  await assert.rejects(
+    runtime.invokeAction(
+      "action-device",
+      operator,
+      control.lease.token,
+      "action:TUNER",
+    ),
+    RigControlTransmitLockedError,
+  );
+  assert.equal(rig.invokeActionCalls, 1);
+  await runtime.stopTransmit("action-device", transmit.leaseToken);
 });
 
 test("runtime locks neutral control descriptors and fails closed for unknown controls while transmitting", async (context) => {
