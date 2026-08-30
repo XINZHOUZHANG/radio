@@ -48,18 +48,92 @@ struct RadioLiteDiscoveredAudioDevice: Codable, Identifiable, Equatable, Sendabl
     }
 }
 
+enum RadioLiteAudioLatency: String, Codable, CaseIterable, Identifiable, Sendable {
+    case low
+    case balanced
+    case stable
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .low: "低延迟"
+        case .balanced: "平衡"
+        case .stable: "稳定"
+        }
+    }
+}
+
+enum RadioLiteAudioRoute: Codable, Equatable, Sendable {
+    case systemDevice(hardwareId: String, latency: RadioLiteAudioLatency)
+    case driverStream
+    case none
+
+    private enum CodingKeys: String, CodingKey { case kind, hardwareId, latency }
+    private enum Kind: String, Codable { case systemDevice = "system-device", driverStream = "driver-stream", none }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .systemDevice:
+            self = .systemDevice(
+                hardwareId: try container.decode(String.self, forKey: .hardwareId),
+                latency: try container.decode(RadioLiteAudioLatency.self, forKey: .latency)
+            )
+        case .driverStream:
+            self = .driverStream
+        case .none:
+            self = .none
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .systemDevice(let hardwareId, let latency):
+            try container.encode(Kind.systemDevice, forKey: .kind)
+            try container.encode(hardwareId, forKey: .hardwareId)
+            try container.encode(latency, forKey: .latency)
+        case .driverStream:
+            try container.encode(Kind.driverStream, forKey: .kind)
+        case .none:
+            try container.encode(Kind.none, forKey: .kind)
+        }
+    }
+
+    var systemDeviceSelection: (hardwareId: String, latency: RadioLiteAudioLatency)? {
+        guard case .systemDevice(let hardwareId, let latency) = self else { return nil }
+        return (hardwareId, latency)
+    }
+}
+
+struct RadioLiteAudioCard: Codable, Identifiable, Equatable, Sendable {
+    let hardwareId: String
+    let label: String
+    let transport: String
+    let complete: Bool
+    let input: RadioLiteDiscoveredAudioDevice?
+    let output: RadioLiteDiscoveredAudioDevice?
+
+    var id: String { hardwareId }
+    var isSelectableUSBCard: Bool {
+        transport == "usb" && complete && input != nil && output != nil
+    }
+}
+
 struct RadioLiteHardwareDiscovery: Codable, Equatable, Sendable {
     let hamlibModels: [RadioLiteHamlibModel]
     let curatedPresets: [RadioLiteCuratedRigPreset]
     let serialDevices: [RadioLiteSerialDevice]
     let audioInputs: [RadioLiteDiscoveredAudioDevice]
     let audioOutputs: [RadioLiteDiscoveredAudioDevice]
+    let audioCards: [RadioLiteAudioCard]
     let pttMethods: [RadioLitePTTMethod]
     let baudRates: [Int]
     let warnings: [String]
 
     private enum CodingKeys: String, CodingKey {
-        case hamlibModels, curatedPresets, serialDevices, audioInputs, audioOutputs
+        case hamlibModels, curatedPresets, serialDevices, audioInputs, audioOutputs, audioCards
         case pttMethods, baudRates, warnings
     }
 
@@ -70,6 +144,7 @@ struct RadioLiteHardwareDiscovery: Codable, Equatable, Sendable {
         serialDevices = try container.decode([RadioLiteSerialDevice].self, forKey: .serialDevices)
         audioInputs = try container.decode([RadioLiteDiscoveredAudioDevice].self, forKey: .audioInputs)
         audioOutputs = try container.decode([RadioLiteDiscoveredAudioDevice].self, forKey: .audioOutputs)
+        audioCards = try container.decodeIfPresent([RadioLiteAudioCard].self, forKey: .audioCards) ?? []
         pttMethods = try container.decodeIfPresent([RadioLitePTTMethod].self, forKey: .pttMethods)
             ?? RadioLitePTTMethod.allCases
         baudRates = try container.decodeIfPresent([Int].self, forKey: .baudRates)
@@ -180,6 +255,7 @@ struct RadioLiteRadioConfigurationDraft: Equatable, Sendable {
     var pttBit: Int
     var audioInput: RadioLiteAudioEndpoint
     var audioOutput: RadioLiteAudioEndpoint
+    var audioRoute: RadioLiteAudioRoute?
     var callsign: String
     var grid: String
     var hardwareTxEnabled: Bool
@@ -198,6 +274,7 @@ struct RadioLiteRadioConfigurationDraft: Equatable, Sendable {
         pttBit = profile.ptt.bit ?? 0
         audioInput = profile.audioInput
         audioOutput = profile.audioOutput
+        audioRoute = profile.audioRoute
         callsign = profile.station.callsign
         grid = profile.station.grid ?? ""
         hardwareTxEnabled = profile.hardwareTxEnabled
@@ -295,9 +372,31 @@ struct RadioLiteRadioConfigurationDraft: Equatable, Sendable {
             ptt: ptt,
             audioInput: audioInput,
             audioOutput: audioOutput,
+            audioRoute: audioRoute,
             station: .init(callsign: normalizedCallsign, grid: normalizedGrid.isEmpty ? nil : normalizedGrid),
             hardwareTxEnabled: connectionKind == .hamlibDummy ? false : hardwareTxEnabled
         )
+    }
+
+    @discardableResult
+    mutating func selectAudioCard(_ card: RadioLiteAudioCard) -> Bool {
+        guard card.isSelectableUSBCard, let input = card.input, let output = card.output else {
+            return false
+        }
+        let latency = audioRoute?.systemDeviceSelection?.latency ?? .balanced
+        audioInput = input.endpoint
+        audioOutput = output.endpoint
+        audioRoute = .systemDevice(hardwareId: card.hardwareId, latency: latency)
+        return true
+    }
+
+    mutating func setAudioLatency(_ latency: RadioLiteAudioLatency) {
+        guard let hardwareId = audioRoute?.systemDeviceSelection?.hardwareId else { return }
+        audioRoute = .systemDevice(hardwareId: hardwareId, latency: latency)
+    }
+
+    mutating func useExplicitAudioEndpoints() {
+        audioRoute = nil
     }
 
     private func required(_ value: String, field: String) throws -> String {

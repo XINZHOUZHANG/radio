@@ -52,6 +52,7 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var controlToken: String?
     @Published private(set) var controlExpiresAtMs: Int64?
     @Published private(set) var rigState: RadioLiteRigState?
+    @Published private(set) var telemetry: RadioLiteTelemetry?
     @Published private(set) var rigControls: [RadioLiteRigControl] = []
     @Published private(set) var decodeBatches: [RadioLiteDigitalDecodeBatch] = []
     @Published private(set) var callQueue: RadioLiteCallQueueSnapshot?
@@ -116,6 +117,7 @@ final class RadioLiteSession: ObservableObject {
     private var receiveMonitoringIntent = RadioLiteReceiveMonitoringIntent()
     private var rigControlCatalogue = RadioLiteRigControlCatalogue()
     private var noticeState = RadioLiteNoticeState()
+    private var telemetrySubscriptionOwnership: RadioLiteTelemetrySubscriptionOwnership?
 
     private static let addressDefaultsKey = "radio-lite.server-address"
     private static let radioDefaultsKey = "radio-lite.selected-radio"
@@ -204,7 +206,7 @@ final class RadioLiteSession: ObservableObject {
             return
         }
         let authenticationOwnership = authenticationOwnershipState.begin()
-        prepareForAuthentication()
+        await prepareForAuthentication()
         phase = .launching
         isRestoringSession = true
         errorMessage = nil
@@ -219,7 +221,7 @@ final class RadioLiteSession: ObservableObject {
             } catch {
                 return
             }
-            self?.cancelSessionRestore(
+            await self?.cancelSessionRestore(
                 expectedOwnership: authenticationOwnership,
                 message: RadioLiteStartupRestorePolicy.timeoutMessage(
                     serverAddress: self?.serverAddress ?? "上次保存的地址"
@@ -235,9 +237,9 @@ final class RadioLiteSession: ObservableObject {
         isRestoringSession = false
     }
 
-    func cancelSessionRestore() {
+    func cancelSessionRestore() async {
         guard let ownership = authenticationOwnershipState.currentOwnership else { return }
-        cancelSessionRestore(
+        await cancelSessionRestore(
             expectedOwnership: ownership,
             message: "已停止连接上次服务器，请输入可用的服务器地址"
         )
@@ -246,7 +248,7 @@ final class RadioLiteSession: ObservableObject {
     private func cancelSessionRestore(
         expectedOwnership: RadioLiteAuthenticationOwnership,
         message: String
-    ) {
+    ) async {
         guard startupRestoreTask != nil,
               authenticationOwnershipState.isCurrent(expectedOwnership) else { return }
         startupRestoreTask?.cancel()
@@ -254,7 +256,7 @@ final class RadioLiteSession: ObservableObject {
         startupRestoreDeadlineTask?.cancel()
         startupRestoreDeadlineTask = nil
         authenticationOwnershipState.invalidate()
-        prepareForAuthentication()
+        await prepareForAuthentication()
         isRestoringSession = false
         phase = .signedOut
         errorMessage = message
@@ -432,7 +434,7 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
-    func logout() {
+    func logout() async {
         authenticationOwnershipState.invalidate()
         credentialPersistenceRetryTask?.cancel()
         credentialPersistenceRetryTask = nil
@@ -444,6 +446,7 @@ final class RadioLiteSession: ObservableObject {
         if case .browser = credential {
             Task { try? await logoutClient?.logout() }
         }
+        await unsubscribeTelemetry()
         control.disconnect()
         media.disconnect()
         try? credentialStore.delete()
@@ -518,12 +521,16 @@ final class RadioLiteSession: ObservableObject {
         endVoicePTT()
         endTuning(reason: .operatorCancellation)
         let receiveGeneration = suspendReceiveAudio()
+        pollingTask?.cancel()
+        pollingTask = nil
         invalidateRigControlCatalogue()
+        await unsubscribeTelemetry()
         await releaseControl()
         await media.unsubscribe()
         selectedRadioId = radioId
         UserDefaults.standard.set(radioId, forKey: Self.radioDefaultsKey)
         clearRadioState()
+        let telemetryReady = await subscribeTelemetryIfAvailable(radioId: radioId)
         var mediaReady = true
         do {
             do {
@@ -558,6 +565,7 @@ final class RadioLiteSession: ObservableObject {
         if !mediaReady {
             scheduleMediaRetry()
         }
+        if !telemetryReady { startPolling() }
     }
 
     func setFrequency(mhzText: String) async {
@@ -1769,7 +1777,7 @@ final class RadioLiteSession: ObservableObject {
         _ operation: (RadioLiteAuthenticationOwnership) async throws -> Void
     ) async {
         let authenticationOwnership = authenticationOwnershipState.begin()
-        prepareForAuthentication()
+        await prepareForAuthentication()
         phase = .authenticating
         isWorking = true
         errorMessage = nil
@@ -1820,6 +1828,7 @@ final class RadioLiteSession: ObservableObject {
         invalidateRigControlCatalogue()
         intentionalDisconnect = true
         cancelRuntimeTasks()
+        await unsubscribeTelemetry()
         control.disconnect()
         media.disconnect()
         intentionalDisconnect = false
@@ -1848,6 +1857,7 @@ final class RadioLiteSession: ObservableObject {
         let preferred = UserDefaults.standard.string(forKey: Self.radioDefaultsKey)
         selectedRadioId = radios.contains(where: { $0.id == preferred }) ? preferred : radios[0].id
         guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        let telemetryReady = await subscribeTelemetryIfAvailable(radioId: radioId)
         var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
@@ -1889,7 +1899,7 @@ final class RadioLiteSession: ObservableObject {
         }
         try requireCurrentAuthentication(authenticationOwnership)
         phase = .ready
-        startPolling()
+        if !telemetryReady { startPolling() }
         scheduleCredentialRefresh()
         if !mediaReady {
             scheduleMediaRetry()
@@ -1946,6 +1956,12 @@ final class RadioLiteSession: ObservableObject {
             return
         }
         switch value["t"]?.stringValue {
+        case "rig.telemetry":
+            if let sample: RadioLiteTelemetry = value.decoded(),
+               telemetrySubscriptionOwnership?.owns(sample) == true {
+                telemetry = sample
+                rigState = sample.state
+            }
         case "control.alive":
             controlExpiresAtMs = value["expiresAtMs"]?.int64Value
         case "digital.decode.batch":
@@ -2020,6 +2036,55 @@ final class RadioLiteSession: ObservableObject {
                 try? await self.refreshRigState()
             }
         }
+    }
+
+    private func subscribeTelemetryIfAvailable(radioId: String) async -> Bool {
+        do {
+            try await subscribeTelemetry(radioId: radioId)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func subscribeTelemetry(radioId: String) async throws {
+        let ownership = RadioLiteTelemetrySubscriptionOwnership(radioId: radioId)
+        telemetrySubscriptionOwnership = ownership
+        telemetry = nil
+        let commandId = UUID().uuidString
+        do {
+            _ = try await control.request(
+                ownership.subscribeMessage(commandId: commandId),
+                expecting: ["rig.telemetry.subscribed"],
+                commandId: commandId
+            )
+            guard selectedRadioId == radioId,
+                  telemetrySubscriptionOwnership == ownership else {
+                throw CancellationError()
+            }
+        } catch {
+            if telemetrySubscriptionOwnership == ownership {
+                telemetrySubscriptionOwnership = nil
+                telemetry = nil
+            }
+            throw error
+        }
+    }
+
+    private func unsubscribeTelemetry() async {
+        guard let ownership = telemetrySubscriptionOwnership else {
+            telemetry = nil
+            return
+        }
+        telemetrySubscriptionOwnership = nil
+        telemetry = nil
+        guard control.state == .ready else { return }
+        let commandId = UUID().uuidString
+        _ = try? await control.request(
+            ownership.unsubscribeMessage(commandId: commandId),
+            expecting: ["rig.telemetry.unsubscribed"],
+            commandId: commandId
+        )
     }
 
     private func startTransmitHeartbeat(
@@ -2161,6 +2226,8 @@ final class RadioLiteSession: ObservableObject {
         invalidateRigControlCatalogue()
         controlToken = nil
         controlExpiresAtMs = nil
+        telemetrySubscriptionOwnership = nil
+        telemetry = nil
         guard !intentionalDisconnect, phase == .ready else { return }
         presentNotice(
             "连接中断，正在自动重连：\(error.localizedDescription)",
@@ -2207,7 +2274,7 @@ final class RadioLiteSession: ObservableObject {
                             delay = min(30, delay * 1.8)
                             continue
                         case .signOut:
-                            self.signOutAfterCredentialRefreshFailure(
+                            await self.signOutAfterCredentialRefreshFailure(
                                 error,
                                 reconnectOwnership: ownership
                             )
@@ -2255,7 +2322,7 @@ final class RadioLiteSession: ObservableObject {
                         )
                         delay = min(30, delay * 1.8)
                     case .signOut:
-                        self.signOutAfterCredentialRefreshFailure(
+                        await self.signOutAfterCredentialRefreshFailure(
                             error,
                             reconnectOwnership: ownership
                         )
@@ -2292,7 +2359,7 @@ final class RadioLiteSession: ObservableObject {
     private func signOutAfterCredentialRefreshFailure(
         _ error: Error,
         reconnectOwnership: RadioLiteReconnectOwnership
-    ) {
+    ) async {
         guard reconnectOwnershipState.isCurrent(reconnectOwnership) else { return }
         let storedLogin = server.flatMap { server in
             credential.map { credential in
@@ -2312,6 +2379,7 @@ final class RadioLiteSession: ObservableObject {
         _ = stopLocalTransmit()
         stopReceiveAudio()
         cancelRuntimeTasks()
+        await unsubscribeTelemetry()
         control.disconnect()
         media.disconnect()
         clearAuthenticatedState()
@@ -2332,6 +2400,7 @@ final class RadioLiteSession: ObservableObject {
         let receiveGeneration = suspendReceiveAudio()
         invalidateRigControlCatalogue()
         intentionalDisconnect = true
+        await unsubscribeTelemetry()
         control.disconnect()
         media.disconnect()
         intentionalDisconnect = false
@@ -2344,6 +2413,7 @@ final class RadioLiteSession: ObservableObject {
         guard let radioId = selectedRadioId, radios.contains(where: { $0.id == radioId }) else {
             throw RadioLiteSessionError.radioUnavailable
         }
+        let telemetryReady = await subscribeTelemetryIfAvailable(radioId: radioId)
         var mediaReady = true
         do {
             try await media.subscribe(radioId: radioId)
@@ -2386,7 +2456,7 @@ final class RadioLiteSession: ObservableObject {
             reconnectOwnership: reconnectOwnership
         )
         try requireCurrentReconnect(reconnectOwnership)
-        startPolling()
+        if !telemetryReady { startPolling() }
         return mediaReady
     }
 
@@ -2621,7 +2691,7 @@ final class RadioLiteSession: ObservableObject {
                 clearReconnect(ownership)
                 scheduleReconnect()
             case .signOut:
-                signOutAfterCredentialRefreshFailure(error, reconnectOwnership: ownership)
+                await signOutAfterCredentialRefreshFailure(error, reconnectOwnership: ownership)
             }
             return
         }
@@ -2658,7 +2728,7 @@ final class RadioLiteSession: ObservableObject {
                 clearReconnect(ownership)
                 scheduleReconnect()
             case .signOut:
-                signOutAfterCredentialRefreshFailure(error, reconnectOwnership: ownership)
+                await signOutAfterCredentialRefreshFailure(error, reconnectOwnership: ownership)
             }
         }
     }
@@ -2751,13 +2821,14 @@ final class RadioLiteSession: ObservableObject {
         receiveAudioStartupOwnership = nil
     }
 
-    private func prepareForAuthentication() {
+    private func prepareForAuthentication() async {
         credentialPersistenceRetryTask?.cancel()
         credentialPersistenceRetryTask = nil
         intentionalDisconnect = true
         _ = stopLocalTransmit()
         stopReceiveAudio()
         cancelRuntimeTasks()
+        await unsubscribeTelemetry()
         control.disconnect()
         media.disconnect()
         clearAuthenticatedState()
@@ -2776,6 +2847,8 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
+        telemetrySubscriptionOwnership = nil
+        telemetry = nil
         invalidateRigControlCatalogue()
         decodeBatches = []
         callQueue = nil
@@ -2792,6 +2865,8 @@ final class RadioLiteSession: ObservableObject {
         controlToken = nil
         controlExpiresAtMs = nil
         rigState = nil
+        telemetrySubscriptionOwnership = nil
+        telemetry = nil
         invalidateRigControlCatalogue()
         decodeBatches = []
         callQueue = nil

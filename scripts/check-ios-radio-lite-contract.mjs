@@ -38,6 +38,90 @@ const socket = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteWebSocket
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
 const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
 
+function controlTelemetryContract(radioId, subscribeCommandId, unsubscribeCommandId) {
+  return {
+    subscribe: { t: 'rig.telemetry.subscribe', radioId, commandId: subscribeCommandId },
+    subscribed: { t: 'rig.telemetry.subscribed', radioId, commandId: subscribeCommandId },
+    unsubscribe: { t: 'rig.telemetry.unsubscribe', radioId, commandId: unsubscribeCommandId },
+    unsubscribed: { t: 'rig.telemetry.unsubscribed', radioId, commandId: unsubscribeCommandId },
+  };
+}
+
+function consumeTelemetryFixture(selectedRadioId, message) {
+  assert.equal(message.t, 'rig.telemetry');
+  if (message.radioId !== selectedRadioId) return undefined;
+  assert.equal(typeof message.sampledAtMs, 'number');
+  assert.equal(typeof message.state?.ptt, 'boolean');
+  assert(Array.isArray(message.availableMeters));
+  const meters = message.meters ?? {};
+  assert(!Object.hasOwn(meters, 'rfPower'), 'RFPOWER setting must not be consumed as measured power');
+  return {
+    radioId: message.radioId,
+    sampledAtMs: message.sampledAtMs,
+    rfPowerWatts: meters.rfPowerWatts,
+    swr: meters.swr,
+    actualPowerAvailable: message.availableMeters.includes('RFPOWER_METER_WATTS')
+      || message.availableMeters.includes('RFPOWER_METER'),
+  };
+}
+
+function consumeDiscoveryFixture(message) {
+  return {
+    ...message,
+    audioCards: (message.audioCards ?? []).filter((card) =>
+      card.transport === 'usb' && card.complete && card.input !== undefined && card.output !== undefined),
+  };
+}
+
+const telemetryProtocol = controlTelemetryContract('main', 'subscribe-1', 'unsubscribe-1');
+assert.deepEqual(telemetryProtocol.subscribe, {
+  t: 'rig.telemetry.subscribe', radioId: 'main', commandId: 'subscribe-1',
+});
+assert.deepEqual(telemetryProtocol.subscribed, {
+  t: 'rig.telemetry.subscribed', radioId: 'main', commandId: 'subscribe-1',
+});
+assert.deepEqual(telemetryProtocol.unsubscribe, {
+  t: 'rig.telemetry.unsubscribe', radioId: 'main', commandId: 'unsubscribe-1',
+});
+assert.deepEqual(telemetryProtocol.unsubscribed, {
+  t: 'rig.telemetry.unsubscribed', radioId: 'main', commandId: 'unsubscribe-1',
+});
+const transmitTelemetry = consumeTelemetryFixture('main', {
+  t: 'rig.telemetry', radioId: 'main', sampledAtMs: 1787700000000,
+  state: { frequencyHz: 14074000, mode: 'USB', passbandHz: 3000, ptt: true },
+  meters: { rfPowerWatts: 37.5, swr: 1.4, alcRatio: 0.32 },
+  availableMeters: ['SWR', 'ALC', 'RFPOWER', 'RFPOWER_METER_WATTS'],
+});
+assert.deepEqual(transmitTelemetry, {
+  radioId: 'main', sampledAtMs: 1787700000000, rfPowerWatts: 37.5, swr: 1.4,
+  actualPowerAvailable: true,
+});
+assert.equal(consumeTelemetryFixture('main', {
+  t: 'rig.telemetry', radioId: 'main', sampledAtMs: 1787700000000,
+  state: { frequencyHz: 14074000, mode: 'USB', passbandHz: 3000, ptt: true },
+  meters: {}, availableMeters: ['RFPOWER'],
+})?.actualPowerAvailable, false);
+assert.equal(consumeTelemetryFixture('backup', {
+  t: 'rig.telemetry', radioId: 'main', sampledAtMs: 1787700000000,
+  state: { frequencyHz: 14074000, mode: 'USB', passbandHz: 3000, ptt: true },
+  meters: {}, availableMeters: [],
+}), undefined);
+const discoveryFixture = consumeDiscoveryFixture({
+  audioInputs: [], audioOutputs: [],
+  audioCards: [{
+    hardwareId: 'usb:1234:5678:SN42', label: 'USB Audio CODEC', transport: 'usb', complete: true,
+    input: { backend: 'alsa', direction: 'input', id: 'hw:3,0', label: 'USB RX' },
+    output: { backend: 'alsa', direction: 'output', id: 'hw:3,0', label: 'USB TX' },
+  }, {
+    hardwareId: 'unknown', label: 'Incomplete', transport: 'unknown', complete: false,
+  }],
+});
+assert.deepEqual(discoveryFixture.audioCards.map((card) => card.hardwareId), ['usb:1234:5678:SN42']);
+assert.deepEqual(consumeDiscoveryFixture({ audioInputs: [], audioOutputs: [] }).audioCards, []);
+
+const telemetry = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteTelemetry.swift');
+const telemetryStrip = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteTelemetryStrip.swift');
+
 assert(audioRuntimePolicy.includes('struct AudioBackgroundRuntimeDecision'));
 assert(audioRuntimePolicy.includes('backgroundDecision(receiveAudioDesired:'));
 assert(audioRuntimePolicy.includes('allowsReceiveRecovery('));
@@ -364,7 +448,15 @@ assert(protocol.includes('PTT forced to `None`'));
 assert(!serverEntrypoint.includes('finally(() => process.exit(0))'));
 assert(serverEntrypoint.includes('process.exit(1)'));
 assert(serverEntrypoint.includes('shutdown cleanup could not be confirmed'));
+assert(telemetry.includes('RadioLiteTelemetrySubscriptionOwnership'));
+assert(telemetry.includes('RFPOWER_METER_WATTS'));
+assert(session.includes('@Published private(set) var telemetry: RadioLiteTelemetry?'));
+assert(session.includes('await unsubscribeTelemetry()'));
+assert(session.includes('try await subscribeTelemetry('));
+assert(telemetryStrip.includes('frame(height: 52)'));
+assert(deviceConfiguration.includes('audioCards = try container.decodeIfPresent'));
+assert(deviceConfigurationView.includes('isSelectableUSBCard'));
 
 process.stdout.write(
-  `Verified ${httpPaths.length} HTTP paths, ${controlMessages.length} control messages, media messages, and the binary frame contract.\n`,
+  `Verified ${httpPaths.length} HTTP paths, ${controlMessages.length} control messages, telemetry/audio-card fixtures, media messages, and the binary frame contract.\n`,
 );

@@ -148,6 +148,7 @@ struct RadioLiteRadioProfile: Codable, Identifiable, Equatable, Sendable {
     let ptt: RadioLitePTTConfiguration
     let audioInput: RadioLiteAudioEndpoint
     let audioOutput: RadioLiteAudioEndpoint
+    let audioRoute: RadioLiteAudioRoute?
     let station: RadioLiteStationIdentity
     let hardwareTxEnabled: Bool
 
@@ -159,6 +160,7 @@ struct RadioLiteRadioProfile: Codable, Identifiable, Equatable, Sendable {
         ptt: RadioLitePTTConfiguration,
         audioInput: RadioLiteAudioEndpoint,
         audioOutput: RadioLiteAudioEndpoint,
+        audioRoute: RadioLiteAudioRoute? = nil,
         station: RadioLiteStationIdentity,
         hardwareTxEnabled: Bool
     ) {
@@ -169,12 +171,13 @@ struct RadioLiteRadioProfile: Codable, Identifiable, Equatable, Sendable {
         self.ptt = ptt
         self.audioInput = audioInput
         self.audioOutput = audioOutput
+        self.audioRoute = audioRoute
         self.station = station
         self.hardwareTxEnabled = hardwareTxEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, hamlibModelId, connection, ptt, audioInput, audioOutput, station, hardwareTxEnabled
+        case id, name, hamlibModelId, connection, ptt, audioInput, audioOutput, audioRoute, station, hardwareTxEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -188,6 +191,7 @@ struct RadioLiteRadioProfile: Codable, Identifiable, Equatable, Sendable {
             ?? .init(method: decodedConnection.kind == "hamlib-dummy" ? .none : .rig)
         audioInput = try container.decode(RadioLiteAudioEndpoint.self, forKey: .audioInput)
         audioOutput = try container.decode(RadioLiteAudioEndpoint.self, forKey: .audioOutput)
+        audioRoute = try container.decodeIfPresent(RadioLiteAudioRoute.self, forKey: .audioRoute)
         station = try container.decode(RadioLiteStationIdentity.self, forKey: .station)
         hardwareTxEnabled = try container.decode(Bool.self, forKey: .hardwareTxEnabled)
     }

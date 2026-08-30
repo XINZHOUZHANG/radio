@@ -66,7 +66,7 @@ struct RootView: View {
                         .foregroundStyle(RadioPalette.muted)
                         .multilineTextAlignment(.center)
                     Button("换服务器") {
-                        session.cancelSessionRestore()
+                        Task { await session.cancelSessionRestore() }
                     }
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
                 }
@@ -93,7 +93,7 @@ struct RootView: View {
             } description: {
                 Text(message)
             } actions: {
-                Button("返回登录") { session.logout() }
+                Button("返回登录") { Task { await session.logout() } }
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
             }
         }

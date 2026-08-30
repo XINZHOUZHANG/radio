@@ -177,7 +177,7 @@ struct RadioLiteSettingsView: View {
             }
         }
         .confirmationDialog("确定退出登录？", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("退出并删除凭据", role: .destructive) { session.logout() }
+            Button("退出并删除凭据", role: .destructive) { Task { await session.logout() } }
             Button("取消", role: .cancel) {}
         }
     }

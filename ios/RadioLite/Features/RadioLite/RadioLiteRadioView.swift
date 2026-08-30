@@ -18,6 +18,10 @@ struct RadioLiteRadioView: View {
             VStack(spacing: 10) {
                 statusStrip
                 frequencyPanel
+                RadioLiteTelemetryStrip(
+                    telemetry: session.telemetry,
+                    isTransmitting: isTransmitting
+                )
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 10)

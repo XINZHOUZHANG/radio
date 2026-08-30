@@ -157,6 +157,12 @@ final class RadioLiteDeviceConfigurationTests: XCTestCase {
           "audioOutputs":[
             {"backend":"pulse","direction":"output","id":"alsa_output.usb","label":"USB Audio TX"}
           ],
+          "audioCards":[{
+            "hardwareId":"usb:1234:5678:SN42","label":"USB Audio CODEC (SN42)",
+            "transport":"usb","complete":true,
+            "input":{"backend":"alsa","direction":"input","id":"hw:1,0","label":"USB Audio RX"},
+            "output":{"backend":"pulse","direction":"output","id":"alsa_output.usb","label":"USB Audio TX"}
+          }],
           "pttMethods":["RIG","DTR","RTS","Parallel","CM108","GPIO","GPION","None"],
           "baudRates":[9600,38400,115200],
           "warnings":[]
@@ -169,8 +175,85 @@ final class RadioLiteDeviceConfigurationTests: XCTestCase {
         XCTAssertEqual(discovery.serialDevices.first?.path, "/dev/serial/by-id/radio")
         XCTAssertEqual(discovery.audioInputs.first?.endpoint, .init(backend: "alsa", id: "hw:1,0", label: "USB Audio RX"))
         XCTAssertEqual(discovery.audioOutputs.first?.endpoint.backend, "pulse")
+        XCTAssertEqual(discovery.audioCards.first?.hardwareId, "usb:1234:5678:SN42")
+        XCTAssertTrue(discovery.audioCards.first?.isSelectableUSBCard == true)
         XCTAssertEqual(discovery.pttMethods, RadioLitePTTMethod.allCases)
         XCTAssertEqual(discovery.baudRates, [9_600, 38_400, 115_200])
+    }
+
+    func testLegacyHardwareDiscoveryDefaultsMissingAudioCardsToEmpty() throws {
+        let payload = Data(#"""
+        {
+          "hamlibModels":[],"curatedPresets":[],"serialDevices":[],
+          "audioInputs":[],"audioOutputs":[],"pttMethods":["RIG"],
+          "baudRates":[115200],"warnings":[]
+        }
+        """#.utf8)
+
+        let discovery = try JSONDecoder().decode(RadioLiteHardwareDiscovery.self, from: payload)
+
+        XCTAssertEqual(discovery.audioCards, [])
+    }
+
+    func testAudioRouteRoundTripsAndLegacyProfileStillDecodes() throws {
+        let routed = Data(#"""
+        {
+          "id":"main","name":"IC-7300","hamlibModelId":3073,
+          "connection":{"kind":"managed-serial","devicePath":"/dev/ttyUSB0","baudRate":115200},
+          "ptt":{"method":"RIG"},
+          "audioInput":{"backend":"alsa","id":"hw:1,0"},
+          "audioOutput":{"backend":"alsa","id":"hw:1,0"},
+          "audioRoute":{"kind":"system-device","hardwareId":"usb:1234:5678:SN42","latency":"stable"},
+          "station":{"callsign":"BI1ABC"},"hardwareTxEnabled":false
+        }
+        """#.utf8)
+        let profile = try JSONDecoder().decode(RadioLiteRadioProfile.self, from: routed)
+
+        XCTAssertEqual(
+            profile.audioRoute,
+            .systemDevice(hardwareId: "usb:1234:5678:SN42", latency: .stable)
+        )
+        let encoded = try JSONEncoder().encode(profile)
+        XCTAssertEqual(try JSONDecoder().decode(RadioLiteRadioProfile.self, from: encoded), profile)
+
+        let legacy = try JSONDecoder().decode(
+            RadioLiteRadioProfile.self,
+            from: Data(#"""
+            {
+              "id":"legacy","name":"Legacy","hamlibModelId":1,
+              "connection":{"kind":"hamlib-dummy"},
+              "audioInput":{"backend":"alsa","id":"synthetic-rx"},
+              "audioOutput":{"backend":"alsa","id":"synthetic-tx"},
+              "station":{"callsign":"N0CALL"},"hardwareTxEnabled":false
+            }
+            """#.utf8)
+        )
+        XCTAssertNil(legacy.audioRoute)
+    }
+
+    func testSelectingCompleteUSBCardUpdatesBothEndpointsAndStableRoute() throws {
+        let profile = RadioLiteRadioProfile(
+            id: "main", name: "IC-7300", hamlibModelId: 3_073,
+            connection: .init(kind: "managed-serial", devicePath: "/dev/ttyUSB0", baudRate: 115_200, host: nil, port: nil),
+            ptt: .init(method: .rig),
+            audioInput: .init(backend: "alsa", id: "old-in", label: nil),
+            audioOutput: .init(backend: "alsa", id: "old-out", label: nil),
+            station: .init(callsign: "BI1ABC", grid: nil), hardwareTxEnabled: false
+        )
+        var draft = RadioLiteRadioConfigurationDraft(profile: profile)
+        let card = RadioLiteAudioCard(
+            hardwareId: "usb:1234:5678:SN42", label: "USB Audio CODEC", transport: "usb", complete: true,
+            input: .init(backend: "alsa", direction: "input", id: "hw:3,0", label: "USB RX"),
+            output: .init(backend: "alsa", direction: "output", id: "hw:3,0", label: "USB TX")
+        )
+
+        XCTAssertTrue(draft.selectAudioCard(card))
+        draft.setAudioLatency(.low)
+        let saved = try draft.makeProfile()
+
+        XCTAssertEqual(saved.audioInput.id, "hw:3,0")
+        XCTAssertEqual(saved.audioOutput.id, "hw:3,0")
+        XCTAssertEqual(saved.audioRoute, .systemDevice(hardwareId: card.hardwareId, latency: .low))
     }
 
     func testPTTMethodsExposeOnlyApplicableAdvancedFields() {

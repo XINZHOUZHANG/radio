@@ -138,22 +138,52 @@ struct RadioLiteDeviceConfigurationView: View {
                 }
 
                 Section {
-                    RadioLiteAudioEndpointEditor(
-                        title: "音频输入（电台 → iPhone）",
-                        endpoint: $draft.audioInput,
-                        devices: discovery?.audioInputs ?? [],
-                        focus: $editingText
-                    )
-                    RadioLiteAudioEndpointEditor(
-                        title: "音频输出（iPhone/FT8 → 电台）",
-                        endpoint: $draft.audioOutput,
-                        devices: discovery?.audioOutputs ?? [],
-                        focus: $editingText
-                    )
+                    Picker("USB 声卡", selection: audioCardSelection) {
+                        Text("手动输入/输出端点").tag("")
+                        if let selected = draft.audioRoute?.systemDeviceSelection?.hardwareId,
+                           !selectableAudioCards.contains(where: { $0.hardwareId == selected }) {
+                            Text("当前设备未连接").tag(selected)
+                        }
+                        ForEach(selectableAudioCards) { card in
+                            Text(card.label).tag(card.hardwareId)
+                        }
+                    }
+
+                    if selectableAudioCards.isEmpty {
+                        Label("未发现同时具有输入和输出的 USB 声卡", systemImage: "waveform.badge.exclamationmark")
+                            .font(.footnote)
+                            .foregroundStyle(RadioPalette.muted)
+                    }
+
+                    DisclosureGroup("高级音频设置") {
+                        if draft.audioRoute?.systemDeviceSelection != nil {
+                            Picker("延迟策略", selection: audioLatencySelection) {
+                                ForEach(RadioLiteAudioLatency.allCases) { latency in
+                                    Text(latency.label).tag(latency)
+                                }
+                            }
+                        } else {
+                            Text("手动端点模式使用服务器现有音频行为；选择 USB 声卡后可设置延迟策略。")
+                                .font(.caption)
+                                .foregroundStyle(RadioPalette.muted)
+                        }
+                        RadioLiteAudioEndpointEditor(
+                            title: "音频输入（电台 → iPhone）",
+                            endpoint: explicitAudioEndpoint(\.audioInput),
+                            devices: discovery?.audioInputs ?? [],
+                            focus: $editingText
+                        )
+                        RadioLiteAudioEndpointEditor(
+                            title: "音频输出（iPhone/FT8 → 电台）",
+                            endpoint: explicitAudioEndpoint(\.audioOutput),
+                            devices: discovery?.audioOutputs ?? [],
+                            focus: $editingText
+                        )
+                    }
                 } header: {
                     Text("服务器音频端口")
                 } footer: {
-                    Text("列表来自服务器的 PulseAudio/PipeWire 或 ALSA；设备未被发现时也可手动填写 ID。")
+                    Text("普通设置按稳定硬件标识选择一张完整 USB 声卡；高级设置可改用明确端点，并选择低延迟、平衡或稳定策略。")
                 }
 
                 if let warnings = discovery?.warnings, !warnings.isEmpty {
@@ -331,6 +361,45 @@ struct RadioLiteDeviceConfigurationView: View {
             return "\(model.displayName) · \(model.modelId)"
         }
         return draft.hamlibModelId == 1 ? "Hamlib Dummy · 1" : "Hamlib ID \(draft.hamlibModelId)"
+    }
+
+    private var selectableAudioCards: [RadioLiteAudioCard] {
+        (discovery?.audioCards ?? []).filter(\.isSelectableUSBCard)
+    }
+
+    private var audioCardSelection: Binding<String> {
+        Binding(
+            get: { draft.audioRoute?.systemDeviceSelection?.hardwareId ?? "" },
+            set: { hardwareId in
+                guard !hardwareId.isEmpty else {
+                    draft.useExplicitAudioEndpoints()
+                    return
+                }
+                guard let card = selectableAudioCards.first(where: { $0.hardwareId == hardwareId }) else {
+                    return
+                }
+                draft.selectAudioCard(card)
+            }
+        )
+    }
+
+    private var audioLatencySelection: Binding<RadioLiteAudioLatency> {
+        Binding(
+            get: { draft.audioRoute?.systemDeviceSelection?.latency ?? .balanced },
+            set: { draft.setAudioLatency($0) }
+        )
+    }
+
+    private func explicitAudioEndpoint(
+        _ keyPath: WritableKeyPath<RadioLiteRadioConfigurationDraft, RadioLiteAudioEndpoint>
+    ) -> Binding<RadioLiteAudioEndpoint> {
+        Binding(
+            get: { draft[keyPath: keyPath] },
+            set: { endpoint in
+                draft[keyPath: keyPath] = endpoint
+                draft.useExplicitAudioEndpoints()
+            }
+        )
     }
 
     @ViewBuilder
