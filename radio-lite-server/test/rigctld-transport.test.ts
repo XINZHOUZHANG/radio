@@ -48,6 +48,29 @@ test("receive ordinary commands begin at least 500 ms apart", async (context) =>
   );
 });
 
+test("immediate-budget safety OFF stays active while the yielded ordinary request is requeued", async (context) => {
+  const fixture = deferredTransportFixture();
+  context.after(async () => fixture.transport.close());
+
+  const ordinary = fixture.transport.request("\\get_freq");
+  const off = fixture.transport.request("\\set_ptt 0", { priority: "safety", source: "ptt-off" });
+
+  await fixture.socket.waitForWrite("\\set_ptt 0\n");
+  await nextTurn();
+  assert.deepEqual(fixture.socket.writes, ["\\set_ptt 0\n"],
+    "a yielded ordinary continuation must not replace active safety OFF");
+  fixture.socket.replyActive();
+  await off;
+  await fixture.socket.waitForWrite("\\get_freq\n");
+  fixture.socket.replyActive("Frequency: 14074000");
+  await ordinary;
+
+  assert.deepEqual(
+    fixture.transport.commandTrace().map(({ command }) => command),
+    ["\\set_ptt 0", "\\get_freq"],
+  );
+});
+
 test("emergency OFF cancels a pending ordinary budget wait", async (context) => {
   const clock = new TransportClock();
   const fixture = deferredTransportFixture({ now: clock.now, delay: clock.delay });
@@ -978,6 +1001,10 @@ async function assertRejectsOnNextTurn(
   ]);
   assert.equal(outcome.kind, "rejected", "queue overflow must reject without waiting for CAT budget");
   if (outcome.kind === "rejected") assert.ok(outcome.error instanceof expected);
+}
+
+async function nextTurn(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 class TransportClock {

@@ -13,7 +13,7 @@ export class CatCommandLimiter {
   readonly #now: () => number;
   readonly #delay: CatCommandDelay;
   #mode: CatCommandMode = "receive";
-  #nextStartAtMs = 0;
+  #lastOrdinaryStartAtMs: number | null = null;
   #modeRevision = 0;
   #modeDelayAbort = new AbortController();
 
@@ -33,9 +33,12 @@ export class CatCommandLimiter {
   async waitForBudget(signal?: AbortSignal): Promise<void> {
     while (true) {
       signal?.throwIfAborted();
-      const remainingMs = this.#nextStartAtMs - this.#now();
+      const now = this.#now();
+      const remainingMs = this.#lastOrdinaryStartAtMs === null
+        ? 0
+        : this.#lastOrdinaryStartAtMs + intervalFor(this.#mode) - now;
       if (remainingMs <= 0) {
-        this.#nextStartAtMs = this.#now() + intervalFor(this.#mode);
+        this.#lastOrdinaryStartAtMs = now;
         return;
       }
       const revision = this.#modeRevision;

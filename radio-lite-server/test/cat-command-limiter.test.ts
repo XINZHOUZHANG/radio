@@ -38,6 +38,25 @@ test("transmit budget permits ordinary CAT starts 250 ms apart", async () => {
   await second;
 });
 
+test("receive transition recomputes a pending transmit budget from the last ordinary start", async () => {
+  const clock = new VirtualClock();
+  const limiter = new CatCommandLimiter({ now: clock.now, delay: clock.delay });
+  limiter.setMode("transmit");
+  await limiter.waitForBudget();
+  let started = false;
+  const pending = limiter.waitForBudget().then(() => { started = true; });
+
+  limiter.setMode("receive");
+  await flush();
+  await clock.advanceBy(250);
+  assert.equal(started, false, "a stale transmit deadline would exceed the receive CAT budget");
+  await clock.advanceBy(249);
+  assert.equal(started, false);
+  await clock.advanceBy(1);
+  await pending;
+  assert.equal(started, true);
+});
+
 test("confirmed PTT readback changes the injected CAT budget only after physical evidence", async () => {
   const modes: Array<"receive" | "transmit"> = [];
   let ptt = true;

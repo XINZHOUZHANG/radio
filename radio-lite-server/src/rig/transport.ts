@@ -265,13 +265,21 @@ export class RigctldTransport {
     if (this.#waitingNormal !== request || request.settled) return;
     this.#waitingNormal = null;
     if (this.#ordinaryBudgetAbort === controller) this.#ordinaryBudgetAbort = null;
-    if (this.#closed) {
-      this.#rejectQueued(request, new RigTransportError("rigctld transport closed"));
+    if (
+      controller.signal.aborted ||
+      this.#active !== null ||
+      this.#safetyQueue.length > 0
+    ) {
+      if (this.#closed) {
+        this.#rejectQueued(request, new RigTransportError("rigctld transport closed"));
+      } else {
+        this.#normalQueue.unshift(request);
+        this.#pump();
+      }
       return;
     }
-    if (this.#safetyQueue.length > 0) {
-      this.#normalQueue.unshift(request);
-      this.#pump();
+    if (this.#closed) {
+      this.#rejectQueued(request, new RigTransportError("rigctld transport closed"));
       return;
     }
     this.#start(request);
