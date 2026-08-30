@@ -325,6 +325,7 @@ export class RadioLiteService {
     let authenticatedPrincipalId: string | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let safetyUnsubscribe: (() => void) | null = null;
+    const telemetrySubscriptions = new Map<string, () => void>();
     let commandTail: Promise<void> = Promise.resolve();
     let mediaTail: Promise<void> = Promise.resolve();
     const authTimer = setTimeout(() => {
@@ -480,8 +481,22 @@ export class RadioLiteService {
         return;
       }
       commandTail = commandTail.then(
-        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId, principalId),
-        () => this.#handleControlMessage(webSocket, message, user, connectionOwnerId, principalId),
+        () => this.#handleControlMessage(
+          webSocket,
+          message,
+          user,
+          connectionOwnerId,
+          principalId,
+          telemetrySubscriptions,
+        ),
+        () => this.#handleControlMessage(
+          webSocket,
+          message,
+          user,
+          connectionOwnerId,
+          principalId,
+          telemetrySubscriptions,
+        ),
       );
     });
 
@@ -492,6 +507,8 @@ export class RadioLiteService {
       }
       safetyUnsubscribe?.();
       safetyUnsubscribe = null;
+      for (const unsubscribe of telemetrySubscriptions.values()) unsubscribe();
+      telemetrySubscriptions.clear();
       this.#webSockets.delete(webSocket);
       this.#controlWebSockets.delete(webSocket);
       if (channel === "media") {
@@ -596,6 +613,7 @@ export class RadioLiteService {
     user: PublicUser,
     ownerId: string,
     principalId: string,
+    telemetrySubscriptions: Map<string, () => void>,
   ): Promise<void> {
     let requestType = "unknown";
     let commandId: string | undefined;
@@ -620,6 +638,35 @@ export class RadioLiteService {
 
       const radioId = messageText(message.radioId, "radioId", 32);
       const runtime = await this.#runtimes.get(radioId);
+      if (message.t === "rig.telemetry.subscribe") {
+        exactMessageKeys(message, ["t", "radioId", "commandId"], ["commandId"]);
+        telemetrySubscriptions.get(radioId)?.();
+        telemetrySubscriptions.set(radioId, runtime.telemetry.subscribe((telemetry) => {
+          if (
+            webSocket.readyState === WebSocket.OPEN &&
+            webSocket.bufferedAmount <= 256 * 1_024
+          ) {
+            sendWebSocketJson(webSocket, { t: "rig.telemetry", ...telemetry });
+          }
+        }));
+        sendWebSocketJson(webSocket, {
+          t: "rig.telemetry.subscribed",
+          radioId,
+          commandId,
+        });
+        return;
+      }
+      if (message.t === "rig.telemetry.unsubscribe") {
+        exactMessageKeys(message, ["t", "radioId", "commandId"], ["commandId"]);
+        telemetrySubscriptions.get(radioId)?.();
+        telemetrySubscriptions.delete(radioId);
+        sendWebSocketJson(webSocket, {
+          t: "rig.telemetry.unsubscribed",
+          radioId,
+          commandId,
+        });
+        return;
+      }
       if (message.t === "control.acquire") {
         exactMessageKeys(message, ["t", "radioId", "force"], ["force"]);
         if (message.force !== undefined && typeof message.force !== "boolean") {

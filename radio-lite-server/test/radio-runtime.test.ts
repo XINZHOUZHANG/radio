@@ -35,11 +35,13 @@ class FakeRig implements RadioDriver {
     ["level:AF", 0.4],
   ]);
   readonly events: string[] = [];
+  readStateCalls = 0;
+  readControlsCalls = 0;
 
   async initialize() {}
   async close() {}
   async capabilities() { return { canTransmit: true, supportsInternalTuner: true }; }
-  async readState() { return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
+  async readState() { this.readStateCalls += 1; return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
   async readTelemetry(_mode: "receive" | "transmit") { return {}; }
   async setFrequency(value: number) { this.frequencyHz = value; this.events.push(`frequency:${value}`); return value; }
   async setMode(value: string, passband = 0) { this.mode = value; this.passbandHz = passband || 2_400; this.events.push(`mode:${value}`); return { mode: this.mode, passbandHz: this.passbandHz }; }
@@ -63,6 +65,7 @@ class FakeRig implements RadioDriver {
     this.events.push(`tuner-write:${value}`);
   }
   async readControls(): Promise<RadioControl[]> {
+    this.readControlsCalls += 1;
     return [...this.controls].map(([id, value]) => ({
       id,
       kind: "level" as const,
@@ -89,6 +92,35 @@ class FakeRig implements RadioDriver {
   }
 }
 
+test("runtime legacy reads and confirmed writes share the telemetry cache and control catalogue", async (context) => {
+  const rig = new FakeRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operatorUser = user("operator-a", "operator", true);
+  const control = await runtime.acquireControl("device-a", operatorUser);
+
+  assert.deepEqual(await runtime.readState(), await runtime.readState());
+  assert.equal(rig.readStateCalls, 1);
+  assert.deepEqual(await runtime.readControls(), await runtime.readControls());
+  assert.equal(rig.readControlsCalls, 1);
+
+  await runtime.setFrequency("device-a", control.lease.token, 7_074_000);
+  await runtime.setMode("device-a", control.lease.token, "PKTUSB", 3_000);
+  await runtime.setControl("device-a", control.lease.token, "level:AF", 0.25);
+  const controlReadsAfterWrite = rig.readControlsCalls;
+
+  assert.deepEqual(runtime.telemetry.snapshot()?.state, {
+    frequencyHz: 7_074_000,
+    mode: "PKTUSB",
+    passbandHz: 3_000,
+    ptt: false,
+  });
+  assert.equal((await runtime.readControls()).find((value) => value.id === "level:AF")?.value, 0.25);
+  assert.equal(rig.readStateCalls, 1);
+  assert.equal(rig.readControlsCalls, controlReadsAfterWrite);
+});
+
 class DeferredControlRig extends FakeRig {
   readonly controlWriteStarted = deferred<void>();
   readonly allowControlWrite = deferred<void>();
@@ -104,6 +136,17 @@ class DeferredControlRig extends FakeRig {
     this.controls.set(id, value);
     this.events.push(`control:${id}:${value}`);
     return { ...control, value };
+  }
+}
+
+class DeferredTelemetryRig extends FakeRig {
+  readonly telemetryReadStarted = deferred<void>();
+  readonly allowTelemetryRead = deferred<void>();
+
+  override async readState() {
+    this.telemetryReadStarted.resolve();
+    await this.allowTelemetryRead.promise;
+    return super.readState();
   }
 }
 
@@ -181,6 +224,9 @@ class RecordingHamlibRequester {
     }
     if (name === "get_ptt") {
       return rigResponse(name, { PTT: this.ptt ? "1" : "0" });
+    }
+    if (command === "\\get_level ?") {
+      return rigResponse(name, { Level: "STRENGTH SWR ALC RFPOWER_METER_WATTS" });
     }
     if (command === "\\vfo_op ?") {
       return rigResponse(name, { "Mem/VFO Op": this.vfoOperations });
@@ -266,7 +312,7 @@ test("receive-only PTT None runtime starts without treating display cache as evi
 
   await runtime.initialize();
 
-  assert.deepEqual(requester.commands, ["\\get_ptt"]);
+  assert.deepEqual(requester.commands, ["\\get_level ?", "\\get_ptt"]);
   const operator = user("receive-only", "operator", true);
   const control = await runtime.acquireControl("receive-device", operator);
   await assert.rejects(
@@ -274,7 +320,7 @@ test("receive-only PTT None runtime starts without treating display cache as evi
     HardwareTransmitDisabledError,
   );
   await runtime.close();
-  assert.deepEqual(requester.commands, ["\\get_ptt"]);
+  assert.deepEqual(requester.commands, ["\\get_level ?", "\\get_ptt"]);
 });
 
 test("runtime voice dekey sends one OFF write and one strict PTT read", async () => {
@@ -690,6 +736,36 @@ test("runtime close still cleans dependencies and reports an uncertain de-key", 
   assert.equal(dependencyCloseCount, 1);
   await assert.rejects(runtime.close(), RadioRuntimeCleanupUncertainError);
   assert.equal(dependencyCloseCount, 1, "idempotent close must preserve the first failure");
+});
+
+test("runtime close dekeys before waiting for telemetry and drains it before dependencies", async () => {
+  const rig = new DeferredTelemetryRig();
+  let dependenciesClosed = false;
+  const runtime = new RadioRuntime(profile(true), rig, async () => {
+    dependenciesClosed = true;
+  });
+  await runtime.initialize();
+  const stateRead = runtime.readState();
+  void stateRead.catch(() => undefined);
+  await rig.telemetryReadStarted.promise;
+  const operatorUser = user("telemetry-close", "operator", true);
+  const control = await runtime.acquireControl("telemetry-close-device", operatorUser);
+  await runtime.startTransmit(
+    "telemetry-close-device",
+    operatorUser,
+    control.lease.token,
+    "voice",
+  );
+  rig.events.length = 0;
+
+  const closing = runtime.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(rig.events, ["ptt-write:false", "ptt-read:false"]);
+  assert.equal(dependenciesClosed, false);
+  rig.allowTelemetryRead.resolve();
+  await closing;
+  assert.equal(dependenciesClosed, true);
 });
 
 test("runtime registry waits for invalidated resources to close before creating a replacement", async (context) => {

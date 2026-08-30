@@ -30,7 +30,11 @@ export class HamlibDriver implements RadioDriver {
     this.#onTransportMode = options.onTransportMode ?? (() => undefined);
   }
 
-  async initialize(): Promise<void> {}
+  async initialize(): Promise<void> {
+    // Warm the readable-level catalogue once, outside every steady telemetry
+    // tick. This keeps a TX tick to PTT, SWR, ALC, and one actual-power read.
+    await this.#rig.discoverTelemetryMeters();
+  }
 
   async close(): Promise<void> {}
 
@@ -40,13 +44,17 @@ export class HamlibDriver implements RadioDriver {
   }
 
   async readState(_options?: RadioReadOptions): Promise<RadioState> {
-    return this.#rig.readState();
+    const state = await this.#rig.readState();
+    this.#onTransportMode(state.ptt ? "transmit" : "receive");
+    return state;
   }
 
-  async readTelemetry(_mode: "receive" | "transmit"): Promise<RadioMeterSample> {
-    // RFPOWER is a transmit-power setting, never a measurement. Meter reads
-    // are added only when Hamlib exposes dedicated actual-power meter tokens.
-    return {};
+  async readTelemetry(mode: "receive" | "transmit"): Promise<RadioMeterSample> {
+    const sample = await this.#rig.readTelemetry(mode);
+    if (sample.ptt !== undefined) {
+      this.#onTransportMode(sample.ptt ? "transmit" : "receive");
+    }
+    return sample;
   }
 
   async readControls(): Promise<RadioControl[]> {

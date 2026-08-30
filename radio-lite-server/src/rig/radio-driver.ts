@@ -17,6 +17,7 @@ export type RadioMeterSample = {
   alcRatio?: number;
   rfPowerRatio?: number;
   rfPowerWatts?: number;
+  availableMeters?: string[];
 };
 
 export type RadioControlValue = boolean | number | string | null;

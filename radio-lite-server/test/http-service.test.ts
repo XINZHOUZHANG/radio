@@ -370,6 +370,71 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     safetyEpoch: safetyBegin.safetyEpoch,
   });
 
+  const telemetrySocket = new WebSocket(
+    `ws://127.0.0.1:${address.port}/ws/control`,
+    "radio-lite.v1",
+  );
+  context.after(() => telemetrySocket.terminate());
+  await new Promise<void>((resolve, reject) => {
+    telemetrySocket.once("open", resolve);
+    telemetrySocket.once("error", reject);
+  });
+  assert.equal((await sendJsonAndReceive(telemetrySocket, {
+    t: "auth.device",
+    deviceId: credentials.deviceId,
+    accessToken: credentials.accessToken,
+  })).t, "auth.ok");
+  assert.equal((await nextJsonMessage(telemetrySocket)).t, "safety.snapshot.begin");
+  assert.equal((await nextJsonMessage(telemetrySocket)).t, "safety.snapshot");
+  assert.equal((await nextJsonMessage(telemetrySocket)).t, "safety.snapshot.end");
+
+  const telemetryReadsBefore = rig.readStateCalls;
+  assert.deepEqual(await sendJsonAndReceive(webSocket, {
+    t: "rig.telemetry.subscribe",
+    radioId: "main",
+    commandId: "telemetry-subscribe-1",
+  }), {
+    t: "rig.telemetry.subscribed",
+    radioId: "main",
+    commandId: "telemetry-subscribe-1",
+  });
+  assert.deepEqual(await sendJsonAndReceive(telemetrySocket, {
+    t: "rig.telemetry.subscribe",
+    radioId: "main",
+    commandId: "telemetry-subscribe-2",
+  }), {
+    t: "rig.telemetry.subscribed",
+    radioId: "main",
+    commandId: "telemetry-subscribe-2",
+  });
+  const firstTelemetry = await nextJsonMessage(webSocket);
+  const secondTelemetry = await nextJsonMessage(telemetrySocket);
+  assert.deepEqual(firstTelemetry, {
+    t: "rig.telemetry",
+    radioId: "main",
+    sampledAtMs: 10_000,
+    state: {
+      frequencyHz: 14_074_000,
+      mode: "USB",
+      passbandHz: 3_000,
+      ptt: false,
+    },
+    meters: { strengthDbRelativeS9: -8 },
+    availableMeters: ["STRENGTH"],
+  });
+  assert.deepEqual(secondTelemetry, firstTelemetry);
+  assert.equal(rig.readStateCalls - telemetryReadsBefore, 1);
+
+  assert.deepEqual(await sendJsonAndReceive(telemetrySocket, {
+    t: "rig.telemetry.unsubscribe",
+    radioId: "main",
+    commandId: "telemetry-unsubscribe-2",
+  }), {
+    t: "rig.telemetry.unsubscribed",
+    radioId: "main",
+    commandId: "telemetry-unsubscribe-2",
+  });
+
   webSocket.send(JSON.stringify({ t: "ping" }));
   assert.equal((await nextJsonMessage(webSocket)).t, "pong");
 
@@ -903,6 +968,7 @@ class ApiFakeRig implements RadioDriver {
   tuner = false;
   supportsTuner = true;
   rejectedMode: string | null = null;
+  readStateCalls = 0;
   controls = new Map<string, number>([
     ["level:RFPOWER", 0.5],
     ["level:AF", 0.4],
@@ -912,6 +978,7 @@ class ApiFakeRig implements RadioDriver {
   async close() {}
   async capabilities() { return { canTransmit: true, supportsInternalTuner: this.supportsTuner }; }
   async readState() {
+    this.readStateCalls += 1;
     return {
       frequencyHz: this.frequencyHz,
       mode: this.mode,
@@ -919,7 +986,11 @@ class ApiFakeRig implements RadioDriver {
       ptt: this.ptt,
     };
   }
-  async readTelemetry(_mode: "receive" | "transmit") { return {}; }
+  async readTelemetry(mode: "receive" | "transmit") {
+    return mode === "receive"
+      ? { strengthDbRelativeS9: -8, availableMeters: ["STRENGTH"] }
+      : { ptt: this.ptt, availableMeters: ["STRENGTH"] };
+  }
   async setFrequency(value: number) { this.frequencyHz = value; return value; }
   async setMode(value: string, passband = 0) {
     if (value === this.rejectedMode) {

@@ -64,6 +64,42 @@ and discard state from a previous `safetyEpoch` after committing the new
 complete envelope. This server stream is authoritative for remote PTT-OFF
 confirmation and persistent stop-failure warnings.
 
+## Shared radio telemetry
+
+An authenticated control WebSocket subscribes to one radio with an optional
+`commandId`:
+
+```json
+{"t":"rig.telemetry.subscribe","radioId":"main","commandId":"telemetry-1"}
+```
+
+The server first acknowledges ownership of that socket's subscription, then
+sends the current cached sample (or the first completed sample) and subsequent
+shared samples. Multiple sockets receive the same runtime-owned sample and do
+not cause additional CAT reads.
+
+```json
+{"t":"rig.telemetry.subscribed","radioId":"main","commandId":"telemetry-1"}
+{"t":"rig.telemetry","radioId":"main","sampledAtMs":1787700000000,"state":{"frequencyHz":14074000,"mode":"USB","passbandHz":3000,"ptt":false},"meters":{"strengthDbRelativeS9":-8},"availableMeters":["STRENGTH","SWR","ALC","RFPOWER_METER_WATTS"]}
+```
+
+`meters` omits values that were not sampled in the current receive/transmit
+phase. `availableMeters` contains readable Hamlib meter tokens. Actual power
+uses `RFPOWER_METER_WATTS` when available, otherwise `RFPOWER_METER`;
+`RFPOWER` is a transmit-power setting and is never published as measured power.
+Hamlib meter discovery uses one cached `get_level ?` warm-up during driver
+initialization, outside steady telemetry ticks.
+
+Unsubscribe is scoped to the sending socket and radio. It is idempotent: the
+server returns the same acknowledgement when no matching subscription exists.
+Closing a socket removes all of that socket's telemetry subscriptions without
+affecting other clients.
+
+```json
+{"t":"rig.telemetry.unsubscribe","radioId":"main","commandId":"telemetry-2"}
+{"t":"rig.telemetry.unsubscribed","radioId":"main","commandId":"telemetry-2"}
+```
+
 Authenticated HTTP APIs accept the same browser session cookie. Mutating
 browser requests additionally require the session's CSRF token in
 `X-CSRF-Token`. A paired native app instead sends both of these headers; Bearer

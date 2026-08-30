@@ -25,6 +25,7 @@ import type {
   RadioModeState,
   RadioState,
 } from "./radio-driver.ts";
+import { RadioTelemetrySampler } from "./radio-telemetry.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
 import {
   RigRuntimeSupervisor,
@@ -53,11 +54,14 @@ export class RadioRuntime {
   readonly control: ControlLeaseManager;
   readonly interlock: TransmitInterlock;
   readonly supervisor: RigRuntimeSupervisor;
+  readonly telemetry: RadioTelemetrySampler;
   readonly #driver: RadioDriver;
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
   #initializePromise: Promise<void> | null = null;
   #controlsById: ReadonlyMap<string, RadioControl> | null = null;
+  #controlsPromise: Promise<RadioControl[]> | null = null;
+  #telemetryClosing: Promise<void> = Promise.resolve();
   #tail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -69,6 +73,7 @@ export class RadioRuntime {
   ) {
     this.profile = profile;
     this.#driver = driver;
+    this.telemetry = new RadioTelemetrySampler(profile.id, driver, { now });
     this.control = new ControlLeaseManager({ now });
     const transmitDriver: TransmitDriver = {
       activate: async (mode) => {
@@ -76,7 +81,9 @@ export class RadioRuntime {
           await this.#driver.invokeAction("action:TUNER");
         } else {
           await this.#driver.writePtt(true);
-          if (!(await this.#driver.readPtt())) {
+          const ptt = await this.#driver.readPtt();
+          this.telemetry.confirmPtt(ptt);
+          if (!ptt) {
             throw new Error("PTT read-back mismatch");
           }
         }
@@ -86,10 +93,14 @@ export class RadioRuntime {
         await this.#driver.writePtt(false);
       },
       readPtt: async () => {
-        return this.#driver.readPtt({ purpose: "off-recovery" });
+        const ptt = await this.#driver.readPtt({ purpose: "off-recovery" });
+        this.telemetry.confirmPtt(ptt);
+        return ptt;
       },
       observePtt: async () => {
-        return this.#driver.readPtt();
+        const ptt = await this.#driver.readPtt();
+        this.telemetry.confirmPtt(ptt);
+        return ptt;
       },
     };
     this.interlock = new TransmitInterlock(transmitDriver, { now });
@@ -103,7 +114,10 @@ export class RadioRuntime {
       recoveryTransport: () => transmitDriver,
       startManaged: options.startManaged,
       restartManaged: options.restartManaged,
-      closeManaged: closeDependencies,
+      closeManaged: async () => {
+        await this.#telemetryClosing;
+        await closeDependencies();
+      },
       now,
     });
     this.#safetyTimer = setInterval(() => {
@@ -123,22 +137,34 @@ export class RadioRuntime {
           error instanceof RigReportError &&
           error.report === -11
         ) {
-          return;
+          // A configured no-PTT rig may not expose strict PTT evidence.
+        } else {
+          throw error;
         }
-        throw error;
       }
+      this.telemetry.start();
     })();
     await this.#initializePromise;
   }
 
   readState(): Promise<RadioState> {
-    return this.#driver.readState();
+    return this.telemetry.readState();
   }
 
   async readControls(): Promise<RadioControl[]> {
-    const controls = await this.#driver.readControls();
-    this.#controlsById = new Map(controls.map((control) => [control.id, control]));
-    return controls;
+    if (this.#controlsById !== null) {
+      return [...this.#controlsById.values()].map((control) => ({ ...control }));
+    }
+    this.#controlsPromise ??= this.#driver.readControls().then((controls) => {
+      this.#controlsById = new Map(
+        controls.map((control) => [control.id, { ...control }]),
+      );
+      return controls.map((control) => ({ ...control }));
+    }).catch((error) => {
+      this.#controlsPromise = null;
+      throw error;
+    });
+    return (await this.#controlsPromise).map((control) => ({ ...control }));
   }
 
   async supportsInternalTuner(): Promise<boolean> {
@@ -184,7 +210,9 @@ export class RadioRuntime {
 
   async setFrequency(ownerId: string, controlToken: string, frequencyHz: number): Promise<number> {
     this.control.assertValid(ownerId, controlToken);
-    return this.#driver.setFrequency(frequencyHz);
+    const confirmed = await this.#driver.setFrequency(frequencyHz);
+    this.telemetry.confirmFrequency(confirmed);
+    return confirmed;
   }
 
   async setMode(
@@ -194,7 +222,9 @@ export class RadioRuntime {
     passbandHz = 0,
   ): Promise<RadioModeState> {
     this.control.assertValid(ownerId, controlToken);
-    return this.#driver.setMode(mode, passbandHz);
+    const confirmed = await this.#driver.setMode(mode, passbandHz);
+    this.telemetry.confirmMode(confirmed.mode, confirmed.passbandHz);
+    return confirmed;
   }
 
   async setControl(
@@ -213,7 +243,11 @@ export class RadioRuntime {
           );
         }
       }
-      return this.#driver.setControl(controlId, value);
+      const confirmed = await this.#driver.setControl(controlId, value);
+      if (this.#controlsById !== null) {
+        this.#controlsById = new Map(this.#controlsById).set(controlId, { ...confirmed });
+      }
+      return confirmed;
     });
   }
 
@@ -292,6 +326,7 @@ export class RadioRuntime {
       return;
     }
     clearInterval(this.#safetyTimer);
+    this.#telemetryClosing = this.telemetry.close();
     const closing = (async () => {
       const failures: unknown[] = [];
       try {

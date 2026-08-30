@@ -1,6 +1,6 @@
 import type { PttMethod } from "../config/types.ts";
 import type { RigResponse } from "./extended-protocol.ts";
-import type { RadioControl, RadioState } from "./radio-driver.ts";
+import type { RadioControl, RadioMeterSample, RadioState } from "./radio-driver.ts";
 import { RigReportError, type RigRequestOptions } from "./transport.ts";
 
 export type RigRequester = {
@@ -17,6 +17,14 @@ const SAFETY_READ_REQUEST = {
   source: "ptt-off",
 } as const satisfies RigRequestOptions;
 const CONTROL_READ_REQUEST = { source: "control" } as const satisfies RigRequestOptions;
+
+const TELEMETRY_METER_TOKENS = [
+  "STRENGTH",
+  "SWR",
+  "ALC",
+  "RFPOWER_METER_WATTS",
+  "RFPOWER_METER",
+] as const;
 
 export type HamlibRigState = RadioState;
 
@@ -152,6 +160,8 @@ export class HamlibRig {
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
   #vfoOperations: Promise<HamlibCapabilityTokens> | null = null;
   #writableFunctions: Promise<HamlibCapabilityTokens> | null = null;
+  #telemetryMeters: Promise<Set<string>> | null = null;
+  readonly #disabledTelemetryMeters = new Set<string>();
   #tunerSwitchWritable: boolean | null | undefined;
 
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
@@ -171,6 +181,38 @@ export class HamlibRig {
       passbandHz: integerField(mode, "Passband"),
       ptt,
     };
+  }
+
+  async discoverTelemetryMeters(): Promise<string[]> {
+    const meters = await this.#discoverTelemetryMeters();
+    return this.#publishedTelemetryMeters(meters);
+  }
+
+  async readTelemetry(mode: "receive" | "transmit"): Promise<RadioMeterSample> {
+    const meters = await this.#discoverTelemetryMeters();
+    const sample: RadioMeterSample = {};
+    if (mode === "receive") {
+      sample.strengthDbRelativeS9 = await this.#readOptionalTelemetryMeter("STRENGTH", meters);
+    } else {
+      sample.ptt = await this.#readPtt(TELEMETRY_REQUEST);
+      sample.swr = await this.#readOptionalTelemetryMeter("SWR", meters);
+      sample.alcRatio = await this.#readOptionalTelemetryMeter("ALC", meters);
+      const actualPowerToken = this.#availableTelemetryMeter("RFPOWER_METER_WATTS", meters)
+        ? "RFPOWER_METER_WATTS"
+        : this.#availableTelemetryMeter("RFPOWER_METER", meters)
+          ? "RFPOWER_METER"
+          : null;
+      if (actualPowerToken !== null) {
+        const actualPower = await this.#readOptionalTelemetryMeter(actualPowerToken, meters);
+        if (actualPowerToken === "RFPOWER_METER_WATTS") {
+          sample.rfPowerWatts = actualPower;
+        } else {
+          sample.rfPowerRatio = actualPower;
+        }
+      }
+    }
+    sample.availableMeters = this.#publishedTelemetryMeters(meters);
+    return sample;
   }
 
   async setFrequency(frequencyHz: number): Promise<number> {
@@ -428,6 +470,52 @@ export class HamlibRig {
       throw error;
     });
     return this.#controlDefinitions;
+  }
+
+  async #discoverTelemetryMeters(): Promise<Set<string>> {
+    this.#telemetryMeters ??= this.#queryCapabilityTokens(
+      "\\get_level ?",
+      "Level",
+      TELEMETRY_REQUEST,
+    ).then((tokens) => tokens === null ? new Set<string>() : new Set(tokens)).catch((error) => {
+      this.#telemetryMeters = null;
+      throw error;
+    });
+    return this.#telemetryMeters;
+  }
+
+  #availableTelemetryMeter(token: string, meters: ReadonlySet<string>): boolean {
+    return meters.has(token) && !this.#disabledTelemetryMeters.has(token);
+  }
+
+  #publishedTelemetryMeters(meters: ReadonlySet<string>): string[] {
+    const available = ["STRENGTH", "SWR", "ALC"].filter((token) =>
+      this.#availableTelemetryMeter(token, meters));
+    if (this.#availableTelemetryMeter("RFPOWER_METER_WATTS", meters)) {
+      available.push("RFPOWER_METER_WATTS");
+    } else if (this.#availableTelemetryMeter("RFPOWER_METER", meters)) {
+      available.push("RFPOWER_METER");
+    }
+    return available;
+  }
+
+  async #readOptionalTelemetryMeter(
+    token: string,
+    meters: ReadonlySet<string>,
+  ): Promise<number | undefined> {
+    if (!this.#availableTelemetryMeter(token, meters)) return undefined;
+    try {
+      return numericResponseValue(
+        await this.#transport.request(`\\get_level ${token}`, TELEMETRY_REQUEST),
+        token,
+      );
+    } catch (error) {
+      if (error instanceof RigReportError && error.report === -11) {
+        this.#disabledTelemetryMeters.add(token);
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
