@@ -127,22 +127,35 @@ export function parseAlsaHardwareList(
 }
 
 function pulseMetadata(properties: Record<string, unknown>): AudioDeviceMetadata | undefined {
-  const metadata: AudioDeviceMetadata = {
-    deviceSerial: propertyText(properties, "device.serial"),
-    vendorId: propertyText(properties, "device.vendor.id"),
-    productId: propertyText(properties, "device.product.id"),
-    busPath: propertyText(properties, "device.bus_path"),
-    topology: propertyText(properties, "device.topology"),
-    alsaCard: propertyText(properties, "alsa.card"),
-    alsaCardId: propertyText(properties, "alsa.card_name"),
-    alsaCardName: propertyText(properties, "alsa.long_card_name"),
-  };
-  return Object.values(metadata).some((value) => value !== undefined) ? metadata : undefined;
+  const metadata: AudioDeviceMetadata = {};
+  addMetadata(metadata, "deviceSerial", propertyText(properties, "device.serial"));
+  addMetadata(metadata, "vendorId", propertyText(properties, "device.vendor.id"));
+  addMetadata(metadata, "productId", propertyText(properties, "device.product.id"));
+  addMetadata(metadata, "busPath", propertyText(properties, "device.bus_path"));
+  addMetadata(metadata, "topology", propertyText(properties, "device.topology"));
+  addMetadata(metadata, "alsaCard", propertyText(properties, "alsa.card"));
+  addMetadata(metadata, "alsaCardId", propertyText(properties, "api.alsa.card.id"));
+  addMetadata(
+    metadata,
+    "alsaCardName",
+    propertyText(properties, "api.alsa.card.name")
+      ?? propertyText(properties, "alsa.card_name")
+      ?? propertyText(properties, "alsa.long_card_name"),
+  );
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
 
 function propertyText(properties: Record<string, unknown>, key: string): string | undefined {
   const value = properties[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function addMetadata<K extends keyof AudioDeviceMetadata>(
+  metadata: AudioDeviceMetadata,
+  key: K,
+  value: AudioDeviceMetadata[K],
+): void {
+  if (value !== undefined) metadata[key] = value;
 }
 
 function safeDeviceName(name: string): boolean {

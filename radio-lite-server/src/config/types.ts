@@ -94,6 +94,7 @@ const SAFE_HOST_PATTERN = /^[A-Za-z0-9._:-]{1,253}$/;
 const ALLOWED_BAUD_RATES = new Set<number>(SERIAL_BAUD_RATES);
 const ALLOWED_PTT_METHODS = new Set<string>(PTT_METHODS);
 const ALLOWED_AUDIO_LATENCIES = new Set<string>(AUDIO_LATENCIES);
+const STABLE_HARDWARE_ID_PATTERN = /^(?:usb:(?:[0-9a-f]{4}:[0-9a-f]{4}:|serial:)[A-Za-z0-9._-]{1,128}|alsa:(?=[A-Za-z0-9._-]*[A-Za-z])[A-Za-z0-9._-]{1,128})$/iu;
 
 export function parseRadioConfig(value: unknown): RadioConfigFile {
   const root = objectValue(value, "configuration");
@@ -184,7 +185,7 @@ function parseAudioRoute(value: unknown, field: string): AudioRoute {
   if (kind === "system-device") {
     exactKeys(route, ["kind", "hardwareId", "latency"], field);
     const hardwareId = text(route.hardwareId, `${field}.hardwareId`, 1, 256);
-    if (/[\0\r\n]/u.test(hardwareId) || hardwareId === "unknown") {
+    if (!STABLE_HARDWARE_ID_PATTERN.test(hardwareId)) {
       throw new Error(`${field}.hardwareId must identify a stable card`);
     }
     const latency = text(route.latency, `${field}.latency`, 1, 16);

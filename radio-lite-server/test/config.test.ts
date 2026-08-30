@@ -106,6 +106,20 @@ test("audio routes accept only their exact union members", () => {
       audioRoute: { kind: "system-device", hardwareId: "usb:1234\n5678", latency: "low" },
     })],
   }), /hardwareId must identify a stable card/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: { kind: "system-device", hardwareId: "alsa:2", latency: "low" },
+    })],
+  }), /hardwareId must identify a stable card/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: {
+        kind: "system-device", hardwareId: "alsa_input.usb-radio", latency: "low",
+      },
+    })],
+  }), /hardwareId must identify a stable card/u);
 });
 
 test("validates Hamlib PTT methods, device paths and GPIO bit numbers", () => {
@@ -276,5 +290,23 @@ test("parses PulseAudio and ALSA choices for the iOS wizard", () => {
       alsaCardId: "CODEC",
       alsaCardName: "USB Audio CODEC",
     },
+  });
+});
+
+test("retains a PipeWire ALSA card id without promoting Pulse display metadata", () => {
+  const [endpoint] = parsePactlJson(JSON.stringify([{
+    name: "alsa_input.usb-radio",
+    properties: {
+      "alsa.card": "2",
+      "alsa.card_name": "USB PnP Sound Device",
+      "api.alsa.card.id": "CODEC",
+      "api.alsa.card.name": "USB PnP Sound Device",
+    },
+  }]), "input");
+
+  assert.deepEqual(endpoint?.metadata, {
+    alsaCard: "2",
+    alsaCardId: "CODEC",
+    alsaCardName: "USB PnP Sound Device",
   });
 });

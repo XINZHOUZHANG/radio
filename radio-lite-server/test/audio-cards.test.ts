@@ -118,3 +118,53 @@ test("reports an endpoint without stable metadata as incomplete and unknown", ()
     },
   }]);
 });
+
+test("does not emit a persistable card id from malformed identity metadata", () => {
+  const [card] = pairAudioCards({
+    inputs: [{
+      backend: "pulse",
+      direction: "input",
+      id: "input-a",
+      label: "USB Audio CODEC",
+      metadata: {
+        vendorId: "1234",
+        productId: "5678",
+        deviceSerial: "SN\n42",
+        alsaCard: "2",
+      },
+    }],
+    outputs: [{
+      backend: "pulse",
+      direction: "output",
+      id: "output-a",
+      label: "USB Audio CODEC",
+      metadata: { alsaCard: "2" },
+    }],
+  });
+
+  assert.deepEqual(card, {
+    hardwareId: "unknown",
+    label: "USB Audio CODEC",
+    transport: "unknown",
+    complete: false,
+    input: {
+      backend: "pulse",
+      direction: "input",
+      id: "input-a",
+      label: "USB Audio CODEC",
+      metadata: {
+        vendorId: "1234",
+        productId: "5678",
+        deviceSerial: "SN\n42",
+        alsaCard: "2",
+      },
+    },
+    output: {
+      backend: "pulse",
+      direction: "output",
+      id: "output-a",
+      label: "USB Audio CODEC",
+      metadata: { alsaCard: "2" },
+    },
+  });
+});

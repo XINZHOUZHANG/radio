@@ -75,10 +75,10 @@ function toCard(endpoints: readonly DiscoveredAudioDevice[]): DiscoveredAudioCar
 function stableIdentities(endpoint: DiscoveredAudioDevice): StableIdentity[] {
   const metadata = endpoint.metadata;
   if (metadata === undefined) return [];
-  const vendorId = canonical(metadata.vendorId);
-  const productId = canonical(metadata.productId);
-  const serial = canonical(metadata.deviceSerial);
-  const topology = canonical(metadata.busPath) ?? canonical(metadata.topology);
+  const vendorId = hexadecimal(metadata.vendorId);
+  const productId = hexadecimal(metadata.productId);
+  const serial = stablePart(metadata.deviceSerial);
+  const topology = stablePart(metadata.busPath) ?? stablePart(metadata.topology);
   const identities: StableIdentity[] = [];
   if (serial !== undefined) {
     identities.push({
@@ -98,7 +98,7 @@ function stableIdentities(endpoint: DiscoveredAudioDevice): StableIdentity[] {
       priority: 2,
     });
   }
-  const alsaCardId = canonical(metadata.alsaCardId);
+  const alsaCardId = stableAlsaCardId(metadata.alsaCardId);
   if (alsaCardId !== undefined) {
     identities.push({
       hardwareId: `alsa:${alsaCardId}`,
@@ -121,7 +121,7 @@ function selectStableIdentity(identities: readonly StableIdentity[]): StableIden
 
 function correlationTokens(endpoint: DiscoveredAudioDevice): string[] {
   const tokens = stableIdentities(endpoint).map((identity) => `identity:${identity.hardwareId}`);
-  const alsaCard = canonical(endpoint.metadata?.alsaCard);
+  const alsaCard = normalized(endpoint.metadata?.alsaCard);
   if (alsaCard !== undefined) tokens.push(`alsa-card:${alsaCard}`);
   return tokens;
 }
@@ -146,9 +146,24 @@ function disambiguateLabels(cards: DiscoveredAudioCard[]): void {
   }
 }
 
-function canonical(value: string | undefined): string | undefined {
+function normalized(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
+}
+
+function stablePart(value: string | undefined): string | undefined {
+  const part = normalized(value);
+  return part !== undefined && /^[A-Za-z0-9._-]{1,128}$/u.test(part) ? part : undefined;
+}
+
+function hexadecimal(value: string | undefined): string | undefined {
+  const part = normalized(value);
+  return part !== undefined && /^[0-9a-f]{4}$/iu.test(part) ? part.toLowerCase() : undefined;
+}
+
+function stableAlsaCardId(value: string | undefined): string | undefined {
+  const cardId = stablePart(value);
+  return cardId !== undefined && /[A-Za-z]/u.test(cardId) ? cardId : undefined;
 }
 
 function find(parent: number[], index: number): number {
