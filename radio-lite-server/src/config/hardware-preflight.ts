@@ -3,7 +3,14 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
-import { requiredSystemMediaExecutables } from "../media/system-media-worker.ts";
+import {
+  negotiateAudioRoute,
+  requiredSystemMediaExecutables,
+  resolveAudioRoute,
+  systemAudioDuplexProbe,
+  type AudioDuplexProbe,
+} from "../media/system-media-worker.ts";
+export { resolveAudioRoute } from "../media/system-media-worker.ts";
 import type { RigResponse } from "../rig/extended-protocol.ts";
 import { ManagedRigctldProcess } from "../rig/managed-process.ts";
 import { rigctldTarget, type RigctldTarget } from "../rig/rigctld-command.ts";
@@ -28,6 +35,7 @@ export type HardwarePreflightResult = {
   readOnly: true;
   overallStatus: HardwarePreflightStatus;
   checks: HardwarePreflightCheck[];
+  negotiatedRates?: { input: number; output: number };
 };
 
 export type HardwarePreflightRunner = {
@@ -46,6 +54,7 @@ export type HardwarePreflightOptions = {
   openRig?: (profile: RadioProfile) => Promise<ReadOnlyRigSession>;
   discover?: () => Promise<HardwareDiscoveryResult>;
   commandAvailable?: (executable: string) => Promise<boolean>;
+  duplexProbe?: AudioDuplexProbe;
 };
 
 const READ_ONLY_COMMANDS = [
@@ -67,6 +76,7 @@ export class HardwarePreflight implements HardwarePreflightRunner {
   readonly #openRig: (profile: RadioProfile) => Promise<ReadOnlyRigSession>;
   readonly #discover: () => Promise<HardwareDiscoveryResult>;
   readonly #commandAvailable: (executable: string) => Promise<boolean>;
+  readonly #duplexProbe: AudioDuplexProbe;
 
   constructor(options: HardwarePreflightOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -74,6 +84,7 @@ export class HardwarePreflight implements HardwarePreflightRunner {
     const discovery = new HardwareDiscovery();
     this.#discover = options.discover ?? (() => discovery.discover());
     this.#commandAvailable = options.commandAvailable ?? commandAvailableOnPath;
+    this.#duplexProbe = options.duplexProbe ?? systemAudioDuplexProbe;
   }
 
   async test(profile: RadioProfile): Promise<HardwarePreflightResult> {
@@ -178,21 +189,46 @@ export class HardwarePreflight implements HardwarePreflightRunner {
     }
 
     const audio = await audioPromise;
+    let audioInputEndpoint = profile.audioInput;
+    let audioOutputEndpoint = profile.audioOutput;
+    let audioRouteError: unknown = null;
+    let negotiatedRates: HardwarePreflightResult["negotiatedRates"];
+    if (profile.audioRoute?.kind === "system-device") {
+      try {
+        if (audio.value === null) throw audio.error ?? new Error("Audio discovery is unavailable");
+        const resolved = resolveAudioRoute(profile.audioRoute, audio.value);
+        audioInputEndpoint = resolved.input;
+        audioOutputEndpoint = resolved.output;
+        if (missingAudioInputCommands.length === 0 && missingAudioOutputCommands.length === 0) {
+          const negotiated = await negotiateAudioRoute(resolved, this.#duplexProbe);
+          negotiatedRates = {
+            input: negotiated.input.sampleRate,
+            output: negotiated.output.sampleRate,
+          };
+        }
+      } catch (error) {
+        audioRouteError = error;
+      }
+    }
     const audioInput = audioCheck(
       "audioInput",
-      profile.audioInput,
+      audioInputEndpoint,
       audio.value?.audioInputs ?? null,
       audio.error,
       audio.value?.warnings ?? [],
       missingAudioInputCommands,
+      audioRouteError,
+      negotiatedRates?.input,
     );
     const audioOutput = audioCheck(
       "audioOutput",
-      profile.audioOutput,
+      audioOutputEndpoint,
       audio.value?.audioOutputs ?? null,
       audio.error,
       audio.value?.warnings ?? [],
       missingAudioOutputCommands,
+      audioRouteError,
+      negotiatedRates?.output,
     );
     const checks = [cat, capabilities, audioInput, audioOutput];
     return {
@@ -201,6 +237,7 @@ export class HardwarePreflight implements HardwarePreflightRunner {
       readOnly: true,
       overallStatus: overallStatus(checks),
       checks,
+      ...(negotiatedRates === undefined ? {} : { negotiatedRates }),
     };
   }
 }
@@ -246,6 +283,8 @@ function audioCheck(
   discoveryError: unknown,
   discoveryWarnings: readonly string[],
   missingExecutables: readonly string[],
+  routeError: unknown = null,
+  negotiatedRate?: number,
 ): HardwarePreflightCheck {
   const details: Record<string, string> = {
     backend: endpoint.backend,
@@ -257,6 +296,14 @@ function audioCheck(
       status: "failed",
       message: `Required system executable is unavailable: ${missingExecutables.join(", ")}`,
       details: { ...details, missingExecutables: missingExecutables.join(",") },
+    };
+  }
+  if (routeError !== null) {
+    return {
+      id,
+      status: "failed",
+      message: safeErrorMessage(routeError, "Configured audio route could not be resolved"),
+      details: { ...details, discovered: "false" },
     };
   }
   if (devices === null) {
@@ -289,8 +336,15 @@ function audioCheck(
   return {
     id,
     status: "passed",
-    message: "Configured audio endpoint was found",
-    details: { ...details, discovered: "true", label: matched.label },
+    message: negotiatedRate === undefined
+      ? "Configured audio endpoint was found"
+      : "Configured audio endpoint opened successfully",
+    details: {
+      ...details,
+      discovered: "true",
+      label: matched.label,
+      ...(negotiatedRate === undefined ? {} : { negotiatedRate: String(negotiatedRate) }),
+    },
   };
 }
 

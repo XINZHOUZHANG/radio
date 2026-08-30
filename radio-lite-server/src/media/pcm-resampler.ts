@@ -58,6 +58,8 @@ export class StreamingPcm16Resampler {
   readonly #step: number;
   #previousSample: number | null = null;
   #position = 0;
+  #inputSamples = 0;
+  #outputSamples = 0;
 
   constructor(inputSampleRate: number, outputSampleRate: number) {
     validateSampleRate(inputSampleRate, "input sample rate");
@@ -71,6 +73,7 @@ export class StreamingPcm16Resampler {
     if (input.length === 0) {
       return new Int16Array(0);
     }
+    this.#inputSamples += input.length;
     const source = this.#previousSample === null
       ? input
       : prependSample(this.#previousSample, input);
@@ -92,12 +95,31 @@ export class StreamingPcm16Resampler {
     const retainedIndex = source.length - 1;
     this.#position -= retainedIndex;
     this.#previousSample = source[retainedIndex];
+    this.#outputSamples += outputLength;
     return outputLength === output.length ? output : output.slice(0, outputLength);
+  }
+
+  /** Emits the final clamped samples that cannot be known until the stream ends. */
+  flush(): Int16Array {
+    if (this.#previousSample === null) {
+      return new Int16Array(0);
+    }
+    const expectedLength = Math.max(
+      1,
+      Math.round(this.#inputSamples * this.#outputSampleRate / this.#inputSampleRate),
+    );
+    const remaining = Math.max(0, expectedLength - this.#outputSamples);
+    const output = new Int16Array(remaining);
+    output.fill(this.#previousSample);
+    this.#outputSamples += remaining;
+    return output;
   }
 
   reset(): void {
     this.#previousSample = null;
     this.#position = 0;
+    this.#inputSamples = 0;
+    this.#outputSamples = 0;
   }
 
   get inputSampleRate(): number {

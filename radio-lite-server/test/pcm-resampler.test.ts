@@ -31,3 +31,46 @@ test("streaming 16 kHz to 12 kHz resampling stays continuous across chunks", () 
   streaming.reset();
   assert.equal(streaming.push(input.subarray(0, 16)).length, 12);
 });
+
+test("48 kHz capture chunks match whole-buffer 16 kHz conversion", () => {
+  const input = Int16Array.from(
+    { length: 4_803 },
+    (_, index) => Math.round(Math.sin(index / 19) * 24_000),
+  );
+  const expected = resampleInt16(input, 48_000, 16_000);
+  const streaming = new StreamingPcm16Resampler(48_000, 16_000);
+  const chunks = [
+    streaming.push(input.subarray(0, 701)),
+    streaming.push(input.subarray(701, 2_222)),
+    streaming.push(input.subarray(2_222)),
+  ];
+
+  assert.deepEqual(joinSamples(chunks), expected);
+});
+
+test("16 kHz playback chunks preserve the whole 48 kHz conversion including the tail", () => {
+  const input = Int16Array.from(
+    { length: 1_601 },
+    (_, index) => Math.round(Math.cos(index / 13) * 20_000),
+  );
+  const expected = resampleInt16(input, 16_000, 48_000);
+  const streaming = new StreamingPcm16Resampler(16_000, 48_000);
+  const chunks = [
+    streaming.push(input.subarray(0, 317)),
+    streaming.push(input.subarray(317, 999)),
+    streaming.push(input.subarray(999)),
+    streaming.flush(),
+  ];
+
+  assert.deepEqual(joinSamples(chunks), expected);
+});
+
+function joinSamples(chunks: readonly Int16Array[]): Int16Array {
+  const output = new Int16Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
+}

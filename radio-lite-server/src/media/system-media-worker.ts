@@ -2,7 +2,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import type { Writable } from "node:stream";
 
-import type { AudioEndpoint, RadioProfile } from "../config/types.ts";
+import type { HardwareDiscoveryResult } from "../config/hardware-discovery.ts";
+import { HardwareDiscovery } from "../config/hardware-discovery.ts";
+import type {
+  AudioEndpoint,
+  AudioLatency,
+  AudioRoute,
+  RadioProfile,
+} from "../config/types.ts";
 import type { MediaPolicy } from "./adaptive-policy.ts";
 import type {
   DigitalAudioPlayback,
@@ -13,12 +20,52 @@ import type {
 } from "./media-hub.ts";
 import type { MediaFrame } from "./frame.ts";
 import { OggOpusPacketReader, OggOpusWriter } from "./ogg-opus.ts";
-import { int16ToPcm16Le, resampleInt16 } from "./pcm-resampler.ts";
+import {
+  int16ToPcm16Le,
+  pcm16LeToInt16,
+  resampleInt16,
+  StreamingPcm16Resampler,
+} from "./pcm-resampler.ts";
 import { PcmSpectrumAnalyzer, SPECTRUM_SPAN_HZ } from "./spectrum-analyzer.ts";
 
 export type MediaCommand = {
   file: string;
   args: string[];
+};
+
+export type AudioProbeDirection = "capture" | "playback";
+
+export type AudioProbeRequest = {
+  sampleRates: readonly number[];
+  channels: 1;
+  format: "s16le";
+  latency: AudioLatency;
+  timeoutMs: number;
+};
+
+export type NegotiatedAudioFormat = {
+  sampleRate: number;
+  channels: number;
+  format: string;
+};
+
+export type AudioDuplexProbe = {
+  open(
+    direction: AudioProbeDirection,
+    endpoint: AudioEndpoint,
+    request: AudioProbeRequest,
+  ): Promise<NegotiatedAudioFormat>;
+};
+
+export type ResolvedAudioRoute = {
+  input: AudioEndpoint;
+  output: AudioEndpoint;
+  latency: AudioLatency;
+};
+
+export type NegotiatedAudioRoute = {
+  input: NegotiatedAudioFormat;
+  output: NegotiatedAudioFormat;
 };
 
 export type SystemMediaWorkerOptions = {
@@ -31,6 +78,8 @@ export type SystemMediaWorkerOptions = {
     firstSignal: AbortSignal,
     secondSignal: AbortSignal,
   ) => Promise<void>;
+  discover?: () => Promise<HardwareDiscoveryResult>;
+  duplexProbe?: AudioDuplexProbe;
 };
 
 const SAMPLE_RATE = 16_000;
@@ -40,8 +89,21 @@ const DIGITAL_FRAME_MS = 20;
 const DIGITAL_WRITE_AHEAD_MS = 80;
 const DIGITAL_PLAYBACK_TAIL_MS = 80;
 const DIGITAL_VOICE_RESUME_GUARD_MS = 200;
+const NATIVE_SAMPLE_RATES = [48_000, 44_100, 32_000, 16_000] as const;
+const AUDIO_PROBE_TIMEOUT_MS = 2_000;
+const RECONNECT_TIMEOUT_MS = 5_000;
 
-export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
+type NativeAudioCommandOptions = {
+  sampleRate?: number;
+  latency?: AudioLatency;
+};
+
+export function captureCommand(
+  endpoint: AudioEndpoint,
+  options: NativeAudioCommandOptions = {},
+): MediaCommand {
+  const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+  const timing = latencyTiming(options.latency ?? "balanced");
   return endpoint.backend === "alsa"
     ? {
         file: "arecord",
@@ -51,9 +113,9 @@ export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
           "-t", "raw",
           "-f", "S16_LE",
           "-c", "1",
-          "-r", String(SAMPLE_RATE),
-          "--buffer-time=80000",
-          "--period-time=20000",
+          "-r", String(sampleRate),
+          `--buffer-time=${timing.bufferTimeUs}`,
+          `--period-time=${timing.periodTimeUs}`,
         ],
       }
     : {
@@ -63,14 +125,19 @@ export function captureCommand(endpoint: AudioEndpoint): MediaCommand {
           `--device=${endpoint.id}`,
           "--format=s16le",
           "--channels=1",
-          `--rate=${SAMPLE_RATE}`,
-          "--latency-msec=40",
-          "--process-time-msec=20",
+          `--rate=${sampleRate}`,
+          `--latency-msec=${timing.pulseLatencyMs}`,
+          `--process-time-msec=${timing.periodTimeUs / 1_000}`,
         ],
       };
 }
 
-export function playbackCommand(endpoint: AudioEndpoint): MediaCommand {
+export function playbackCommand(
+  endpoint: AudioEndpoint,
+  options: NativeAudioCommandOptions = {},
+): MediaCommand {
+  const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+  const timing = latencyTiming(options.latency ?? "balanced");
   return endpoint.backend === "alsa"
     ? {
         file: "aplay",
@@ -80,9 +147,9 @@ export function playbackCommand(endpoint: AudioEndpoint): MediaCommand {
           "-t", "raw",
           "-f", "S16_LE",
           "-c", "1",
-          "-r", String(SAMPLE_RATE),
-          "--buffer-time=80000",
-          "--period-time=20000",
+          "-r", String(sampleRate),
+          `--buffer-time=${timing.bufferTimeUs}`,
+          `--period-time=${timing.periodTimeUs}`,
         ],
       }
     : {
@@ -93,11 +160,188 @@ export function playbackCommand(endpoint: AudioEndpoint): MediaCommand {
           `--device=${endpoint.id}`,
           "--format=s16le",
           "--channels=1",
-          `--rate=${SAMPLE_RATE}`,
-          "--latency-msec=40",
-          "--process-time-msec=20",
+          `--rate=${sampleRate}`,
+          `--latency-msec=${timing.pulseLatencyMs}`,
+          `--process-time-msec=${timing.periodTimeUs / 1_000}`,
         ],
       };
+}
+
+function latencyTiming(latency: AudioLatency): {
+  periodTimeUs: number;
+  bufferTimeUs: number;
+  pulseLatencyMs: number;
+} {
+  switch (latency) {
+  case "low":
+    return { periodTimeUs: 10_000, bufferTimeUs: 40_000, pulseLatencyMs: 20 };
+  case "stable":
+    return { periodTimeUs: 40_000, bufferTimeUs: 160_000, pulseLatencyMs: 80 };
+  default:
+    return { periodTimeUs: 20_000, bufferTimeUs: 80_000, pulseLatencyMs: 40 };
+  }
+}
+
+export function resolveAudioRoute(
+  route: AudioRoute,
+  discovery: Pick<HardwareDiscoveryResult, "audioCards">,
+): ResolvedAudioRoute {
+  if (route.kind !== "system-device") {
+    throw new Error(`audio route ${route.kind} does not select a system device`);
+  }
+  const card = discovery.audioCards.find((candidate) =>
+    candidate.hardwareId === route.hardwareId
+  );
+  if (card === undefined) {
+    throw new Error(`audio card ${route.hardwareId} is not connected`);
+  }
+  if (!card.complete || card.input === undefined || card.output === undefined) {
+    throw new Error(`audio card ${route.hardwareId} does not expose duplex audio`);
+  }
+  return {
+    input: card.input,
+    output: card.output,
+    latency: route.latency,
+  };
+}
+
+export async function negotiateAudioRoute(
+  route: ResolvedAudioRoute,
+  probe: AudioDuplexProbe = systemAudioDuplexProbe,
+): Promise<NegotiatedAudioRoute> {
+  const request: AudioProbeRequest = {
+    sampleRates: NATIVE_SAMPLE_RATES,
+    channels: 1,
+    format: "s16le",
+    latency: route.latency,
+    timeoutMs: AUDIO_PROBE_TIMEOUT_MS,
+  };
+  const input = validateNegotiation(
+    await probe.open("capture", route.input, request),
+    "capture",
+    request,
+  );
+  const output = validateNegotiation(
+    await probe.open("playback", route.output, request),
+    "playback",
+    request,
+  );
+  return { input, output };
+}
+
+export function createSystemAudioDuplexProbe(
+  spawnProcess: typeof spawn = spawn,
+): AudioDuplexProbe {
+  return {
+    open: async (direction, endpoint, request) => {
+      const failures: string[] = [];
+      for (const sampleRate of request.sampleRates) {
+        try {
+          await openAudioDirection(
+            direction,
+            endpoint,
+            sampleRate,
+            request.latency,
+            request.timeoutMs,
+            spawnProcess,
+          );
+          return { sampleRate, channels: request.channels, format: request.format };
+        } catch (error) {
+          failures.push(`${sampleRate} Hz: ${errorMessage(error)}`);
+        }
+      }
+      throw new Error(
+        `${direction} ${endpoint.id} rejected supported S16_LE mono rates (${failures.join("; ")})`,
+      );
+    },
+  };
+}
+
+export const systemAudioDuplexProbe = createSystemAudioDuplexProbe();
+
+function validateNegotiation(
+  value: NegotiatedAudioFormat,
+  direction: AudioProbeDirection,
+  request: AudioProbeRequest,
+): NegotiatedAudioFormat {
+  const normalizedFormat = value.format.toLowerCase().replaceAll("_", "");
+  if (normalizedFormat !== "s16le" || value.channels !== 1) {
+    throw new Error(`${direction} did not negotiate signed 16-bit mono audio`);
+  }
+  if (!request.sampleRates.includes(value.sampleRate)) {
+    throw new Error(`${direction} negotiated unsupported ${String(value.sampleRate)} Hz audio`);
+  }
+  return { sampleRate: value.sampleRate, channels: 1, format: "s16le" };
+}
+
+async function openAudioDirection(
+  direction: AudioProbeDirection,
+  endpoint: AudioEndpoint,
+  sampleRate: number,
+  latency: AudioLatency,
+  timeoutMs: number,
+  spawnProcess: typeof spawn,
+): Promise<void> {
+  const command = direction === "capture"
+    ? captureCommand(endpoint, { sampleRate, latency })
+    : playbackCommand(endpoint, { sampleRate, latency });
+  await new Promise<void>((resolve, reject) => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(command.file, command.args, {
+        shell: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let settled = false;
+    let diagnostics = "";
+    let successTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (successTimer !== undefined) clearTimeout(successTimer);
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      error === undefined ? resolve() : reject(error);
+    };
+    const onError = (error: Error) => finish(error);
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      finish(new Error(
+        `probe exited ${String(code ?? signal ?? "unknown")}${diagnostics ? `: ${diagnostics}` : ""}`,
+      ));
+    };
+    child.stderr.on("data", (chunk: Buffer) => {
+      diagnostics = `${diagnostics}${chunk.toString("utf8")}`.trim().slice(-512);
+    });
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.once("spawn", () => {
+      if (direction === "playback") {
+        child.stdin.end(Buffer.alloc(Math.ceil(sampleRate / 50) * 2));
+      }
+    });
+    successTimer = setTimeout(() => finish(), Math.min(250, timeoutMs));
+    timeoutTimer = setTimeout(
+      () => finish(new Error(`probe timed out after ${String(timeoutMs)} ms`)),
+      timeoutMs,
+    );
+    successTimer.unref();
+    timeoutTimer.unref();
+  });
 }
 
 export function opusEncoderCommand(bitrate: number): MediaCommand {
@@ -185,8 +429,10 @@ export class SystemMediaWorker implements MediaWorker {
     firstSignal: AbortSignal,
     secondSignal: AbortSignal,
   ) => Promise<void>;
+  readonly #discover: () => Promise<HardwareDiscoveryResult>;
+  readonly #duplexProbe: AudioDuplexProbe;
   readonly #analyzer = new PcmSpectrumAnalyzer({ sampleRate: SAMPLE_RATE, fftSize: 4_096 });
-  readonly #uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
+  #uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
   readonly #expectedExit = new WeakSet<ChildProcessWithoutNullStreams>();
   readonly #diagnostics = new WeakMap<ChildProcessWithoutNullStreams, string[]>();
   #capture: ChildProcessWithoutNullStreams | null = null;
@@ -206,12 +452,21 @@ export class SystemMediaWorker implements MediaWorker {
   #lastCenterFrequencyHz = 0;
   #lastCenterReadAtMs = Number.NEGATIVE_INFINITY;
   #pcmRemainder = Buffer.alloc(0);
+  #playbackRemainder = Buffer.alloc(0);
+  #captureResampler: StreamingPcm16Resampler | null = null;
+  #playbackResampler: StreamingPcm16Resampler | null = null;
+  #nativeInput: AudioEndpoint;
+  #nativeOutput: AudioEndpoint;
+  #nativeInputRate = SAMPLE_RATE;
+  #nativeOutputRate = SAMPLE_RATE;
   #captureTimelineEndMs: number | null = null;
   #digitalPlaybackActive = false;
   #digitalPlaybackAbort: AbortController | null = null;
   #suppressVoicePlaybackUntilMs = Number.NEGATIVE_INFINITY;
   #closed = false;
   #faulted = false;
+  #reconnecting = false;
+  #reconnectAttempted = false;
   #encoderTail: Promise<void> = Promise.resolve();
 
   private constructor(
@@ -226,6 +481,11 @@ export class SystemMediaWorker implements MediaWorker {
     this.#now = options.now ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#delayPlayback = options.delayPlayback ?? abortableDelay;
+    const discovery = new HardwareDiscovery();
+    this.#discover = options.discover ?? (() => discovery.discover());
+    this.#duplexProbe = options.duplexProbe ?? systemAudioDuplexProbe;
+    this.#nativeInput = profile.audioInput;
+    this.#nativeOutput = profile.audioOutput;
     this.digitalAudio = {
       sampleRate: SAMPLE_RATE,
       play: (pcm, sampleRate, signal) => this.#playDigitalPcm(pcm, sampleRate, signal),
@@ -290,6 +550,72 @@ export class SystemMediaWorker implements MediaWorker {
       clearInterval(this.#spectrumTimer);
       this.#spectrumTimer = null;
     }
+    await this.#stopProcesses();
+  }
+
+  async #start(): Promise<void> {
+    await this.#resolveNativeAudio(false);
+    await this.#startProcesses();
+  }
+
+  async #startProcesses(): Promise<void> {
+    const latency = this.#profile.audioRoute?.kind === "system-device"
+      ? this.#profile.audioRoute.latency
+      : "balanced";
+    this.#capture = await this.#spawn(
+      captureCommand(this.#nativeInput, { sampleRate: this.#nativeInputRate, latency }),
+      "audio capture",
+      true,
+    );
+    this.#encoder = await this.#spawn(opusEncoderCommand(this.#policy.opusBitrate), "Opus encoder");
+    this.#decoder = await this.#spawn(opusDecoderCommand(), "Opus decoder");
+    this.#playback = await this.#spawn(
+      playbackCommand(this.#nativeOutput, { sampleRate: this.#nativeOutputRate, latency }),
+      "audio playback",
+      true,
+    );
+    this.#pcmRemainder = Buffer.alloc(0);
+    this.#playbackRemainder = Buffer.alloc(0);
+    this.#captureResampler = this.#nativeInputRate === SAMPLE_RATE
+      ? null
+      : new StreamingPcm16Resampler(this.#nativeInputRate, SAMPLE_RATE);
+    this.#playbackResampler = this.#nativeOutputRate === SAMPLE_RATE
+      ? null
+      : new StreamingPcm16Resampler(SAMPLE_RATE, this.#nativeOutputRate);
+    this.#wireCapture();
+    this.#wireEncoder(this.#encoder);
+    this.#wirePlayback();
+    this.#uplinkWriter = new OggOpusWriter({ inputSampleRate: SAMPLE_RATE });
+    this.#decoder.stdin.write(this.#uplinkWriter.headers());
+    this.#resetSpectrumTimer();
+  }
+
+  async #resolveNativeAudio(reconnecting: boolean): Promise<void> {
+    const route = this.#profile.audioRoute;
+    if (route?.kind !== "system-device") {
+      this.#nativeInput = this.#profile.audioInput;
+      this.#nativeOutput = this.#profile.audioOutput;
+      this.#nativeInputRate = SAMPLE_RATE;
+      this.#nativeOutputRate = SAMPLE_RATE;
+      return;
+    }
+    const resolution = async () => {
+      const discovery = await this.#discover();
+      const resolved = resolveAudioRoute(route, discovery);
+      const negotiation = await negotiateAudioRoute(resolved, this.#duplexProbe);
+      this.#nativeInput = resolved.input;
+      this.#nativeOutput = resolved.output;
+      this.#nativeInputRate = negotiation.input.sampleRate;
+      this.#nativeOutputRate = negotiation.output.sampleRate;
+    };
+    if (reconnecting) {
+      await withTimeout(resolution(), RECONNECT_TIMEOUT_MS, "audio reconnect");
+    } else {
+      await resolution();
+    }
+  }
+
+  async #stopProcesses(): Promise<void> {
     const children = [this.#capture, this.#encoder, this.#decoder, this.#playback]
       .filter((child): child is ChildProcessWithoutNullStreams => child !== null);
     this.#capture = null;
@@ -299,50 +625,41 @@ export class SystemMediaWorker implements MediaWorker {
     await Promise.all(children.map((child) => this.#terminate(child)));
   }
 
-  async #start(): Promise<void> {
-    this.#capture = await this.#spawn(captureCommand(this.#profile.audioInput), "audio capture");
-    this.#encoder = await this.#spawn(opusEncoderCommand(this.#policy.opusBitrate), "Opus encoder");
-    this.#decoder = await this.#spawn(opusDecoderCommand(), "Opus decoder");
-    this.#playback = await this.#spawn(playbackCommand(this.#profile.audioOutput), "audio playback");
-    this.#wireCapture();
-    this.#wireEncoder(this.#encoder);
-    this.#wirePlayback();
-    this.#decoder.stdin.write(this.#uplinkWriter.headers());
-    this.#resetSpectrumTimer();
-  }
-
   #wireCapture(): void {
     this.#capture?.stdout.on("data", (chunk: Buffer) => {
-      const encoder = this.#encoder;
-      if (encoder !== null && encoder.stdin.writable && !encoder.stdin.destroyed) {
-        if (encoder.stdin.writableLength <= MAX_PROCESS_INPUT_BYTES) {
-          encoder.stdin.write(chunk);
-        }
-      }
-      let analysis = this.#pcmRemainder.length === 0
+      let nativePcm = this.#pcmRemainder.length === 0
         ? Buffer.from(chunk)
         : Buffer.concat([this.#pcmRemainder, chunk]);
-      if (analysis.length % 2 !== 0) {
-        this.#pcmRemainder = Buffer.from(analysis.subarray(-1));
-        analysis = analysis.subarray(0, -1);
+      if (nativePcm.length % 2 !== 0) {
+        this.#pcmRemainder = Buffer.from(nativePcm.subarray(-1));
+        nativePcm = nativePcm.subarray(0, -1);
       } else {
         this.#pcmRemainder = Buffer.alloc(0);
       }
-      if (analysis.length > 0) {
-        this.#analyzer.push(analysis);
-        const durationMs = (analysis.length / 2) * 1_000 / SAMPLE_RATE;
-        const observedStartMs = this.#now() - durationMs;
-        const startedAtMs = this.#captureTimelineEndMs === null ||
-            Math.abs(observedStartMs - this.#captureTimelineEndMs) > 250
-          ? observedStartMs
-          : this.#captureTimelineEndMs;
-        this.#captureTimelineEndMs = startedAtMs + durationMs;
-        this.#output.pcmCapture?.({
-          pcm: analysis,
-          sampleRate: SAMPLE_RATE,
-          startedAtMs,
-        });
+      if (nativePcm.length === 0) return;
+      const analysis = this.#captureResampler === null
+        ? nativePcm
+        : int16ToPcm16Le(this.#captureResampler.push(pcm16LeToInt16(nativePcm)));
+      if (analysis.length === 0) return;
+      const encoder = this.#encoder;
+      if (encoder !== null && encoder.stdin.writable && !encoder.stdin.destroyed) {
+        if (encoder.stdin.writableLength <= MAX_PROCESS_INPUT_BYTES) {
+          encoder.stdin.write(analysis);
+        }
       }
+      this.#analyzer.push(analysis);
+      const durationMs = (analysis.length / 2) * 1_000 / SAMPLE_RATE;
+      const observedStartMs = this.#now() - durationMs;
+      const startedAtMs = this.#captureTimelineEndMs === null ||
+          Math.abs(observedStartMs - this.#captureTimelineEndMs) > 250
+        ? observedStartMs
+        : this.#captureTimelineEndMs;
+      this.#captureTimelineEndMs = startedAtMs + durationMs;
+      this.#output.pcmCapture?.({
+        pcm: analysis,
+        sampleRate: SAMPLE_RATE,
+        startedAtMs,
+      });
     });
   }
 
@@ -370,7 +687,20 @@ export class SystemMediaWorker implements MediaWorker {
         !playback.stdin.destroyed &&
         playback.stdin.writableLength <= MAX_PROCESS_INPUT_BYTES
       ) {
-        playback.stdin.write(chunk);
+        let internalPcm = this.#playbackRemainder.length === 0
+          ? Buffer.from(chunk)
+          : Buffer.concat([this.#playbackRemainder, chunk]);
+        if (internalPcm.length % 2 !== 0) {
+          this.#playbackRemainder = Buffer.from(internalPcm.subarray(-1));
+          internalPcm = internalPcm.subarray(0, -1);
+        } else {
+          this.#playbackRemainder = Buffer.alloc(0);
+        }
+        if (internalPcm.length === 0) return;
+        const nativePcm = this.#playbackResampler === null
+          ? internalPcm
+          : int16ToPcm16Le(this.#playbackResampler.push(pcm16LeToInt16(internalPcm)));
+        if (nativePcm.length > 0) playback.stdin.write(nativePcm);
       }
     });
   }
@@ -399,8 +729,12 @@ export class SystemMediaWorker implements MediaWorker {
     const localAbort = new AbortController();
     this.#digitalPlaybackAbort = localAbort;
     this.#digitalPlaybackActive = true;
+    this.#playbackResampler?.reset();
     try {
       const output = resampleInt16(pcm, sampleRate, SAMPLE_RATE);
+      const nativeResampler = this.#nativeOutputRate === SAMPLE_RATE
+        ? null
+        : new StreamingPcm16Resampler(SAMPLE_RATE, this.#nativeOutputRate);
       const frameSamples = SAMPLE_RATE * DIGITAL_FRAME_MS / 1_000;
       const playbackStartedAtMs = this.#monotonicNow();
       const durationMs = output.length * 1_000 / SAMPLE_RATE;
@@ -412,7 +746,13 @@ export class SystemMediaWorker implements MediaWorker {
         const writeAtMs = playbackStartedAtMs + Math.max(0, frameEndMs - writeAheadMs);
         await this.#waitForPlaybackDeadline(writeAtMs, signal, localAbort.signal);
         assertNotAborted(signal, localAbort.signal);
-        const chunk = int16ToPcm16Le(output.subarray(offset, end));
+        let nativeSamples = nativeResampler === null
+          ? output.subarray(offset, end)
+          : nativeResampler.push(output.subarray(offset, end));
+        if (nativeResampler !== null && end === output.length) {
+          nativeSamples = joinInt16(nativeSamples, nativeResampler.flush());
+        }
+        const chunk = int16ToPcm16Le(nativeSamples);
         if (!playback.stdin.write(chunk)) {
           await waitForDrain(playback.stdin, signal, localAbort.signal);
         }
@@ -432,6 +772,8 @@ export class SystemMediaWorker implements MediaWorker {
         this.#digitalPlaybackAbort = null;
       }
       this.#digitalPlaybackActive = false;
+      this.#playbackResampler?.reset();
+      this.#playbackRemainder = Buffer.alloc(0);
       this.#suppressVoicePlaybackUntilMs = this.#now() + DIGITAL_VOICE_RESUME_GUARD_MS;
     }
   }
@@ -518,7 +860,11 @@ export class SystemMediaWorker implements MediaWorker {
     }
   }
 
-  async #spawn(command: MediaCommand, role: string): Promise<ChildProcessWithoutNullStreams> {
+  async #spawn(
+    command: MediaCommand,
+    role: string,
+    recoverableAudioDevice = false,
+  ): Promise<ChildProcessWithoutNullStreams> {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.#spawnProcess(command.file, command.args, {
@@ -553,12 +899,42 @@ export class SystemMediaWorker implements MediaWorker {
     child.once("exit", (code, signal) => {
       if (!this.#closed && !this.#expectedExit.has(child)) {
         const detail = diagnostics.join("").trim().slice(-1_024);
-        this.#reportFault(new Error(
+        const error = new Error(
           `${role} exited (${code ?? signal ?? "unknown"})${detail ? `: ${detail}` : ""}`,
-        ));
+        );
+        if (recoverableAudioDevice && this.#profile.audioRoute?.kind === "system-device") {
+          void this.#reconnectAfterDisconnect(error);
+        } else {
+          this.#reportFault(error);
+        }
       }
     });
     return child;
+  }
+
+  async #reconnectAfterDisconnect(error: Error): Promise<void> {
+    if (this.#closed || this.#faulted || this.#reconnecting) return;
+    if (this.#reconnectAttempted) {
+      this.#reportFault(error);
+      return;
+    }
+    this.#reconnectAttempted = true;
+    this.#reconnecting = true;
+    try {
+      await this.#stopDigitalPlayback();
+      await this.#stopProcesses();
+      if (this.#closed) return;
+      await this.#resolveNativeAudio(true);
+      if (this.#closed) return;
+      await this.#startProcesses();
+    } catch (reconnectError) {
+      this.#reportFault(new Error(
+        `audio device reconnect failed: ${errorMessage(reconnectError)}`,
+        { cause: reconnectError },
+      ));
+    } finally {
+      this.#reconnecting = false;
+    }
   }
 
   async #terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -591,6 +967,34 @@ function shortDelay(milliseconds: number): Promise<void> {
     const timer = setTimeout(resolve, milliseconds);
     timer.unref();
   });
+}
+
+function withTimeout<T>(operation: Promise<T>, milliseconds: number, role: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${role} timed out after ${String(milliseconds)} ms`)),
+      milliseconds,
+    );
+    timer.unref();
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function joinInt16(left: Int16Array, right: Int16Array): Int16Array {
+  if (right.length === 0) return left;
+  const output = new Int16Array(left.length + right.length);
+  output.set(left);
+  output.set(right, left.length);
+  return output;
 }
 
 function waitForDrain(

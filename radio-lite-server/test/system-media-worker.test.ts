@@ -9,6 +9,7 @@ import { OggOpusPacketReader, OggOpusWriter } from "../src/media/ogg-opus.ts";
 import * as systemMedia from "../src/media/system-media-worker.ts";
 import {
   captureCommand,
+  createSystemAudioDuplexProbe,
   opusDecoderCommand,
   opusEncoderCommand,
   playbackCommand,
@@ -70,6 +71,55 @@ test("ALSA worker commands bound capture and playback buffering for live radio",
   assert.ok(capture.args.includes("--period-time=20000"));
   assert.ok(playback.args.includes("--buffer-time=80000"));
   assert.ok(playback.args.includes("--period-time=20000"));
+});
+
+test("native ALSA commands use the negotiated rate and selected latency target", () => {
+  const endpoint = { backend: "alsa" as const, id: "hw:3,0" };
+  const capture = captureCommand(endpoint, {
+    sampleRate: 48_000,
+    latency: "low",
+  });
+  const playback = playbackCommand(endpoint, {
+    sampleRate: 48_000,
+    latency: "stable",
+  });
+
+  assert.equal(capture.args[capture.args.indexOf("-r") + 1], "48000");
+  assert.ok(capture.args.includes("--buffer-time=40000"));
+  assert.ok(capture.args.includes("--period-time=10000"));
+  assert.equal(playback.args[playback.args.indexOf("-r") + 1], "48000");
+  assert.ok(playback.args.includes("--buffer-time=160000"));
+  assert.ok(playback.args.includes("--period-time=40000"));
+});
+
+test("the native duplex probe accepts a clean open and prefers 48 kHz", async () => {
+  const commands: Array<{ file: string; args: string[] }> = [];
+  const spawnProcess = ((file: string, args: string[]) => {
+    commands.push({ file, args: [...args] });
+    const child = new FakeProcess();
+    queueMicrotask(() => {
+      child.emit("spawn");
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }) as unknown as typeof spawn;
+  const probe = createSystemAudioDuplexProbe(spawnProcess);
+  const request = {
+    sampleRates: [48_000, 44_100] as const,
+    channels: 1 as const,
+    format: "s16le" as const,
+    latency: "balanced" as const,
+    timeoutMs: 500,
+  };
+
+  const capture = await probe.open("capture", { backend: "alsa", id: "hw:3,0" }, request);
+  const playback = await probe.open("playback", { backend: "alsa", id: "hw:3,0" }, request);
+
+  assert.equal(capture.sampleRate, 48_000);
+  assert.equal(playback.sampleRate, 48_000);
+  assert.deepEqual(commands.map((command) => command.file), ["arecord", "aplay"]);
+  assert(commands.every((command) => command.args.includes("48000")));
 });
 
 test("PulseAudio and Opus worker commands use 16 kHz mono 20 ms packets", () => {
@@ -258,6 +308,82 @@ test("system worker routes capture, Opus packets and playback through bounded ch
   assert.equal(faults.length, 0);
   await worker.close();
   assert.ok(processes.every((process) => process.killed));
+});
+
+test("system worker re-resolves a stable card and converts 48 kHz capture to internal 16 kHz", async (context) => {
+  const processes: FakeProcess[] = [];
+  const commands: Array<{ file: string; args: string[] }> = [];
+  const spawnProcess = ((file: string, args: string[]) => {
+    commands.push({ file, args: [...args] });
+    const child = new FakeProcess();
+    processes.push(child);
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  }) as unknown as typeof spawn;
+  const opened: string[] = [];
+  const worker = await SystemMediaWorker.create(systemDeviceProfile(), {
+    audioDownlink: () => undefined,
+    spectrum: () => undefined,
+    fault: (error) => { throw error; },
+  }, {
+    spawnProcess,
+    discover: async () => discoveryWithStableCard("hw:3,0"),
+    duplexProbe: probeAt48k(opened),
+  } as SystemMediaWorkerOptions);
+  context.after(() => worker.close());
+
+  assert.deepEqual(opened, ["capture:hw:3,0", "playback:hw:3,0"]);
+  assert.equal(commands[0].args[commands[0].args.indexOf("-D") + 1], "hw:3,0");
+  assert.equal(commands[0].args[commands[0].args.indexOf("-r") + 1], "48000");
+  assert.equal(commands[3].args[commands[3].args.indexOf("-D") + 1], "hw:3,0");
+  assert.equal(commands[3].args[commands[3].args.indexOf("-r") + 1], "48000");
+
+  processes[0].stdout.write(pcm16LeFixture(Int16Array.from({ length: 480 }, (_, index) => index)));
+  await immediate();
+  assert.equal(Buffer.concat(processes[1].stdinChunks).length, 160 * 2);
+});
+
+test("system worker makes one reconnect attempt after re-resolving the same stable card", async (context) => {
+  const processes: FakeProcess[] = [];
+  const commands: Array<{ file: string; args: string[] }> = [];
+  let discoveryCalls = 0;
+  const faults: unknown[] = [];
+  const spawnProcess = ((file: string, args: string[]) => {
+    commands.push({ file, args: [...args] });
+    const child = new FakeProcess();
+    processes.push(child);
+    queueMicrotask(() => child.emit("spawn"));
+    return child;
+  }) as unknown as typeof spawn;
+  const worker = await SystemMediaWorker.create(systemDeviceProfile(), {
+    audioDownlink: () => undefined,
+    spectrum: () => undefined,
+    fault: (error) => faults.push(error),
+  }, {
+    spawnProcess,
+    discover: async () => {
+      discoveryCalls += 1;
+      return discoveryWithStableCard(discoveryCalls === 1 ? "hw:1,0" : "hw:3,0");
+    },
+    duplexProbe: probeAt48k([]),
+  } as SystemMediaWorkerOptions);
+  context.after(() => worker.close());
+
+  processes[0].exitCode = 1;
+  processes[0].emit("exit", 1, null);
+  await immediate();
+  await immediate();
+  await immediate();
+
+  assert.equal(discoveryCalls, 2);
+  assert.equal(commands[4].args[commands[4].args.indexOf("-D") + 1], "hw:3,0");
+  assert.equal(faults.length, 0, faults.map((error) => String(error)).join("; "));
+
+  processes[4].exitCode = 1;
+  processes[4].emit("exit", 1, null);
+  await immediate();
+  assert.equal(discoveryCalls, 2);
+  assert.equal(faults.length, 1);
 });
 
 test("digital playback uses absolute deadlines so repeated timer overshoot does not accumulate", async (context) => {
@@ -561,5 +687,63 @@ function profile() {
     ptt: { method: "RIG" as const },
     station: { callsign: "BI1ABC", grid: "OM89" },
     hardwareTxEnabled: true,
+  };
+}
+
+function systemDeviceProfile() {
+  return {
+    ...profile(),
+    audioInput: { backend: "alsa" as const, id: "hw:9,0" },
+    audioOutput: { backend: "alsa" as const, id: "hw:9,0" },
+    audioRoute: {
+      kind: "system-device" as const,
+      hardwareId: "usb:1234:5678:SN42",
+      latency: "balanced" as const,
+    },
+  };
+}
+
+function discoveryWithStableCard(endpointId: string) {
+  const input = {
+    backend: "alsa" as const,
+    direction: "input" as const,
+    id: endpointId,
+    label: "USB input",
+  };
+  const output = {
+    backend: "alsa" as const,
+    direction: "output" as const,
+    id: endpointId,
+    label: "USB output",
+  };
+  return {
+    hamlibModels: [],
+    curatedPresets: [],
+    serialDevices: [],
+    audioInputs: [input],
+    audioOutputs: [output],
+    audioCards: [{
+      hardwareId: "usb:1234:5678:SN42",
+      label: "USB Audio CODEC (SN42)",
+      transport: "usb" as const,
+      complete: true,
+      input,
+      output,
+    }],
+    pttMethods: ["RIG" as const],
+    baudRates: [38_400],
+    warnings: [],
+  };
+}
+
+function probeAt48k(opened: string[]) {
+  return {
+    open: async (
+      direction: "capture" | "playback",
+      endpoint: { id: string },
+    ) => {
+      opened.push(`${direction}:${endpoint.id}`);
+      return { sampleRate: 48_000, channels: 1, format: "s16le" as const };
+    },
   };
 }

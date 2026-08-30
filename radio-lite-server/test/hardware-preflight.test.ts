@@ -7,6 +7,7 @@ import {
   HardwarePreflight,
   HardwarePreflightCleanupUncertainError,
   hardwarePreflightRigctldTarget,
+  resolveAudioRoute,
   type ReadOnlyRigSession,
 } from "../src/config/hardware-preflight.ts";
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
@@ -361,6 +362,61 @@ test("a network rigctld profile does not require a local rigctld executable", as
   assert(!commands.includes("rigctld"));
 });
 
+test("resolves a saved USB card after ALSA renumbering", () => {
+  const resolved = resolveAudioRoute(
+    { kind: "system-device", hardwareId: "usb:1234:5678:SN42", latency: "balanced" },
+    discoveryWithStableCard("hw:3,0"),
+  );
+
+  assert.equal(resolved.input.id, "hw:3,0");
+  assert.equal(resolved.output.id, "hw:3,0");
+});
+
+test("preflight opens both directions on the re-resolved card and records negotiated rates", async () => {
+  const opened: string[] = [];
+  const duplexProbe = {
+    open: async (
+      direction: "capture" | "playback",
+      endpoint: { id: string },
+      request: { sampleRates: readonly number[] },
+    ) => {
+      opened.push(`${direction}:${endpoint.id}`);
+      return { sampleRate: request.sampleRates[0], channels: 1, format: "s16le" as const };
+    },
+  };
+  const profile: RadioProfile = {
+    ...networkProfile,
+    audioRoute: {
+      kind: "system-device",
+      hardwareId: "usb:1234:5678:SN42",
+      latency: "balanced",
+    },
+  };
+  const preflight = new HardwarePreflight({
+    openRig: async () => readOnlySession(),
+    discover: async () => discoveryWithStableCard("hw:3,0"),
+    commandAvailable: async () => true,
+    duplexProbe,
+  });
+
+  const result = await preflight.test(profile);
+
+  assert.deepEqual(opened, ["capture:hw:3,0", "playback:hw:3,0"]);
+  assert.deepEqual(result.negotiatedRates, { input: 48_000, output: 48_000 });
+  assert.equal(result.checks.find((check) => check.id === "audioInput")?.details.id, "hw:3,0");
+  assert.equal(result.checks.find((check) => check.id === "audioOutput")?.details.id, "hw:3,0");
+});
+
+test("saved system-device routes fail honestly when the stable card is absent", () => {
+  assert.throws(
+    () => resolveAudioRoute(
+      { kind: "system-device", hardwareId: "usb:1234:5678:SN42", latency: "balanced" },
+      discoveryWithAudio(),
+    ),
+    /usb:1234:5678:SN42/u,
+  );
+});
+
 function responseFor(command: string): RigResponse {
   switch (command) {
   case "\\get_freq":
@@ -407,5 +463,33 @@ function discoveryWithAudio(): HardwareDiscoveryResult {
     pttMethods: ["RIG"],
     baudRates: [38_400],
     warnings: [],
+  };
+}
+
+function discoveryWithStableCard(endpointId: string): HardwareDiscoveryResult {
+  const input = {
+    backend: "alsa" as const,
+    direction: "input" as const,
+    id: endpointId,
+    label: "USB input",
+  };
+  const output = {
+    backend: "alsa" as const,
+    direction: "output" as const,
+    id: endpointId,
+    label: "USB output",
+  };
+  return {
+    ...discoveryWithAudio(),
+    audioInputs: [input],
+    audioOutputs: [output],
+    audioCards: [{
+      hardwareId: "usb:1234:5678:SN42",
+      label: "USB Audio CODEC (SN42)",
+      transport: "usb",
+      complete: true,
+      input,
+      output,
+    }],
   };
 }
