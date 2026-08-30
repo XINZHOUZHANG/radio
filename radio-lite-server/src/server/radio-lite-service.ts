@@ -78,6 +78,11 @@ type HttpPrincipal = {
   user: PublicUser;
 };
 
+type ControlConnectionOwnership = {
+  closed: boolean;
+  telemetrySubscriptions: Map<string, () => void>;
+};
+
 export class RadioLiteService {
   readonly #now: () => number;
   readonly #users: UserStore;
@@ -325,7 +330,10 @@ export class RadioLiteService {
     let authenticatedPrincipalId: string | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let safetyUnsubscribe: (() => void) | null = null;
-    const telemetrySubscriptions = new Map<string, () => void>();
+    const ownership: ControlConnectionOwnership = {
+      closed: false,
+      telemetrySubscriptions: new Map(),
+    };
     let commandTail: Promise<void> = Promise.resolve();
     let mediaTail: Promise<void> = Promise.resolve();
     const authTimer = setTimeout(() => {
@@ -487,7 +495,7 @@ export class RadioLiteService {
           user,
           connectionOwnerId,
           principalId,
-          telemetrySubscriptions,
+          ownership,
         ),
         () => this.#handleControlMessage(
           webSocket,
@@ -495,20 +503,21 @@ export class RadioLiteService {
           user,
           connectionOwnerId,
           principalId,
-          telemetrySubscriptions,
+          ownership,
         ),
       );
     });
 
     webSocket.once("close", () => {
+      ownership.closed = true;
       clearTimeout(authTimer);
       if (expiryTimer !== null) {
         clearTimeout(expiryTimer);
       }
       safetyUnsubscribe?.();
       safetyUnsubscribe = null;
-      for (const unsubscribe of telemetrySubscriptions.values()) unsubscribe();
-      telemetrySubscriptions.clear();
+      for (const unsubscribe of ownership.telemetrySubscriptions.values()) unsubscribe();
+      ownership.telemetrySubscriptions.clear();
       this.#webSockets.delete(webSocket);
       this.#controlWebSockets.delete(webSocket);
       if (channel === "media") {
@@ -613,7 +622,7 @@ export class RadioLiteService {
     user: PublicUser,
     ownerId: string,
     principalId: string,
-    telemetrySubscriptions: Map<string, () => void>,
+    ownership: ControlConnectionOwnership,
   ): Promise<void> {
     let requestType = "unknown";
     let commandId: string | undefined;
@@ -638,17 +647,23 @@ export class RadioLiteService {
 
       const radioId = messageText(message.radioId, "radioId", 32);
       const runtime = await this.#runtimes.get(radioId);
+      if (ownership.closed || webSocket.readyState !== WebSocket.OPEN) return;
       if (message.t === "rig.telemetry.subscribe") {
         exactMessageKeys(message, ["t", "radioId", "commandId"], ["commandId"]);
-        telemetrySubscriptions.get(radioId)?.();
-        telemetrySubscriptions.set(radioId, runtime.telemetry.subscribe((telemetry) => {
+        ownership.telemetrySubscriptions.get(radioId)?.();
+        const unsubscribe = runtime.telemetry.subscribe((telemetry) => {
           if (
             webSocket.readyState === WebSocket.OPEN &&
             webSocket.bufferedAmount <= 256 * 1_024
           ) {
             sendWebSocketJson(webSocket, { t: "rig.telemetry", ...telemetry });
           }
-        }));
+        });
+        if (ownership.closed || webSocket.readyState !== WebSocket.OPEN) {
+          unsubscribe();
+          return;
+        }
+        ownership.telemetrySubscriptions.set(radioId, unsubscribe);
         sendWebSocketJson(webSocket, {
           t: "rig.telemetry.subscribed",
           radioId,
@@ -658,8 +673,8 @@ export class RadioLiteService {
       }
       if (message.t === "rig.telemetry.unsubscribe") {
         exactMessageKeys(message, ["t", "radioId", "commandId"], ["commandId"]);
-        telemetrySubscriptions.get(radioId)?.();
-        telemetrySubscriptions.delete(radioId);
+        ownership.telemetrySubscriptions.get(radioId)?.();
+        ownership.telemetrySubscriptions.delete(radioId);
         sendWebSocketJson(webSocket, {
           t: "rig.telemetry.unsubscribed",
           radioId,

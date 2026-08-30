@@ -25,7 +25,10 @@ import type {
   RadioModeState,
   RadioState,
 } from "./radio-driver.ts";
-import { RadioTelemetrySampler } from "./radio-telemetry.ts";
+import {
+  RadioTelemetrySampler,
+  type RadioTelemetryClock,
+} from "./radio-telemetry.ts";
 import { rigctldTarget } from "./rigctld-command.ts";
 import {
   RigRuntimeSupervisor,
@@ -42,6 +45,7 @@ export class RadioRuntimeCleanupUncertainError extends Error {}
 
 export type RadioRuntimeOptions = {
   safetyEvents?: SafetyEventHub;
+  telemetryClock?: RadioTelemetryClock;
   startManaged?: () => Promise<void>;
   restartManaged?: (
     recoveryGeneration: number,
@@ -73,7 +77,10 @@ export class RadioRuntime {
   ) {
     this.profile = profile;
     this.#driver = driver;
-    this.telemetry = new RadioTelemetrySampler(profile.id, driver, { now });
+    this.telemetry = new RadioTelemetrySampler(profile.id, driver, {
+      clock: options.telemetryClock,
+      now,
+    });
     this.control = new ControlLeaseManager({ now });
     const transmitDriver: TransmitDriver = {
       activate: async (mode) => {
@@ -142,6 +149,8 @@ export class RadioRuntime {
           throw error;
         }
       }
+      await this.#driver.prepareTelemetry?.();
+      await this.telemetry.readState();
       this.telemetry.start();
     })();
     await this.#initializePromise;

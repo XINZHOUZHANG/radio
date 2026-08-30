@@ -48,6 +48,7 @@ export class RadioTelemetrySampler {
   #inFlight: Promise<void> | null = null;
   #started = false;
   #closed = false;
+  #phase: "receive" | "transmit" = "receive";
   #confirmedRevision = 0;
   #pendingConfirmedState: Partial<RadioState> = {};
 
@@ -115,9 +116,10 @@ export class RadioTelemetrySampler {
   }
 
   confirmPtt(ptt: boolean): void {
-    const previous = this.#value?.state.ptt;
+    const previous = this.#phase;
+    this.#phase = ptt ? "transmit" : "receive";
     this.#confirmState({ ptt });
-    if (previous !== ptt && this.#timer !== null) {
+    if (previous !== this.#phase && this.#timer !== null) {
       this.#clock.clearTimeout(this.#timer);
       this.#timer = null;
       this.#scheduleNext();
@@ -162,7 +164,10 @@ export class RadioTelemetrySampler {
 
   async #performSample(): Promise<void> {
     const confirmedRevision = this.#confirmedRevision;
-    const mode = this.#value?.state.ptt === true ? "transmit" : "receive";
+    this.#pendingConfirmedState = {};
+    const mode = this.#phase === "transmit" && this.#value !== null
+      ? "transmit"
+      : "receive";
     let state: RadioState;
     let meters: RadioMeterSample;
     if (mode === "receive") {
@@ -190,6 +195,7 @@ export class RadioTelemetrySampler {
       meters: meterValues(meters),
       availableMeters: [...(meters.availableMeters ?? [])],
     };
+    this.#phase = state.ptt ? "transmit" : "receive";
     this.#value = value;
     for (const listener of [...this.#listeners]) {
       this.#deliver(listener, cloneTelemetry(value));
@@ -211,7 +217,7 @@ export class RadioTelemetrySampler {
 
   #scheduleNext(): void {
     if (!this.#started || this.#closed || this.#timer !== null) return;
-    const delayMs = this.#value?.state.ptt === true
+    const delayMs = this.#phase === "transmit"
       ? this.#transmitPeriodMs
       : this.#receivePeriodMs;
     this.#timer = this.#clock.setTimeout(() => {

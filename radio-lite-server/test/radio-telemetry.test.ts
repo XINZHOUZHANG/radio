@@ -176,6 +176,36 @@ test("a concurrent confirmed write does not erase other freshly sampled state", 
   await sampler.close();
 });
 
+test("only confirmations made during a sample override freshly sampled fields", async () => {
+  const driver = new DeferredStateDriver({
+    frequencyHz: 14_074_000,
+    mode: "USB",
+    passbandHz: 3_000,
+    ptt: false,
+  });
+  const clock = new ManualTelemetryClock();
+  const sampler = new RadioTelemetrySampler("main", driver, { clock });
+  sampler.start();
+  await sampler.readState();
+  sampler.confirmFrequency(7_074_000);
+  driver.state.frequencyHz = 14_076_000;
+  driver.blockNextRead = true;
+
+  const ticking = clock.advanceBy(2_000);
+  await driver.readStarted.promise;
+  sampler.confirmMode("FM", 12_000);
+  driver.allowRead.resolve();
+  await ticking;
+
+  assert.deepEqual(sampler.snapshot()?.state, {
+    frequencyHz: 14_076_000,
+    mode: "FM",
+    passbandHz: 12_000,
+    ptt: false,
+  });
+  await sampler.close();
+});
+
 test("transmit telemetry uses telemetry PTT and one discovered actual-power token", async () => {
   const requester = new MeterRequester();
   const transportModes: string[] = [];
@@ -183,6 +213,8 @@ test("transmit telemetry uses telemetry PTT and one discovered actual-power toke
     onTransportMode: (mode) => transportModes.push(mode),
   });
   await driver.initialize();
+  assert.equal(requester.requests.length, 0);
+  await driver.prepareTelemetry();
   assert.deepEqual(requester.requests.map((value) => value.command), ["\\get_level ?"]);
   requester.requests.length = 0;
 
@@ -225,6 +257,7 @@ test("RPRT -11 disables only the affected meter and falls back on a later tick",
   requester.unavailableOnce.add("RFPOWER_METER_WATTS");
   const driver = new HamlibDriver(new HamlibRig(requester));
   await driver.initialize();
+  await driver.prepareTelemetry();
   requester.requests.length = 0;
 
   const first = await driver.readTelemetry("transmit");

@@ -51,6 +51,11 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   });
   const rig = new ApiFakeRig();
   let failRuntimeClose = false;
+  let delayRuntimeLookup = false;
+  let activeTelemetrySubscribers = 0;
+  const delayedRuntimeLookupStarted = deferred<void>();
+  const allowDelayedRuntimeLookup = deferred<void>();
+  const delayedRuntimeReady = deferred<void>();
   const cleanupPreflightStarted = deferred<void>();
   const allowCleanupPreflightFailure = deferred<void>();
   const testedProfiles: RadioProfile[] = [];
@@ -80,12 +85,29 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
       hmacKey: Buffer.alloc(32, 6),
     },
     runtimeFactory: async (profile, _managedPort, safetyEvents) => {
+      if (delayRuntimeLookup) {
+        delayedRuntimeLookupStarted.resolve();
+        await allowDelayedRuntimeLookup.promise;
+      }
       const runtime = new RadioRuntime(profile, rig, async () => {
         if (failRuntimeClose) {
           throw new Error("test runtime cleanup remained uncertain");
         }
       }, now, { safetyEvents });
       await runtime.initialize();
+      const subscribe = runtime.telemetry.subscribe.bind(runtime.telemetry);
+      runtime.telemetry.subscribe = (listener) => {
+        activeTelemetrySubscribers += 1;
+        const unsubscribe = subscribe(listener);
+        let active = true;
+        return () => {
+          if (!active) return;
+          active = false;
+          activeTelemetrySubscribers -= 1;
+          unsubscribe();
+        };
+      };
+      delayedRuntimeReady.resolve();
       return runtime;
     },
     hardwarePreflight: {
@@ -370,6 +392,38 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     safetyEpoch: safetyBegin.safetyEpoch,
   });
 
+  delayRuntimeLookup = true;
+  const closingDuringLookupSocket = new WebSocket(
+    `ws://127.0.0.1:${address.port}/ws/control`,
+    "radio-lite.v1",
+  );
+  context.after(() => closingDuringLookupSocket.terminate());
+  await new Promise<void>((resolve, reject) => {
+    closingDuringLookupSocket.once("open", resolve);
+    closingDuringLookupSocket.once("error", reject);
+  });
+  assert.equal((await sendJsonAndReceive(closingDuringLookupSocket, {
+    t: "auth.device",
+    deviceId: credentials.deviceId,
+    accessToken: credentials.accessToken,
+  })).t, "auth.ok");
+  assert.equal((await nextJsonMessage(closingDuringLookupSocket)).t, "safety.snapshot.begin");
+  assert.equal((await nextJsonMessage(closingDuringLookupSocket)).t, "safety.snapshot");
+  assert.equal((await nextJsonMessage(closingDuringLookupSocket)).t, "safety.snapshot.end");
+  closingDuringLookupSocket.send(JSON.stringify({
+    t: "rig.telemetry.subscribe",
+    radioId: "main",
+    commandId: "closing-lookup-subscribe",
+  }));
+  await delayedRuntimeLookupStarted.promise;
+  closingDuringLookupSocket.close();
+  await new Promise<void>((resolve) => closingDuringLookupSocket.once("close", resolve));
+  allowDelayedRuntimeLookup.resolve();
+  await delayedRuntimeReady.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(activeTelemetrySubscribers, 0);
+  delayRuntimeLookup = false;
+
   const telemetrySocket = new WebSocket(
     `ws://127.0.0.1:${address.port}/ws/control`,
     "radio-lite.v1",
@@ -423,7 +477,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
     availableMeters: ["STRENGTH"],
   });
   assert.deepEqual(secondTelemetry, firstTelemetry);
-  assert.equal(rig.readStateCalls - telemetryReadsBefore, 1);
+  assert.equal(rig.readStateCalls - telemetryReadsBefore, 0);
 
   assert.deepEqual(await sendJsonAndReceive(telemetrySocket, {
     t: "rig.telemetry.unsubscribe",

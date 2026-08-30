@@ -30,9 +30,12 @@ export class HamlibDriver implements RadioDriver {
     this.#onTransportMode = options.onTransportMode ?? (() => undefined);
   }
 
-  async initialize(): Promise<void> {
+  async initialize(): Promise<void> {}
+
+  async prepareTelemetry(): Promise<void> {
     // Warm the readable-level catalogue once, outside every steady telemetry
-    // tick. This keeps a TX tick to PTT, SWR, ALC, and one actual-power read.
+    // tick and after managed rigctld startup. This keeps a TX tick to PTT,
+    // SWR, ALC, and one actual-power read.
     await this.#rig.discoverTelemetryMeters();
   }
 

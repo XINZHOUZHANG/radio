@@ -49,6 +49,7 @@ export type RadioPttReadOptions = {
 
 export interface RadioDriver {
   initialize(): Promise<void>;
+  prepareTelemetry?(): Promise<void>;
   close(): Promise<void>;
   capabilities(): Promise<RadioCapabilities>;
   readState(options?: RadioReadOptions): Promise<RadioState>;

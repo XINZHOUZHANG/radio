@@ -21,6 +21,7 @@ import {
   TransmitPermissionError,
 } from "../src/rig/radio-runtime.ts";
 import type { RadioControl, RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
+import type { RadioTelemetryClock } from "../src/rig/radio-telemetry.ts";
 import { RigReportError } from "../src/rig/transport.ts";
 
 class FakeRig implements RadioDriver {
@@ -37,12 +38,16 @@ class FakeRig implements RadioDriver {
   readonly events: string[] = [];
   readStateCalls = 0;
   readControlsCalls = 0;
+  readonly telemetryModes: Array<"receive" | "transmit"> = [];
 
   async initialize() {}
   async close() {}
   async capabilities() { return { canTransmit: true, supportsInternalTuner: true }; }
   async readState() { this.readStateCalls += 1; return { frequencyHz: this.frequencyHz, mode: this.mode, passbandHz: this.passbandHz, ptt: this.ptt }; }
-  async readTelemetry(_mode: "receive" | "transmit") { return {}; }
+  async readTelemetry(mode: "receive" | "transmit") {
+    this.telemetryModes.push(mode);
+    return mode === "transmit" ? { ptt: this.ptt } : {};
+  }
   async setFrequency(value: number) { this.frequencyHz = value; this.events.push(`frequency:${value}`); return value; }
   async setMode(value: string, passband = 0) { this.mode = value; this.passbandHz = passband || 2_400; this.events.push(`mode:${value}`); return { mode: this.mode, passbandHz: this.passbandHz }; }
   async setPtt(value: boolean) {
@@ -142,10 +147,13 @@ class DeferredControlRig extends FakeRig {
 class DeferredTelemetryRig extends FakeRig {
   readonly telemetryReadStarted = deferred<void>();
   readonly allowTelemetryRead = deferred<void>();
+  deferTelemetryRead = false;
 
   override async readState() {
-    this.telemetryReadStarted.resolve();
-    await this.allowTelemetryRead.promise;
+    if (this.deferTelemetryRead) {
+      this.telemetryReadStarted.resolve();
+      await this.allowTelemetryRead.promise;
+    }
     return super.readState();
   }
 }
@@ -206,6 +214,7 @@ class NonHamlibLockedControlRig extends FakeRig {
 
 class RecordingHamlibRequester {
   readonly commands: string[] = [];
+  lifecycle: string[] | null = null;
   ptt = false;
   tuner = false;
   pttUnavailable = false;
@@ -214,6 +223,7 @@ class RecordingHamlibRequester {
 
   async request(command: string): Promise<RigResponse> {
     this.commands.push(command);
+    this.lifecycle?.push(`cat:${command}`);
     const name = command.slice(1).split(" ")[0] ?? "unknown";
     if (this.pttUnavailable && (name === "set_ptt" || name === "get_ptt")) {
       throw new RigReportError(name, -11);
@@ -227,6 +237,15 @@ class RecordingHamlibRequester {
     }
     if (command === "\\get_level ?") {
       return rigResponse(name, { Level: "STRENGTH SWR ALC RFPOWER_METER_WATTS" });
+    }
+    if (command === "\\get_freq") {
+      return rigResponse(name, { Frequency: "14074000" });
+    }
+    if (command === "\\get_mode") {
+      return rigResponse(name, { Mode: "USB", Passband: "3000" });
+    }
+    if (command === "\\get_level STRENGTH") {
+      return { ...rigResponse(name), values: ["-8"] };
     }
     if (command === "\\vfo_op ?") {
       return rigResponse(name, { "Mem/VFO Op": this.vfoOperations });
@@ -252,6 +271,68 @@ class RecordingHamlibRequester {
     this.commands.length = 0;
   }
 }
+
+class LifecycleHamlibDriver extends HamlibDriver {
+  readonly lifecycle: string[];
+
+  constructor(rig: HamlibRig, lifecycle: string[]) {
+    super(rig);
+    this.lifecycle = lifecycle;
+  }
+
+  override async initialize(): Promise<void> {
+    this.lifecycle.push("driver.initialize");
+    await super.initialize();
+  }
+}
+
+test("managed startup precedes Hamlib telemetry preparation while driver initialize stays first", async (context) => {
+  const lifecycle: string[] = [];
+  const requester = new RecordingHamlibRequester();
+  requester.lifecycle = lifecycle;
+  const runtime = new RadioRuntime(
+    profile(true),
+    new LifecycleHamlibDriver(new HamlibRig(requester), lifecycle),
+    undefined,
+    Date.now,
+    { startManaged: async () => { lifecycle.push("managed.start"); } },
+  );
+  context.after(() => runtime.close());
+
+  await runtime.initialize();
+
+  assert.equal(lifecycle[0], "driver.initialize");
+  assert.ok(lifecycle.indexOf("managed.start") < lifecycle.indexOf("cat:\\get_level ?"));
+});
+
+test("runtime initialization establishes state before immediate TX and uses one-second cadence", async (context) => {
+  const rig = new FakeRig();
+  const clock = new RuntimeTelemetryClock();
+  const runtime = new RadioRuntime(profile(true), rig, undefined, clock.now, {
+    telemetryClock: clock,
+  });
+  context.after(() => runtime.close());
+
+  await runtime.initialize();
+  assert.deepEqual(runtime.telemetry.snapshot()?.state, {
+    frequencyHz: 14_074_000,
+    mode: "USB",
+    passbandHz: 3_000,
+    ptt: false,
+  });
+  const operatorUser = user("immediate-tx", "operator", true);
+  const control = await runtime.acquireControl("immediate-device", operatorUser);
+  await runtime.startTransmit(
+    "immediate-device",
+    operatorUser,
+    control.lease.token,
+    "voice",
+  );
+
+  await clock.advanceBy(1_000);
+
+  assert.deepEqual(rig.telemetryModes, ["receive", "transmit"]);
+});
 
 test("runtime initialization observes PTT without writing OFF", async () => {
   const rig = new FakeRig();
@@ -298,7 +379,7 @@ test("receive-only initialization does not swallow a driver initialization failu
   await runtime.close();
 });
 
-test("receive-only PTT None runtime starts without treating display cache as evidence", async () => {
+test("receive-only PTT None runtime starts without treating display cache as evidence", async (context) => {
   const requester = new RecordingHamlibRequester();
   requester.pttUnavailable = true;
   const receiveOnlyProfile = {
@@ -309,10 +390,19 @@ test("receive-only PTT None runtime starts without treating display cache as evi
     receiveOnlyProfile,
     new HamlibDriver(new HamlibRig(requester, { pttMethod: "None" })),
   );
+  context.after(() => runtime.close());
 
   await runtime.initialize();
 
-  assert.deepEqual(requester.commands, ["\\get_level ?", "\\get_ptt"]);
+  const initializationCommands = [
+    "\\get_ptt",
+    "\\get_level ?",
+    "\\get_freq",
+    "\\get_mode",
+    "\\get_ptt",
+    "\\get_level STRENGTH",
+  ];
+  assert.deepEqual(requester.commands, initializationCommands);
   const operator = user("receive-only", "operator", true);
   const control = await runtime.acquireControl("receive-device", operator);
   await assert.rejects(
@@ -320,7 +410,7 @@ test("receive-only PTT None runtime starts without treating display cache as evi
     HardwareTransmitDisabledError,
   );
   await runtime.close();
-  assert.deepEqual(requester.commands, ["\\get_level ?", "\\get_ptt"]);
+  assert.deepEqual(requester.commands, initializationCommands);
 });
 
 test("runtime voice dekey sends one OFF write and one strict PTT read", async () => {
@@ -740,13 +830,14 @@ test("runtime close still cleans dependencies and reports an uncertain de-key", 
 
 test("runtime close dekeys before waiting for telemetry and drains it before dependencies", async () => {
   const rig = new DeferredTelemetryRig();
+  const clock = new RuntimeTelemetryClock();
   let dependenciesClosed = false;
   const runtime = new RadioRuntime(profile(true), rig, async () => {
     dependenciesClosed = true;
-  });
+  }, clock.now, { telemetryClock: clock });
   await runtime.initialize();
-  const stateRead = runtime.readState();
-  void stateRead.catch(() => undefined);
+  rig.deferTelemetryRead = true;
+  await clock.advanceBy(2_000);
   await rig.telemetryReadStarted.promise;
   const operatorUser = user("telemetry-close", "operator", true);
   const control = await runtime.acquireControl("telemetry-close-device", operatorUser);
@@ -1139,6 +1230,39 @@ function user(id: string, role: "admin" | "operator", canTransmit: boolean): Pub
     updatedAtMs: 0,
     lastLoginAtMs: null,
   };
+}
+
+type RuntimeTimer = { atMs: number; callback: () => void; active: boolean };
+
+class RuntimeTelemetryClock implements RadioTelemetryClock {
+  nowMs = 0;
+  readonly timers: RuntimeTimer[] = [];
+  now = () => this.nowMs;
+
+  setTimeout(callback: () => void, delayMs: number): RuntimeTimer {
+    const timer = { atMs: this.nowMs + delayMs, callback, active: true };
+    this.timers.push(timer);
+    return timer;
+  }
+
+  clearTimeout(timer: unknown): void {
+    (timer as RuntimeTimer).active = false;
+  }
+
+  async advanceBy(milliseconds: number): Promise<void> {
+    const target = this.nowMs + milliseconds;
+    while (true) {
+      const next = this.timers
+        .filter((timer) => timer.active && timer.atMs <= target)
+        .sort((left, right) => left.atMs - right.atMs)[0];
+      if (next === undefined) break;
+      this.nowMs = next.atMs;
+      next.active = false;
+      next.callback();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    this.nowMs = target;
+  }
 }
 
 function deferred<T = void>(): {
