@@ -162,8 +162,10 @@ function hexadecimal(value: string | undefined): string | undefined {
 }
 
 function stableAlsaCardId(value: string | undefined): string | undefined {
-  const cardId = stablePart(value);
-  return cardId !== undefined && /[A-Za-z]/u.test(cardId) ? cardId : undefined;
+  const cardId = normalized(value);
+  return cardId !== undefined && /^(?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{1,15}$/u.test(cardId)
+    ? cardId
+    : undefined;
 }
 
 function find(parent: number[], index: number): number {

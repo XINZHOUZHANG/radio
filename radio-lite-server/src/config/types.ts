@@ -94,7 +94,7 @@ const SAFE_HOST_PATTERN = /^[A-Za-z0-9._:-]{1,253}$/;
 const ALLOWED_BAUD_RATES = new Set<number>(SERIAL_BAUD_RATES);
 const ALLOWED_PTT_METHODS = new Set<string>(PTT_METHODS);
 const ALLOWED_AUDIO_LATENCIES = new Set<string>(AUDIO_LATENCIES);
-const STABLE_HARDWARE_ID_PATTERN = /^(?:usb:(?:[0-9a-f]{4}:[0-9a-f]{4}:|serial:)[A-Za-z0-9._-]{1,128}|alsa:(?=[A-Za-z0-9._-]*[A-Za-z])[A-Za-z0-9._-]{1,128})$/iu;
+const STABLE_HARDWARE_ID_PATTERN = /^(?:usb:(?:[0-9a-f]{4}:[0-9a-f]{4}:|serial:)[A-Za-z0-9._-]{1,128}|alsa:(?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{1,15})$/iu;
 
 export function parseRadioConfig(value: unknown): RadioConfigFile {
   const root = objectValue(value, "configuration");

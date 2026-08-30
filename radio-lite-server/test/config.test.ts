@@ -120,6 +120,22 @@ test("audio routes accept only their exact union members", () => {
       },
     })],
   }), /hardwareId must identify a stable card/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: {
+        kind: "system-device", hardwareId: "alsa:alsa_input.usb-radio", latency: "low",
+      },
+    })],
+  }), /hardwareId must identify a stable card/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: {
+        kind: "system-device", hardwareId: "alsa:alsa_output.usb-radio", latency: "low",
+      },
+    })],
+  }), /hardwareId must identify a stable card/u);
 });
 
 test("validates Hamlib PTT methods, device paths and GPIO bit numbers", () => {
