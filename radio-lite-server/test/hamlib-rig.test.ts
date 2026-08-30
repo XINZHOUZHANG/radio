@@ -97,6 +97,14 @@ function operationFixture() {
   const writes: string[] = [];
   let mode = "USB";
   let passband = 2_400;
+  let split = false;
+  let rit = 0;
+  let xit = 0;
+  let tuningStep = 100;
+  let repeaterShift = "None";
+  let repeaterOffset = 0;
+  let ctcss = 885;
+  let dcs = 23;
   const driver = new HamlibDriver(new HamlibRig({
     request: async (command: string) => {
       const name = command.slice(1).split(" ")[0] ?? "unknown";
@@ -110,6 +118,14 @@ function operationFixture() {
       if (command === "\\get_mode") {
         return response("get_mode", { Mode: mode, Passband: String(passband) });
       }
+      if (command === "\\get_split_vfo") return responseValues(name, [split ? "1" : "0"]);
+      if (command === "\\get_rit") return responseValues(name, [String(rit)]);
+      if (command === "\\get_xit") return responseValues(name, [String(xit)]);
+      if (command === "\\get_ts") return responseValues(name, [String(tuningStep)]);
+      if (command === "\\get_rptr_shift") return responseValues(name, [repeaterShift]);
+      if (command === "\\get_rptr_offs") return responseValues(name, [String(repeaterOffset)]);
+      if (command === "\\get_ctcss_tone") return responseValues(name, [String(ctcss)]);
+      if (command === "\\get_dcs_code") return responseValues(name, [String(dcs)]);
       if (command.startsWith("\\set_mode ")) {
         writes.push(command);
         const [, nextMode = "", nextPassband = ""] = command.split(" ");
@@ -119,6 +135,15 @@ function operationFixture() {
       }
       if (command.startsWith("\\set_")) {
         writes.push(command);
+        const value = command.split(" ")[1] ?? "0";
+        if (command.startsWith("\\set_split_vfo ")) split = value === "1";
+        if (command.startsWith("\\set_rit ")) rit = Number(value);
+        if (command.startsWith("\\set_xit ")) xit = Number(value);
+        if (command.startsWith("\\set_ts ")) tuningStep = Number(value);
+        if (command.startsWith("\\set_rptr_shift ")) repeaterShift = value;
+        if (command.startsWith("\\set_rptr_offs ")) repeaterOffset = Number(value);
+        if (command.startsWith("\\set_ctcss_tone ")) ctcss = Number(value);
+        if (command.startsWith("\\set_dcs_code ")) dcs = Number(value);
         return response(name, {});
       }
       if (command.startsWith("\\get_")) {

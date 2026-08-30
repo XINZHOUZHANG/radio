@@ -27,6 +27,19 @@ const TELEMETRY_METER_TOKENS = [
   "RFPOWER_METER",
 ] as const;
 
+const EXPLICIT_OPERATION_TOKENS = [
+  "MODE",
+  "PASSBAND",
+  "SPLIT",
+  "RIT",
+  "XIT",
+  "TUNING_STEP",
+  "REPEATER_SHIFT",
+  "REPEATER_OFFSET",
+  "CTCSS",
+  "DCS",
+] as const;
+
 export type HamlibRigState = RadioState;
 
 export type HamlibRigControl = RadioControl & { value: RadioControlValue };
@@ -513,25 +526,35 @@ export class HamlibRig {
   }
 
   async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
-    const [readableLevels, writableLevels, readableFunctions, writableFunctions, modes] =
+    const [
+      readableLevels,
+      writableLevels,
+      readableFunctions,
+      writableFunctions,
+      modes,
+      vfoOperations,
+    ] =
       await Promise.all([
         this.#discoverTelemetryMeters(),
         this.#queryCapabilityTokens("\\set_level ?", "Level", TELEMETRY_REQUEST),
         this.#queryCapabilityTokens("\\get_func ?", "Func", TELEMETRY_REQUEST),
         this.#discoverWritableFunctions(),
-        this.#queryCapabilityTokens("\\set_mode ?", "Mode", TELEMETRY_REQUEST),
+        this.#queryCapabilityTokens("\\set_mode ?", "Mode", TELEMETRY_REQUEST)
+          .catch(() => null),
+        this.#discoverVfoOperations().catch(() => null),
       ]);
     const readableLevelSet = readableLevels ?? new Set<string>();
     const writableLevelSet = writableLevels ?? new Set<string>();
     const readableFunctionSet = readableFunctions ?? new Set<string>();
     const writableFunctionSet = writableFunctions ?? new Set<string>();
+    const supportedOperations = await this.#discoverSupportedOperations(modes);
+    const tunerActionSupported = vfoOperations?.has("TUNE") === true;
     const candidates = await this.#controlCatalogue.discover({
       levels: [...readableLevelSet],
-      functions: [...new Set([...readableFunctionSet, ...writableFunctionSet])],
-      operations: [
-        "MODE", "PASSBAND", "SPLIT", "RIT", "XIT", "TUNING_STEP",
-        "REPEATER_SHIFT", "REPEATER_OFFSET", "CTCSS", "DCS",
-      ],
+      functions: tunerActionSupported
+        ? [...new Set([...readableFunctionSet, "TUNER"])]
+        : [...readableFunctionSet].filter((token) => token !== "TUNER"),
+      operations: supportedOperations,
       modes: modes === null ? [] : [...modes],
     });
     const usable = candidates.filter((definition) => {
@@ -539,6 +562,9 @@ export class HamlibRig {
         return definition.access === "read-only" || writableLevelSet.has(definition.token);
       }
       if (definition.kind === "function" || definition.kind === "action") {
+        if (definition.kind === "action" && definition.token === "TUNER") {
+          return tunerActionSupported;
+        }
         return writableFunctionSet.has(definition.token);
       }
       return true;
@@ -549,6 +575,26 @@ export class HamlibRig {
         ? this.#levelDefinitionWithRigGranularity(metadata, TELEMETRY_REQUEST)
         : metadata;
     }));
+  }
+
+  async #discoverSupportedOperations(
+    modes: HamlibCapabilityTokens,
+  ): Promise<string[]> {
+    const supported: string[] = [];
+    for (const token of EXPLICIT_OPERATION_TOKENS) {
+      const [candidate] = await this.#controlCatalogue.discover({
+        operations: [token],
+        modes: modes === null ? [] : [...modes],
+      });
+      if (candidate === undefined) continue;
+      try {
+        await this.#readControlValue(candidate, TELEMETRY_REQUEST);
+        supported.push(token);
+      } catch {
+        // Optional operations are public only after a valid one-shot read.
+      }
+    }
+    return supported;
   }
 
   async #queryCapabilityTokens(

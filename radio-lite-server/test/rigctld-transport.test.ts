@@ -756,17 +756,20 @@ test("Hamlib controls are the safe readable and writable capability intersection
 
   const controls = await rig.readControls();
   assert.deepEqual(controls.map((control) => control.id), [
-    "level:RFPOWER",
     "level:AF",
+    "level:RFPOWER",
+    "level:STRENGTH",
     "function:NB",
     "function:ANF",
-    "function:TUNER",
     "passband:CURRENT",
   ]);
-  assert.deepEqual(controls[0], {
+  assert.deepEqual(controls.find((control) => control.id === "level:RFPOWER"), {
     id: "level:RFPOWER",
     kind: "level",
     token: "RFPOWER",
+    group: "rf",
+    access: "read-write",
+    presentation: "slider",
     value: 0.25,
     minimum: 0,
     maximum: 1,
@@ -774,29 +777,22 @@ test("Hamlib controls are the safe readable and writable capability intersection
     unit: "ratio",
     transmitLocked: true,
   });
-  assert.equal(controls[1]?.value, 0.42);
-  assert.equal(controls[2]?.value, 1);
-  assert.deepEqual(controls[4], {
-    id: "function:TUNER",
-    kind: "function",
-    token: "TUNER",
-    value: 0,
-    minimum: 0,
-    maximum: 1,
-    step: 1,
-    unit: "boolean",
-    transmitLocked: true,
-  });
+  assert.equal(controls.find((control) => control.id === "level:AF")?.value, 0.42);
+  assert.equal(controls.find((control) => control.id === "function:NB")?.value, true);
   assert.deepEqual(controls.at(-1), {
     id: "passband:CURRENT",
     kind: "passband",
-    token: "CURRENT",
+    token: "PASSBAND",
+    group: "mode",
+    access: "read-write",
+    presentation: "discrete",
     value: 3_000,
     minimum: 100,
     maximum: 12_000,
     step: 50,
     unit: "hertz",
-    transmitLocked: false,
+    options: undefined,
+    transmitLocked: true,
   });
   assert.equal(commands.filter((command) => command === "\\get_level ?").length, 1);
   assert.equal(commands.filter((command) => command === "\\set_level ?").length, 1);
@@ -843,7 +839,7 @@ test("Hamlib control writes validate, write once and confirm the read-back", asy
   const power = await rig.setControl("level:RFPOWER", 0.35);
   assert.equal(power.value, 0.35);
   const nb = await rig.setControl("function:NB", 1);
-  assert.equal(nb.value, 1);
+  assert.equal(nb.value, true);
   await assert.rejects(rig.setControl("level:RFPOWER", 1.5), /outside/u);
   await assert.rejects(rig.setControl("level:STRENGTH", 0.5), /unavailable/u);
   assert.deepEqual(commands.slice(-4), [
