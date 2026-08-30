@@ -137,11 +137,27 @@ abbreviated here:
   "audioOutputs": [
     {"backend":"alsa","direction":"output","id":"hw:1,0","label":"USB Audio CODEC"}
   ],
+  "audioCards": [
+    {
+      "hardwareId":"usb:1234:5678:SN42",
+      "label":"USB Audio CODEC (SN42)",
+      "transport":"usb",
+      "complete":true,
+      "input":{"backend":"alsa","direction":"input","id":"hw:1,0","label":"USB Audio CODEC"},
+      "output":{"backend":"alsa","direction":"output","id":"hw:1,0","label":"USB Audio CODEC"}
+    }
+  ],
   "pttMethods": ["RIG","DTR","RTS","Parallel","CM108","GPIO","GPION","None"],
   "baudRates": [1200,2400,4800,9600,19200,38400,57600,115200,230400],
   "warnings": []
 }
 ```
+
+`audioCards` is an additive paired-device view for new clients. The legacy
+`audioInputs` and `audioOutputs` fields remain present so existing clients can
+continue selecting and saving explicit endpoints. A card's stable `hardwareId`
+is resolved to its current `input` and `output` endpoint IDs during preflight
+and whenever a system media worker starts.
 
 `POST /api/v1/hardware/test` accepts `{"profile": <complete-profile>}` using
 the same profile validation as a save, but it does not write `radios.json`,
@@ -207,6 +223,7 @@ The `POST /api/v1/radios` body contains one complete profile:
     },
     "audioInput": {"backend":"alsa","id":"hw:1,0","label":"USB Audio CODEC"},
     "audioOutput": {"backend":"alsa","id":"hw:1,0","label":"USB Audio CODEC"},
+    "audioRoute": {"kind":"system-device","hardwareId":"usb:1234:5678:SN42","latency":"balanced"},
     "ptt": {"method":"DTR","path":"/dev/serial/by-id/usb-Yaesu-if01"},
     "station": {"callsign":"BI1ABC","grid":"OM89"},
     "hardwareTxEnabled": true
@@ -218,8 +235,14 @@ The `POST /api/v1/radios` body contains one complete profile:
 `connection` is alternatively
 `{"kind":"network-rigctld","host":"rig.local","port":4532}` or
 `{"kind":"hamlib-dummy"}`. Audio endpoints use the discovered `alsa` or
-`pulse` backend and device `id`. `ptt` defaults to `RIG` for an old real-radio
-profile and `None` for an old Dummy profile. `RIG` does not take
+`pulse` backend and device `id`. New clients may additionally save
+`audioRoute` as `system-device` with a stable `hardwareId` and `low`,
+`balanced`, or `stable` latency; the other additive route variants are
+`{"kind":"driver-stream"}` and `{"kind":"none"}`. Old version-1 profiles
+remain valid with only their explicit `audioInput` and `audioOutput`; the
+server does not require or backfill `audioRoute`, so only clients that know the
+new field save it. `ptt` defaults to `RIG` for an old real-radio profile and
+`None` for an old Dummy profile. `RIG` does not take
 a PTT path. `DTR`, `RTS`, `Parallel`, `CM108`, `GPIO` and `GPION` require an
 absolute `/dev/...` path; GPIO/GPION may additionally provide `bit` from 0 to
 7. `network-rigctld` accepts only `RIG`, because PTT options belong to that
@@ -237,6 +260,13 @@ The returned `radio` is the full normalized profile. Subscribed media clients
 also receive `media.error` with code `media_configuration_changed`; they may
 immediately subscribe again, or reconnect both WebSockets as requested by the
 HTTP response.
+
+The hardware-foundation protocol boundary is additive. No existing message or
+field is removed: old control clients retain `rig.state.get` and
+`rig.controls.get`, while new clients may use the telemetry subscription
+messages and the discovery `audioCards` field. Old profile writers may keep
+saving explicit audio endpoints; `audioRoute` is optional and is saved only by
+new clients.
 
 ## Station log HTTP API
 

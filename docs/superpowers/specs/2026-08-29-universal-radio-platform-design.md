@@ -261,9 +261,14 @@ Existing messages remain valid. New messages are additive:
 
 Old clients continue to use `rig.state.get` and `rig.controls.get`. The service
 serves those from the shared cache/catalogue so they no longer multiply CAT
-traffic. Configuration changes are additive and old version-1 profiles load
-unchanged; new optional driver/audio fields are written only after successful
-preflight.
+traffic. The telemetry subscription messages and discovery `audioCards` field
+are additions; no existing protocol message or field is removed. Discovery
+continues returning the legacy `audioInputs` and `audioOutputs` lists.
+
+Configuration changes are additive. Old version-1 profiles load unchanged and
+retain their explicit `audioInput` and `audioOutput` endpoints. `audioRoute`
+remains optional and is not synthesized into those profiles; only new clients
+that understand stable card identity save it, after successful preflight.
 
 ### 9. Safety and resource ownership
 
