@@ -22,15 +22,52 @@ export type RadioMeterSample = {
 
 export type RadioControlValue = boolean | number | string | null;
 
+export type RadioControlGroup =
+  | "antenna"
+  | "rf"
+  | "audio"
+  | "mode"
+  | "cw"
+  | "repeater"
+  | "spectrum"
+  | "system";
+
+export type RadioControlAccess = "read-only" | "read-write" | "action";
+export type RadioControlPresentation =
+  | "meter"
+  | "toggle"
+  | "slider"
+  | "discrete"
+  | "enum"
+  | "offset"
+  | "button";
+export type RadioControlUnit =
+  | "ratio"
+  | "decibel"
+  | "hertz"
+  | "watts"
+  | "milliseconds"
+  | "index"
+  | "boolean";
+export type RadioControlOption = {
+  value: Exclude<RadioControlValue, null>;
+  label: string;
+};
+
 export type RadioControl = {
   id: string;
-  kind: "level" | "function" | "passband";
+  kind: "level" | "function" | "parameter" | "mode" | "operation" | "passband" | "action";
   token: string;
+  /** Optional only for source compatibility with pre-catalogue driver fixtures. */
+  group?: RadioControlGroup;
+  access?: RadioControlAccess;
+  presentation?: RadioControlPresentation;
   value: RadioControlValue;
-  minimum: number;
-  maximum: number;
-  step: number;
-  unit: "ratio" | "decibel" | "index" | "boolean" | "hertz";
+  minimum?: number;
+  maximum?: number;
+  step?: number;
+  unit?: RadioControlUnit;
+  options?: RadioControlOption[];
   transmitLocked: boolean;
 };
 

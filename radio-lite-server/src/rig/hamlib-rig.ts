@@ -1,6 +1,7 @@
 import type { PttMethod } from "../config/types.ts";
 import type { RigResponse } from "./extended-protocol.ts";
-import type { RadioControl, RadioMeterSample, RadioState } from "./radio-driver.ts";
+import { HamlibControlCatalogue } from "./radio-control-catalogue.ts";
+import type { RadioControl, RadioControlValue, RadioMeterSample, RadioState } from "./radio-driver.ts";
 import { RigReportError, type RigRequestOptions } from "./transport.ts";
 
 export type RigRequester = {
@@ -28,14 +29,7 @@ const TELEMETRY_METER_TOKENS = [
 
 export type HamlibRigState = RadioState;
 
-export type HamlibRigControlKind = "level" | "function" | "passband";
-export type HamlibRigControlUnit = "ratio" | "decibel" | "index" | "boolean" | "hertz";
-
-export type HamlibRigControl = RadioControl & {
-  kind: HamlibRigControlKind;
-  value: number;
-  unit: HamlibRigControlUnit;
-};
+export type HamlibRigControl = RadioControl & { value: RadioControlValue };
 
 type HamlibRigControlDefinition = Omit<HamlibRigControl, "value">;
 type HamlibCapabilityTokens = ReadonlySet<string> | null;
@@ -110,44 +104,13 @@ export function normalizeHamlibMode(mode: string): string {
   return canonical;
 }
 
-const LEVEL_CONTROL_DEFINITIONS: readonly HamlibRigControlDefinition[] = [
-  levelDefinition("RFPOWER", "ratio", 0, 1, 0.01, true),
-  levelDefinition("AF", "ratio", 0, 1, 0.01),
-  levelDefinition("RF", "ratio", 0, 1, 0.01),
-  levelDefinition("SQL", "ratio", 0, 1, 0.01),
-  levelDefinition("MICGAIN", "ratio", 0, 1, 0.01, true),
-  levelDefinition("COMP", "ratio", 0, 1, 0.01, true),
-  levelDefinition("AGC", "index", 0, 6, 1),
-  levelDefinition("ATT", "decibel", 0, 60, 1),
-  levelDefinition("PREAMP", "decibel", 0, 60, 1),
-  levelDefinition("NB", "ratio", 0, 1, 0.01),
-  levelDefinition("NR", "ratio", 0, 1, 0.01),
-];
-
-const FUNCTION_CONTROL_DEFINITIONS: readonly HamlibRigControlDefinition[] = [
-  functionDefinition("COMP", true),
-  functionDefinition("NB"),
-  functionDefinition("NR"),
-  functionDefinition("ANF"),
-  functionDefinition("TUNER", true),
-];
-
-const PASSBAND_CONTROL: HamlibRigControlDefinition = {
-  id: "passband:CURRENT",
-  kind: "passband",
-  token: "CURRENT",
-  minimum: 100,
-  maximum: 12_000,
-  step: 50,
-  unit: "hertz",
-  transmitLocked: false,
-};
-
-const TRANSMIT_LOCKED_CONTROL_IDS = new Set(
-  [...LEVEL_CONTROL_DEFINITIONS, ...FUNCTION_CONTROL_DEFINITIONS]
-    .filter((control) => control.transmitLocked)
-    .map((control) => control.id),
-);
+const TRANSMIT_LOCKED_CONTROL_IDS = new Set([
+  "level:RFPOWER", "level:MICGAIN", "level:COMP", "level:MONITOR_GAIN", "level:VOXDELAY",
+  "level:VOXGAIN", "level:ANTIVOX", "level:BKINDL", "level:BKIN_DLYMS", "level:KEYSPD",
+  "function:COMP", "function:MON", "function:VOX", "function:SBKIN", "function:FBKIN",
+  "action:TUNER", "mode:CURRENT", "passband:CURRENT", "operation:SPLIT", "operation:XIT",
+  "repeater:SHIFT", "repeater:OFFSET", "repeater:CTCSS", "repeater:DCS",
+]);
 
 export function isTransmitLockedRigControlId(id: string): boolean {
   return TRANSMIT_LOCKED_CONTROL_IDS.has(id);
@@ -155,6 +118,7 @@ export function isTransmitLockedRigControlId(id: string): boolean {
 
 export class HamlibRig {
   readonly #transport: RigRequester;
+  readonly #controlCatalogue = new HamlibControlCatalogue();
   readonly #unavailablePttIsSafe: boolean;
   #lastCommandedPttForDisplayOnly = false;
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
@@ -282,23 +246,29 @@ export class HamlibRig {
     }
     validateControlValue(definition, value);
 
+    if (definition.access !== "read-write") {
+      throw new Error(`control ${id} is not writable`);
+    }
     if (definition.kind === "level") {
       await this.#transport.request(`\\set_level ${definition.token} ${formatRigNumber(value)}`);
     } else if (definition.kind === "function") {
       await this.#transport.request(`\\set_func ${definition.token} ${value}`);
-    } else {
+    } else if (definition.kind === "passband") {
       const mode = await this.#transport.request("\\get_mode");
       await this.setMode(tokenField(mode, "Mode"), value);
+    } else {
+      throw new Error(`control ${id} requires an explicit command adapter`);
     }
 
-    const confirmed = await this.#readControlValue(definition);
-    const tolerance = Math.max(definition.step / 2, 1e-6);
-    if (Math.abs(confirmed - value) > tolerance) {
+    const confirmedValue = await this.#readControlValue(definition);
+    const confirmed = typeof confirmedValue === "boolean" ? Number(confirmedValue) : confirmedValue;
+    const tolerance = Math.max((definition.step ?? 0) / 2, 1e-6);
+    if (typeof confirmed !== "number" || Math.abs(confirmed - value) > tolerance) {
       throw new Error(
         `control read-back mismatch: requested ${value}, received ${confirmed}`,
       );
     }
-    return { ...definition, value: confirmed };
+    return { ...definition, value: confirmedValue };
   }
 
   async setPtt(enabled: boolean): Promise<boolean> {
@@ -521,26 +491,35 @@ export class HamlibRig {
   async #loadControlDefinitions(): Promise<readonly HamlibRigControlDefinition[]> {
     const [readableLevels, writableLevels, readableFunctions, writableFunctions] =
       await Promise.all([
-        this.#queryCapabilityTokens("\\get_level ?", "Level", TELEMETRY_REQUEST),
+        this.#discoverTelemetryMeters(),
         this.#queryCapabilityTokens("\\set_level ?", "Level", TELEMETRY_REQUEST),
         this.#queryCapabilityTokens("\\get_func ?", "Func", TELEMETRY_REQUEST),
         this.#discoverWritableFunctions(),
       ]);
-    const levelIntersection = intersection(readableLevels, writableLevels);
-    const functionIntersection = intersection(readableFunctions, writableFunctions);
-    const levels: HamlibRigControlDefinition[] = [];
-    for (const definition of LEVEL_CONTROL_DEFINITIONS) {
-      if (!levelIntersection.has(definition.token)) {
-        continue;
+    const readableLevelSet = readableLevels ?? new Set<string>();
+    const writableLevelSet = writableLevels ?? new Set<string>();
+    const readableFunctionSet = readableFunctions ?? new Set<string>();
+    const writableFunctionSet = writableFunctions ?? new Set<string>();
+    const candidates = await this.#controlCatalogue.discover({
+      levels: [...readableLevelSet],
+      functions: [...readableFunctionSet],
+      operations: ["PASSBAND"],
+    });
+    const usable = candidates.filter((definition) => {
+      if (definition.kind === "level") {
+        return definition.access === "read-only" || writableLevelSet.has(definition.token);
       }
-      levels.push(await this.#levelDefinitionWithRigGranularity(definition, TELEMETRY_REQUEST));
-    }
-    return [
-      ...levels,
-      ...FUNCTION_CONTROL_DEFINITIONS.filter((definition) =>
-        functionIntersection.has(definition.token)),
-      PASSBAND_CONTROL,
-    ];
+      if (definition.kind === "function" || definition.kind === "action") {
+        return writableFunctionSet.has(definition.token);
+      }
+      return true;
+    });
+    return Promise.all(usable.map(async (definition) => {
+      const { value: _value, ...metadata } = definition;
+      return metadata.kind === "level" && metadata.access === "read-write"
+        ? this.#levelDefinitionWithRigGranularity(metadata, TELEMETRY_REQUEST)
+        : metadata;
+    }));
   }
 
   async #queryCapabilityTokens(
@@ -588,7 +567,8 @@ export class HamlibRig {
   async #readControlValue(
     definition: HamlibRigControlDefinition,
     options?: RigRequestOptions,
-  ): Promise<number> {
+  ): Promise<RadioControlValue> {
+    if (definition.kind === "action") return null;
     if (definition.kind === "passband") {
       return integerField(
         await this.#transport.request("\\get_mode", options),
@@ -597,51 +577,9 @@ export class HamlibRig {
     }
     const command = definition.kind === "level" ? "get_level" : "get_func";
     const response = await this.#transport.request(`\\${command} ${definition.token}`, options);
-    return numericResponseValue(response, definition.token);
+    const value = numericResponseValue(response, definition.token);
+    return definition.kind === "function" ? value !== 0 : value;
   }
-}
-
-function levelDefinition(
-  token: string,
-  unit: HamlibRigControlUnit,
-  minimum: number,
-  maximum: number,
-  step: number,
-  transmitLocked = false,
-): HamlibRigControlDefinition {
-  return {
-    id: `level:${token}`,
-    kind: "level",
-    token,
-    minimum,
-    maximum,
-    step,
-    unit,
-    transmitLocked,
-  };
-}
-
-function functionDefinition(token: string, transmitLocked = false): HamlibRigControlDefinition {
-  return {
-    id: `function:${token}`,
-    kind: "function",
-    token,
-    minimum: 0,
-    maximum: 1,
-    step: 1,
-    unit: "boolean",
-    transmitLocked,
-  };
-}
-
-function intersection(
-  left: HamlibCapabilityTokens,
-  right: HamlibCapabilityTokens,
-): Set<string> {
-  if (left === null || right === null) {
-    return new Set();
-  }
-  return new Set([...left].filter((value) => right.has(value)));
 }
 
 function parseLevelGranularity(
@@ -662,13 +600,19 @@ function parseLevelGranularity(
 }
 
 function validateControlValue(definition: HamlibRigControlDefinition, value: number): void {
-  const epsilon = Math.max(Math.abs(definition.step) * 1e-6, 1e-9);
-  if (value < definition.minimum - epsilon || value > definition.maximum + epsilon) {
+  const minimum = definition.minimum;
+  const maximum = definition.maximum;
+  const step = definition.step;
+  if (minimum === undefined || maximum === undefined || step === undefined) {
+    throw new Error("control does not report usable numeric bounds");
+  }
+  const epsilon = Math.max(Math.abs(step) * 1e-6, 1e-9);
+  if (value < minimum - epsilon || value > maximum + epsilon) {
     throw new Error(`control value is outside ${definition.minimum}..${definition.maximum}`);
   }
-  const steps = (value - definition.minimum) / definition.step;
+  const steps = (value - minimum) / step;
   if (Math.abs(steps - Math.round(steps)) > 1e-6) {
-    throw new Error(`control value must use step ${definition.step}`);
+    throw new Error(`control value must use step ${step}`);
   }
   if (definition.kind === "function" && value !== 0 && value !== 1) {
     throw new Error("function control value must be 0 or 1");
