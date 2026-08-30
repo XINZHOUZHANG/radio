@@ -5,7 +5,9 @@ import {
   RADIO_CONFIG_VERSION,
   parseRadioConfig,
   parseRadioProfile,
+  toPublicRadioProfile,
   type RadioConfigFile,
+  type PublicRadioConfigFile,
   type RadioProfile,
 } from "./types.ts";
 
@@ -41,6 +43,14 @@ export class RadioConfigStore {
   snapshot(): RadioConfigFile {
     this.#assertLoaded();
     return structuredClone(this.#snapshot);
+  }
+
+  publicSnapshot(): PublicRadioConfigFile {
+    this.#assertLoaded();
+    return {
+      version: RADIO_CONFIG_VERSION,
+      radios: this.#snapshot.radios.map(toPublicRadioProfile),
+    };
   }
 
   async replace(value: unknown): Promise<RadioConfigFile> {

@@ -16,7 +16,40 @@ export type DummyConnection = {
   kind: "hamlib-dummy";
 };
 
-export type RigConnection = SerialConnection | NetworkRigctldConnection | DummyConnection;
+export type NoRadioConnection = {
+  kind: "no-radio";
+};
+
+export type IcomWlanConnection = {
+  kind: "icom-wlan";
+  host: string;
+  port?: number;
+  username: string;
+  password: string;
+};
+
+export type TciConnection = {
+  kind: "tci";
+  url: string;
+  trx: number;
+  allowPublicEndpoint?: boolean;
+};
+
+export type RigConnection =
+  | SerialConnection
+  | NetworkRigctldConnection
+  | DummyConnection
+  | NoRadioConnection
+  | IcomWlanConnection
+  | TciConnection;
+
+export type PublicRigConnection =
+  | SerialConnection
+  | NetworkRigctldConnection
+  | DummyConnection
+  | NoRadioConnection
+  | Omit<IcomWlanConnection, "password">
+  | TciConnection;
 
 export type AudioEndpoint = {
   backend: "alsa" | "pulse";
@@ -82,6 +115,24 @@ export type RadioProfile = {
   hardwareTxEnabled: boolean;
 };
 
+export type PublicRadioProfile = {
+  id: string;
+  name: string;
+  hamlibModelId?: number;
+  connection: PublicRigConnection;
+  audioInput?: AudioEndpoint;
+  audioOutput?: AudioEndpoint;
+  audioRoute?: AudioRoute;
+  ptt: PttConfiguration;
+  station: StationIdentity;
+  hardwareTxEnabled: boolean;
+};
+
+export type PublicRadioConfigFile = {
+  version: typeof RADIO_CONFIG_VERSION;
+  radios: PublicRadioProfile[];
+};
+
 export type RadioConfigFile = {
   version: typeof RADIO_CONFIG_VERSION;
   radios: RadioProfile[];
@@ -141,7 +192,18 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
     throw new Error(`${field}.id must match ${ID_PATTERN}`);
   }
   const name = text(radio.name, `${field}.name`, 1, 64);
-  const hamlibModelId = positiveInteger(radio.hamlibModelId, `${field}.hamlibModelId`);
+  const connection = parseConnection(radio.connection, `${field}.connection`);
+  const legacyConnection = connection.kind === "managed-serial" ||
+    connection.kind === "network-rigctld" || connection.kind === "hamlib-dummy";
+  if (legacyConnection && radio.hamlibModelId === undefined) {
+    throw new Error(`${field}.hamlibModelId is required`);
+  }
+  if (!legacyConnection && radio.hamlibModelId !== undefined) {
+    throw new Error(`${field}.hamlibModelId is not used by ${connection.kind}`);
+  }
+  const hamlibModelId = legacyConnection
+    ? positiveInteger(radio.hamlibModelId, `${field}.hamlibModelId`)
+    : undefined;
   const hardwareTxEnabled = booleanValue(
     radio.hardwareTxEnabled,
     `${field}.hardwareTxEnabled`,
@@ -149,12 +211,15 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
   if (hamlibModelId === 1 && hardwareTxEnabled) {
     throw new Error("Hamlib Dummy cannot enable hardware transmission");
   }
-  const connection = parseConnection(radio.connection, `${field}.connection`);
-  if ((hamlibModelId === 1) !== (connection.kind === "hamlib-dummy")) {
+  if (legacyConnection && ((hamlibModelId === 1) !== (connection.kind === "hamlib-dummy"))) {
     throw new Error("Hamlib Dummy model and hamlib-dummy connection must be selected together");
   }
   const ptt = radio.ptt === undefined
-    ? { method: connection.kind === "hamlib-dummy" ? "None" as const : "RIG" as const }
+    ? {
+        method: connection.kind === "hamlib-dummy" || connection.kind === "no-radio"
+          ? "None" as const
+          : "RIG" as const,
+      }
     : parsePttConfiguration(radio.ptt, `${field}.ptt`);
   if (connection.kind === "network-rigctld" && ptt.method !== "RIG") {
     throw new Error(`${field}.connection network rigctld manages PTT externally`);
@@ -165,18 +230,106 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
   const audioRoute = radio.audioRoute === undefined
     ? undefined
     : parseAudioRoute(radio.audioRoute, `${field}.audioRoute`);
-  return {
+  const requiresAudioEndpoints = audioRoute?.kind !== "driver-stream" &&
+    audioRoute?.kind !== "none";
+  if (requiresAudioEndpoints && radio.audioInput === undefined) {
+    throw new Error(`${field}.audioInput is required`);
+  }
+  if (requiresAudioEndpoints && radio.audioOutput === undefined) {
+    throw new Error(`${field}.audioOutput is required`);
+  }
+  const audioInput = radio.audioInput === undefined
+    ? undefined
+    : parseAudioEndpoint(radio.audioInput, `${field}.audioInput`);
+  const audioOutput = radio.audioOutput === undefined
+    ? undefined
+    : parseAudioEndpoint(radio.audioOutput, `${field}.audioOutput`);
+  const parsed = {
     id,
     name,
-    hamlibModelId,
+    ...(hamlibModelId === undefined ? {} : { hamlibModelId }),
     connection,
-    audioInput: parseAudioEndpoint(radio.audioInput, `${field}.audioInput`),
-    audioOutput: parseAudioEndpoint(radio.audioOutput, `${field}.audioOutput`),
+    ...(audioInput === undefined ? {} : { audioInput }),
+    ...(audioOutput === undefined ? {} : { audioOutput }),
     ...(audioRoute === undefined ? {} : { audioRoute }),
     ptt,
     station: parseStation(radio.station, `${field}.station`),
     hardwareTxEnabled,
   };
+  return parsed as RadioProfile;
+}
+
+export function toPublicRadioProfile(profile: RadioProfile): PublicRadioProfile {
+  const connection = publicConnection(profile.connection);
+  return {
+    id: profile.id,
+    name: profile.name,
+    ...(hasOwn(profile, "hamlibModelId") ? { hamlibModelId: profile.hamlibModelId } : {}),
+    connection,
+    ...(hasOwn(profile, "audioInput") ? { audioInput: publicAudioEndpoint(profile.audioInput) } : {}),
+    ...(hasOwn(profile, "audioOutput") ? { audioOutput: publicAudioEndpoint(profile.audioOutput) } : {}),
+    ...(profile.audioRoute === undefined ? {} : { audioRoute: publicAudioRoute(profile.audioRoute) }),
+    ptt: {
+      method: profile.ptt.method,
+      ...(profile.ptt.path === undefined ? {} : { path: profile.ptt.path }),
+      ...(profile.ptt.bit === undefined ? {} : { bit: profile.ptt.bit }),
+    },
+    station: {
+      callsign: profile.station.callsign,
+      ...(profile.station.grid === undefined ? {} : { grid: profile.station.grid }),
+    },
+    hardwareTxEnabled: profile.hardwareTxEnabled,
+  };
+}
+
+function publicAudioEndpoint(endpoint: AudioEndpoint): AudioEndpoint {
+  return {
+    backend: endpoint.backend,
+    id: endpoint.id,
+    ...(endpoint.label === undefined ? {} : { label: endpoint.label }),
+  };
+}
+
+function publicAudioRoute(route: AudioRoute): AudioRoute {
+  return route.kind === "system-device"
+    ? {
+        kind: route.kind,
+        hardwareId: route.hardwareId,
+        latency: route.latency,
+      }
+    : { kind: route.kind };
+}
+
+function publicConnection(connection: RigConnection): PublicRigConnection {
+  switch (connection.kind) {
+    case "managed-serial":
+      return {
+        kind: connection.kind,
+        devicePath: connection.devicePath,
+        ...(connection.baudRate === undefined ? {} : { baudRate: connection.baudRate }),
+      };
+    case "network-rigctld":
+      return { kind: connection.kind, host: connection.host, port: connection.port };
+    case "hamlib-dummy":
+    case "no-radio":
+      return { kind: connection.kind };
+    case "icom-wlan":
+      return {
+        kind: connection.kind,
+        host: connection.host,
+        ...(connection.port === undefined ? {} : { port: connection.port }),
+        username: connection.username,
+      };
+    case "tci":
+      return {
+        kind: connection.kind,
+        url: connection.url,
+        trx: connection.trx,
+        ...(connection.allowPublicEndpoint === undefined
+          ? {}
+          : { allowPublicEndpoint: connection.allowPublicEndpoint }),
+      };
+  }
 }
 
 function parseAudioRoute(value: unknown, field: string): AudioRoute {
@@ -276,7 +429,63 @@ function parseConnection(value: unknown, field: string): RigConnection {
     const port = portNumber(connection.port, `${field}.port`);
     return { kind, host, port };
   }
+  if (kind === "no-radio") {
+    exactKeys(connection, ["kind"], field);
+    return { kind };
+  }
+  if (kind === "icom-wlan") {
+    exactKeys(connection, ["kind", "host", "port", "username", "password"], field);
+    const host = safeHost(connection.host, `${field}.host`);
+    const port = connection.port === undefined
+      ? undefined
+      : portNumber(connection.port, `${field}.port`);
+    const username = text(connection.username, `${field}.username`, 1, 128);
+    const password = secretText(connection.password, `${field}.password`, 1, 1_024);
+    return {
+      kind,
+      host,
+      ...(port === undefined ? {} : { port }),
+      username,
+      password,
+    };
+  }
+  if (kind === "tci") {
+    exactKeys(connection, ["kind", "url", "trx", "allowPublicEndpoint"], field);
+    const url = webSocketUrl(connection.url, `${field}.url`);
+    const trx = nonNegativeInteger(connection.trx, `${field}.trx`);
+    const allowPublicEndpoint = connection.allowPublicEndpoint === undefined
+      ? undefined
+      : booleanValue(connection.allowPublicEndpoint, `${field}.allowPublicEndpoint`);
+    return {
+      kind,
+      url,
+      trx,
+      ...(allowPublicEndpoint === undefined ? {} : { allowPublicEndpoint }),
+    };
+  }
   throw new Error(`${field}.kind is unsupported`);
+}
+
+function safeHost(value: unknown, field: string): string {
+  const host = text(value, field, 1, 253);
+  if (!SAFE_HOST_PATTERN.test(host) || host === "0.0.0.0" || host === "::") {
+    throw new Error(`${field} is invalid`);
+  }
+  return host;
+}
+
+function webSocketUrl(value: unknown, field: string): string {
+  const raw = text(value, field, 1, 2_048);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${field} is invalid`);
+  }
+  if ((parsed.protocol !== "ws:" && parsed.protocol !== "wss:") || parsed.hostname.length === 0) {
+    throw new Error(`${field} must use ws or wss`);
+  }
+  return raw;
 }
 
 function parseAudioEndpoint(value: unknown, field: string): AudioEndpoint {
@@ -342,6 +551,11 @@ function exactKeys(
       required !== "path" &&
       required !== "bit"
       && required !== "audioRoute"
+      && required !== "hamlibModelId"
+      && required !== "audioInput"
+      && required !== "audioOutput"
+      && required !== "port"
+      && required !== "allowPublicEndpoint"
     ) {
       throw new Error(`${field}.${required} is required`);
     }
@@ -366,6 +580,13 @@ function positiveInteger(value: unknown, field: string): number {
   return value as number;
 }
 
+function nonNegativeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return value as number;
+}
+
 function portNumber(value: unknown, field: string): number {
   const port = positiveInteger(value, field);
   if (port > 65_535) {
@@ -379,4 +600,15 @@ function booleanValue(value: unknown, field: string): boolean {
     throw new TypeError(`${field} must be boolean`);
   }
   return value;
+}
+
+function secretText(value: unknown, field: string, min: number, max: number): string {
+  if (typeof value !== "string" || value.length < min || value.length > max) {
+    throw new Error(`${field} must be text with length ${min}..${max}`);
+  }
+  return value;
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }

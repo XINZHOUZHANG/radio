@@ -931,6 +931,102 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   await waitFor(() => rig.ptt === false);
   webSocket.close();
 
+  const icomPassword = "station-secret-http-fixture";
+  response = await postJson(
+    `${base}/api/v1/radios`,
+    {
+      profile: {
+        id: "main",
+        name: "IC-7610",
+        connection: {
+          kind: "icom-wlan",
+          host: "192.168.10.20",
+          port: 50001,
+          username: "station",
+          password: icomPassword,
+        },
+        audioRoute: { kind: "driver-stream" },
+        ptt: { method: "RIG" },
+        station: { callsign: "BI1ABC", grid: "OM89" },
+        hardwareTxEnabled: false,
+      },
+    },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  assert.equal(response.status, 200);
+  const publicSaveText = await response.text();
+  assert.equal(publicSaveText.includes(icomPassword), false);
+  assert.equal(publicSaveText.includes("password"), false);
+
+  response = await fetch(`${base}/api/v1/radios`, { headers: { Cookie: cookie! } });
+  const publicListText = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(publicListText.includes(icomPassword), false);
+  assert.equal(publicListText.includes("password"), false);
+
+  response = await fetch(`${base}/api/v1/hardware/discovery`, { headers: { Cookie: cookie! } });
+  const publicDiscoveryText = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(publicDiscoveryText.includes(icomPassword), false);
+
+  response = await fetch(`${base}/api/v1/logs`, { headers: { Cookie: cookie! } });
+  const publicLogText = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(publicLogText.includes(icomPassword), false);
+
+  response = await postJson(
+    `${base}/api/v1/radios`,
+    {
+      profile: {
+        id: "main",
+        name: "IC-7610",
+        connection: {
+          kind: "icom-wlan",
+          host: "192.168.10.20",
+          username: "station",
+          password: icomPassword,
+          secretNote: "must-never-escape",
+        },
+        audioRoute: { kind: "driver-stream" },
+        ptt: { method: "RIG" },
+        station: { callsign: "BI1ABC" },
+        hardwareTxEnabled: false,
+      },
+    },
+    { Cookie: cookie!, "X-CSRF-Token": login.csrfToken },
+  );
+  const publicErrorText = await response.text();
+  assert.equal(response.status, 400);
+  assert.equal(publicErrorText.includes(icomPassword), false);
+  assert.equal(publicErrorText.includes("secretNote"), false);
+  assert.equal(publicErrorText.includes("must-never-escape"), false);
+
+  const redactionSocket = new WebSocket(
+    `ws://127.0.0.1:${address.port}/ws/control`,
+    "radio-lite.v1",
+  );
+  context.after(() => redactionSocket.terminate());
+  await new Promise<void>((resolve, reject) => {
+    redactionSocket.once("open", resolve);
+    redactionSocket.once("error", reject);
+  });
+  const redactedWelcome = await sendJsonAndReceive(redactionSocket, {
+    t: "auth.device",
+    deviceId: credentials.deviceId,
+    accessToken: credentials.accessToken,
+  });
+  assert.equal(redactedWelcome.t, "auth.ok");
+  assert.equal(JSON.stringify(redactedWelcome).includes(icomPassword), false);
+  assert.equal(JSON.stringify(redactedWelcome).includes("password"), false);
+  assert.equal((await nextJsonMessage(redactionSocket)).t, "safety.snapshot.begin");
+  assert.equal((await nextJsonMessage(redactionSocket)).t, "safety.snapshot");
+  assert.equal((await nextJsonMessage(redactionSocket)).t, "safety.snapshot.end");
+  const redactedSnapshot = await sendJsonAndReceive(redactionSocket, { t: "snapshot.get" });
+  assert.equal(redactedSnapshot.t, "radios.snapshot");
+  assert.equal(JSON.stringify(redactedSnapshot).includes(icomPassword), false);
+  assert.equal(JSON.stringify(redactedSnapshot).includes("password"), false);
+  redactionSocket.close();
+
   const inFlightCleanupProfile: RadioProfile = {
     ...uncertainCleanupProfile,
     id: "cleanup-inflight",

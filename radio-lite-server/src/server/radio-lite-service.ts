@@ -21,7 +21,7 @@ import {
   HardwarePreflightCleanupUncertainError,
   type HardwarePreflightRunner,
 } from "../config/hardware-preflight.ts";
-import { parseRadioProfile } from "../config/types.ts";
+import { parseRadioProfile, toPublicRadioProfile } from "../config/types.ts";
 import { ControlBusyError, InvalidControlLeaseError } from "../control/control-lease.ts";
 import {
   HardwareTransmitDisabledError,
@@ -369,7 +369,7 @@ export class RadioLiteService {
           role: user.role,
           canTransmit: user.canTransmit,
         },
-        radios: this.#radios.snapshot().radios,
+        radios: this.#radios.publicSnapshot().radios,
       });
       if (channel === "control") {
         this.#controlWebSockets.add(webSocket);
@@ -641,7 +641,7 @@ export class RadioLiteService {
         sendWebSocketJson(webSocket, {
           t: "radios.snapshot",
           revision: 1,
-          radios: this.#radios.snapshot().radios,
+          radios: this.#radios.publicSnapshot().radios,
         });
         return;
       }
@@ -1148,7 +1148,7 @@ export class RadioLiteService {
       if (method === "POST" && url.pathname === "/api/v1/hardware/test") {
         const principal = this.#requireAdmin(request, true);
         const body = await jsonObject(request, ["profile"]);
-        const profile = parseRadioProfile(body.profile);
+        const profile = parseSubmittedRadioProfile(body.profile);
         const serialDeviceReservation = profile.connection.kind === "managed-serial"
           ? this.#runtimes.reserveManagedSerialDevice(profile.connection.devicePath)
           : undefined;
@@ -1226,7 +1226,7 @@ export class RadioLiteService {
       }
       if (method === "GET" && url.pathname === "/api/v1/radios") {
         this.#requireHttpPrincipal(request, false);
-        sendJson(response, 200, this.#radios.snapshot());
+        sendJson(response, 200, this.#radios.publicSnapshot());
         return;
       }
       if (method === "POST" && url.pathname === "/api/v1/radios") {
@@ -1235,7 +1235,7 @@ export class RadioLiteService {
         if (body.profile === null || typeof body.profile !== "object" || Array.isArray(body.profile)) {
           throw new HttpError(400, "invalid_request", "profile must be an object");
         }
-        const profile = body.profile as Record<string, unknown>;
+        const profile = parseSubmittedRadioProfile(body.profile);
         if (profile.hardwareTxEnabled === true && body.hardwareTxConfirmation !== profile.id) {
           throw new HttpError(409, "hardware_tx_confirmation_required", "confirm the exact radio id to enable hardware TX");
         }
@@ -1243,7 +1243,10 @@ export class RadioLiteService {
         await this.#digital.invalidate(saved.id);
         await this.#media.invalidate(saved.id);
         await this.#runtimes.invalidate(saved.id);
-        sendJson(response, 200, { radio: saved, reconnectRequired: true });
+        sendJson(response, 200, {
+          radio: toPublicRadioProfile(saved),
+          reconnectRequired: true,
+        });
         return;
       }
       if (method === "GET" && url.pathname === "/api/v1/logs") {
@@ -1542,6 +1545,14 @@ function sendBuffer(
     "X-Content-Type-Options": "nosniff",
   });
   response.end(body);
+}
+
+function parseSubmittedRadioProfile(value: unknown) {
+  try {
+    return parseRadioProfile(value);
+  } catch {
+    throw new HttpError(400, "invalid_radio_profile", "radio profile is invalid");
+  }
 }
 
 function mapError(error: unknown): HttpError {

@@ -4,6 +4,8 @@ import { test } from "node:test";
 import {
   RADIO_CONFIG_VERSION,
   parseRadioConfig,
+  parseRadioProfile,
+  toPublicRadioProfile,
 } from "../src/config/types.ts";
 import {
   parseRigctlModelList,
@@ -32,6 +34,139 @@ function validRadio(overrides: Record<string, unknown> = {}): Record<string, unk
     ...overrides,
   };
 }
+
+test("loads an ICOM WLAN profile but exposes only an allowlisted public projection", () => {
+  const stored = parseRadioProfile({
+    id: "icom",
+    name: "IC-7610",
+    connection: {
+      kind: "icom-wlan",
+      host: "192.168.10.20",
+      port: 50001,
+      username: "station",
+      password: "station-secret",
+    },
+    audioRoute: { kind: "driver-stream" },
+    ptt: { method: "RIG" },
+    station: { callsign: "BI1ABC", grid: "OM89" },
+    hardwareTxEnabled: false,
+  });
+
+  assert.equal(stored.connection.kind, "icom-wlan");
+  if (stored.connection.kind !== "icom-wlan") throw new Error("expected ICOM WLAN profile");
+  assert.equal(stored.connection.password, "station-secret");
+  const publicValue = toPublicRadioProfile(stored);
+  assert.equal(JSON.stringify(publicValue).includes("station-secret"), false);
+  assert.equal("password" in publicValue.connection, false);
+  assert.deepEqual(publicValue.connection, {
+    kind: "icom-wlan",
+    host: "192.168.10.20",
+    port: 50001,
+    username: "station",
+  });
+  assert.equal("hamlibModelId" in publicValue, false);
+  assert.equal("audioInput" in publicValue, false);
+  assert.equal("audioOutput" in publicValue, false);
+});
+
+test("loads every legacy version-1 profile without changing its shape", () => {
+  const managed = validRadio({ ptt: { method: "RIG" } });
+  const external = validRadio({
+    id: "external",
+    connection: { kind: "network-rigctld", host: "rig.local", port: 4532 },
+    ptt: { method: "RIG" },
+  });
+  const dummy = validRadio({
+    id: "dummy",
+    name: "Simulator",
+    hamlibModelId: 1,
+    connection: { kind: "hamlib-dummy" },
+    ptt: { method: "None" },
+  });
+  const legacyFixture = { version: 1, radios: [managed, external, dummy] };
+
+  assert.deepEqual(parseRadioConfig(legacyFixture), legacyFixture);
+});
+
+test("parses exact new connection unions without legacy-only fields", () => {
+  const profiles = parseRadioConfig({
+    version: 1,
+    radios: [
+      {
+        id: "receive",
+        name: "Receive only",
+        connection: { kind: "no-radio" },
+        audioRoute: { kind: "none" },
+        ptt: { method: "None" },
+        station: { callsign: "BI1ABC" },
+        hardwareTxEnabled: false,
+      },
+      {
+        id: "tci",
+        name: "SunSDR",
+        connection: {
+          kind: "tci",
+          url: "ws://192.168.10.30:40001",
+          trx: 0,
+          allowPublicEndpoint: true,
+        },
+        audioRoute: { kind: "driver-stream" },
+        ptt: { method: "RIG" },
+        station: { callsign: "BI1ABC" },
+        hardwareTxEnabled: false,
+      },
+    ],
+  });
+
+  assert.deepEqual(profiles.radios[0].connection, { kind: "no-radio" });
+  assert.deepEqual(profiles.radios[1].connection, {
+    kind: "tci",
+    url: "ws://192.168.10.30:40001",
+    trx: 0,
+    allowPublicEndpoint: true,
+  });
+  for (const profile of profiles.radios) {
+    assert.equal("hamlibModelId" in profile, false);
+    assert.equal("audioInput" in profile, false);
+    assert.equal("audioOutput" in profile, false);
+  }
+
+  assert.throws(() => parseRadioProfile({
+    ...profiles.radios[0],
+    connection: { kind: "no-radio", host: "unexpected" },
+  }), /unknown field/u);
+  assert.throws(() => parseRadioProfile({
+    ...profiles.radios[1],
+    connection: { ...profiles.radios[1].connection, password: "not-allowed" },
+  }), /unknown field/u);
+});
+
+test("legacy connections and system-device routes retain legacy required fields", () => {
+  for (const connection of [
+    { kind: "managed-serial", devicePath: "/dev/ttyUSB0" },
+    { kind: "network-rigctld", host: "rig.local", port: 4532 },
+    { kind: "hamlib-dummy" },
+  ]) {
+    const { hamlibModelId: _, ...withoutModel } = validRadio({ connection });
+    assert.throws(() => parseRadioProfile(withoutModel), /hamlibModelId is required/u);
+  }
+
+  const { audioInput: _, audioOutput: __, ...withoutEndpoints } = validRadio({
+    connection: {
+      kind: "icom-wlan",
+      host: "192.168.10.20",
+      username: "station",
+      password: "station-secret",
+    },
+    audioRoute: {
+      kind: "system-device",
+      hardwareId: "usb:1234:5678:SN42",
+      latency: "balanced",
+    },
+  });
+  delete withoutEndpoints.hamlibModelId;
+  assert.throws(() => parseRadioProfile(withoutEndpoints), /audioInput is required/u);
+});
 
 test("validates and normalizes a multi-radio configuration", () => {
   const result = parseRadioConfig({
