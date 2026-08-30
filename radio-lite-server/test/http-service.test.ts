@@ -24,7 +24,7 @@ import {
   RadioRuntime,
   RadioRuntimeCleanupUncertainError,
 } from "../src/rig/radio-runtime.ts";
-import type { RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
+import type { RadioControl, RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
 import { RadioLiteService } from "../src/server/radio-lite-service.ts";
 
 test("HTTP service completes setup, login, pairing and radio configuration", async (context) => {
@@ -497,6 +497,40 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   const controlToken = reply.controlToken;
 
   reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.capabilities.get",
+    radioId: "main",
+    commandId: "caps-1",
+  });
+  assert.equal(reply.t, "rig.capabilities");
+  assert.equal(reply.commandId, "caps-1");
+  assert.equal(reply.controls.some((control: { id: string }) => control.id === "vendor:missing"), false);
+  assert.deepEqual(reply.controls.find((control: { id: string }) => control.id === "level:RFPOWER"), {
+    id: "level:RFPOWER",
+    token: "RFPOWER",
+    group: "rf",
+    access: "read-write",
+    presentation: "slider",
+    value: 0.5,
+    minimum: 0,
+    maximum: 1,
+    step: 0.01,
+    unit: "ratio",
+    transmitLocked: true,
+  });
+  assert.equal(reply.controls.some((control: { id: string }) => control.id === "action:TUNER"), true);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.action.invoke",
+    radioId: "main",
+    id: "action:TUNER",
+    commandId: "action-without-lease",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.commandId, "action-without-lease");
+  assert.equal(reply.requestType, "rig.action.invoke");
+  assert.equal(reply.code, "invalid_control_lease");
+
+  reply = await sendJsonAndReceive(webSocket, {
     t: "rig.state.get",
     radioId: "main",
     commandId: "state-with-capabilities",
@@ -565,7 +599,9 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.deepEqual(reply.controls.map((control: { id: string }) => control.id), [
     "level:RFPOWER",
     "level:AF",
+    "function:NB",
   ]);
+  assert.equal(reply.controls.find((control: { id: string }) => control.id === "function:NB").value, 0);
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "rig.controls.get",
@@ -590,6 +626,75 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.commandId, "control-power-1");
   assert.equal(reply.control.id, "level:RFPOWER");
   assert.equal(reply.control.value, 0.3);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "function:NB",
+    value: true,
+    commandId: "control-nb-typed",
+  });
+  assert.equal(reply.t, "rig.control.confirmed");
+  assert.equal(reply.control.value, true);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "mode:CURRENT",
+    value: "LSB",
+    commandId: "control-mode-typed",
+  });
+  assert.equal(reply.t, "rig.control.confirmed");
+  assert.equal(reply.control.value, "LSB");
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "level:RFPOWER",
+    value: "0.7",
+    commandId: "control-no-string-coercion",
+  });
+  assert.equal(reply.t, "command.error");
+  assert.equal(reply.commandId, "control-no-string-coercion");
+  assert.equal(reply.requestType, "rig.control.set");
+  assert.equal(rig.controls.get("level:RFPOWER"), 0.3);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.control.set",
+    radioId: "main",
+    controlToken,
+    controlId: "function:NB",
+    value: 0,
+    commandId: "control-nb-legacy",
+  });
+  assert.equal(reply.t, "rig.control.confirmed");
+  assert.equal(reply.control.value, 0);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "rig.action.invoke",
+    radioId: "main",
+    controlToken,
+    id: "action:TUNER",
+    commandId: "action-tuner-1",
+  });
+  assert.equal(reply.t, "rig.action.confirmed");
+  assert.equal(reply.commandId, "action-tuner-1");
+  assert.equal(reply.id, "action:TUNER");
+  assert.equal(typeof reply.transmitToken, "string");
+  assert.equal(typeof reply.heartbeatDeadlineMs, "number");
+  assert.equal(typeof reply.hardDeadlineMs, "number");
+  assert.equal(rig.tuner, true);
+
+  reply = await sendJsonAndReceive(webSocket, {
+    t: "tx.stop",
+    radioId: "main",
+    transmitToken: reply.transmitToken,
+    commandId: "action-tuner-stop",
+  });
+  assert.equal(reply.t, "tx.stopped");
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "digital.snapshot.get",
@@ -1023,9 +1128,12 @@ class ApiFakeRig implements RadioDriver {
   supportsTuner = true;
   rejectedMode: string | null = null;
   readStateCalls = 0;
-  controls = new Map<string, number>([
+  controls = new Map<string, RadioControlValue>([
     ["level:RFPOWER", 0.5],
     ["level:AF", 0.4],
+    ["function:NB", false],
+    ["mode:CURRENT", "USB"],
+    ["action:TUNER", null],
   ]);
 
   async initialize() {}
@@ -1060,25 +1168,54 @@ class ApiFakeRig implements RadioDriver {
   async supportsInternalTuner() { return this.supportsTuner; }
   async startInternalTuner() { this.tuner = true; }
   async writeInternalTuner(value: boolean) { this.tuner = value; }
-  async readControls() {
-    return [...this.controls].map(([id, value]) => ({
-      id,
-      kind: "level" as const,
-      token: id.split(":")[1]!,
-      value,
-      minimum: 0,
-      maximum: 1,
-      step: 0.01,
-      unit: "ratio" as const,
-      transmitLocked: id === "level:RFPOWER",
-    }));
+  async readControls(): Promise<RadioControl[]> {
+    return [
+      {
+        id: "level:RFPOWER", kind: "level", token: "RFPOWER", group: "rf",
+        access: "read-write", presentation: "slider", value: this.controls.get("level:RFPOWER")!,
+        minimum: 0, maximum: 1, step: 0.01, unit: "ratio", transmitLocked: true,
+      },
+      {
+        id: "level:AF", kind: "level", token: "AF", group: "audio",
+        access: "read-write", presentation: "slider", value: this.controls.get("level:AF")!,
+        minimum: 0, maximum: 1, step: 0.01, unit: "ratio", transmitLocked: false,
+      },
+      {
+        id: "function:NB", kind: "function", token: "NB", group: "rf",
+        access: "read-write", presentation: "toggle", value: this.controls.get("function:NB")!,
+        minimum: 0, maximum: 1, step: 1, unit: "boolean", transmitLocked: false,
+      },
+      {
+        id: "mode:CURRENT", kind: "mode", token: "CURRENT", group: "mode",
+        access: "read-write", presentation: "enum", value: this.controls.get("mode:CURRENT")!,
+        options: [{ value: "USB", label: "USB" }, { value: "LSB", label: "LSB" }],
+        transmitLocked: true,
+      },
+      {
+        id: "action:TUNER", kind: "action", token: "TUNER", group: "rf",
+        access: "action", presentation: "button", value: null, transmitLocked: true,
+      },
+    ];
   }
   async setControl(id: string, value: RadioControlValue) {
-    if (typeof value !== "number") throw new Error("control value must be numeric");
     const control = (await this.readControls()).find((candidate) => candidate.id === id);
     if (control === undefined) throw new Error("control unavailable");
-    this.controls.set(id, value);
-    return { ...control, value };
+    let confirmed = value;
+    if (id.startsWith("level:") && typeof value !== "number") {
+      throw new Error("control value must be numeric");
+    }
+    if (id === "function:NB") {
+      if (typeof value === "number" && (value === 0 || value === 1)) {
+        confirmed = value === 1;
+      } else if (typeof value !== "boolean") {
+        throw new Error("control value must be boolean");
+      }
+    }
+    if (id === "mode:CURRENT" && value !== "USB" && value !== "LSB") {
+      throw new Error("control value must be an available option");
+    }
+    this.controls.set(id, confirmed);
+    return { ...control, value: confirmed };
   }
   async invokeAction(id: string) {
     if (id !== "action:TUNER") throw new Error("action unavailable");

@@ -338,28 +338,66 @@ returns the actual Hamlib read-back token. Hamlib rejection and failed read-back
 use the stable error codes `rig_mode_rejected` and `rig_mode_unconfirmed`.
 
 The client discovers safe radio adjustments instead of assuming that every
-Hamlib backend exposes the same knobs:
+Hamlib backend exposes the same knobs. New clients request the complete public
+descriptor surface after authenticating:
+
+```json
+{"t":"rig.capabilities.get","radioId":"main","commandId":"capabilities-1"}
+{"t":"rig.capabilities","radioId":"main","commandId":"capabilities-1","controls":[
+  {"id":"level:RFPOWER","token":"RFPOWER","group":"rf","access":"read-write","presentation":"slider","value":0.25,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true},
+  {"id":"function:NB","token":"NB","group":"rf","access":"read-write","presentation":"toggle","value":false,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":false},
+  {"id":"mode:CURRENT","token":"CURRENT","group":"mode","access":"read-write","presentation":"enum","value":"USB","options":[{"value":"USB","label":"USB"},{"value":"LSB","label":"LSB"}],"transmitLocked":true},
+  {"id":"action:TUNER","token":"TUNER","group":"rf","access":"action","presentation":"button","value":null,"transmitLocked":true}
+]}
+```
+
+The capability response contains only the public identity, grouping, access,
+presentation, value, range/options/unit, and transmit-lock fields. Internal
+driver metadata is not serialized. Unsupported, malformed, read-failed, and
+vendor-only controls that have no explicit driver mapping are absent.
+
+Older clients may continue to request the flat numeric compatibility view:
 
 ```json
 {"t":"rig.controls.get","radioId":"main","commandId":"controls-1"}
 {"t":"rig.controls","radioId":"main","commandId":"controls-1","controls":[
   {"id":"level:RFPOWER","kind":"level","token":"RFPOWER","value":0.25,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true},
   {"id":"function:NB","kind":"function","token":"NB","value":1,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":false},
-  {"id":"function:TUNER","kind":"function","token":"TUNER","value":0,"minimum":0,"maximum":1,"step":1,"unit":"boolean","transmitLocked":true},
-  {"id":"passband:CURRENT","kind":"passband","token":"CURRENT","value":3000,"minimum":100,"maximum":12000,"step":50,"unit":"hertz","transmitLocked":false}
+  {"id":"passband:CURRENT","kind":"passband","token":"PASSBAND","value":3000,"minimum":100,"maximum":12000,"step":50,"unit":"hertz","transmitLocked":true}
 ]}
 ```
 
-Only the readable/writable Hamlib capability intersection and the server's
-finite safety allowlist are returned. Level granularity comes from rigctl's
-`set_level <token> ?` query when the backend reports it. A write carries the
-opaque discovered `id`, never a raw CAT or rigctl command, and the server reads
-the value back before confirming it:
+This legacy response is projected from the same cached descriptors as
+`rig.capabilities`; it is not a second capability source. It includes only
+entries that the old numeric schema can decode, and projects boolean values as
+`0` or `1`. Only the readable/writable Hamlib capability intersection and the
+server's finite safety allowlist are returned. Level granularity comes from
+rigctl's `set_level <token> ?` query when the backend reports it.
+
+A write carries the opaque discovered `id`, never a raw CAT or rigctl command,
+and the server reads the value back before confirming it. `value` may be a JSON
+boolean, finite number, or bounded string; strings are never converted to
+numbers. Numeric writes remain valid for legacy controls, including `0`/`1`
+function writes:
 
 ```json
 {"t":"rig.control.set","radioId":"main","controlToken":"...","controlId":"level:RFPOWER","value":0.35,"commandId":"control-1"}
 {"t":"rig.control.confirmed","radioId":"main","commandId":"control-1","control":{"id":"level:RFPOWER","kind":"level","token":"RFPOWER","value":0.35,"minimum":0,"maximum":1,"step":0.01,"unit":"ratio","transmitLocked":true}}
 ```
+
+Actions require the same active `controlToken` as writes. The tuner action uses
+the normal tuning transmit interlock and returns its transmit lease in the same
+public fields as `tx.started`; clients stop it with the returned
+`transmitToken` and the existing `tx.stop` message:
+
+```json
+{"t":"rig.action.invoke","radioId":"main","controlToken":"...","id":"action:TUNER","commandId":"tuner-1"}
+{"t":"rig.action.confirmed","radioId":"main","commandId":"tuner-1","id":"action:TUNER","transmitToken":"...","heartbeatDeadlineMs":1787700003000,"hardDeadlineMs":1787700060000}
+```
+
+Synchronous failures echo the request's `commandId` and include
+`requestType` (for example `rig.action.invoke`), including missing/expired
+control leases, typed-value validation failures, and transmit-lock rejection.
 
 `RFPOWER`, `MICGAIN` and compressor controls are marked `transmitLocked` and
 cannot change while any transmission lease is active. The server enforces this

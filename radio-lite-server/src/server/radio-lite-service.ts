@@ -32,6 +32,7 @@ import {
   TransmitPermissionError,
   type RadioRuntimeFactory,
 } from "../rig/radio-runtime.ts";
+import type { RadioControl, RadioControlValue } from "../rig/radio-driver.ts";
 import { InternalTunerUnsupportedError, RigModeError } from "../rig/hamlib-rig.ts";
 import { RigReportError, RigTransportError } from "../rig/transport.ts";
 import { InvalidLeaseError, InterlockConflictError } from "../safety/transmit-interlock.ts";
@@ -751,7 +752,18 @@ export class RadioLiteService {
           t: "rig.controls",
           radioId,
           commandId,
-          controls,
+          controls: controls.flatMap(legacyRadioControlDescriptor),
+        });
+        return;
+      }
+      if (message.t === "rig.capabilities.get") {
+        exactMessageKeys(message, ["t", "radioId", "commandId"]);
+        const controls = await runtime.readControls();
+        sendWebSocketJson(webSocket, {
+          t: "rig.capabilities",
+          radioId,
+          commandId,
+          controls: controls.flatMap(publicRadioControlDescriptor),
         });
         return;
       }
@@ -786,10 +798,7 @@ export class RadioLiteService {
           message,
           ["t", "radioId", "controlToken", "controlId", "value", "commandId"],
         );
-        const value = optionalNumber(message.value, "value");
-        if (value === undefined) {
-          throw new Error("value must be a finite number");
-        }
+        const value = writableRadioControlValue(message.value);
         const control = await runtime.setControl(
           ownerId,
           controlToken(),
@@ -800,8 +809,46 @@ export class RadioLiteService {
           t: "rig.control.confirmed",
           radioId,
           commandId,
-          control,
+          control: typeof value === "number"
+            ? (legacyRadioControlDescriptor(control)[0] ?? publicRadioControlDescriptor(control)[0])
+            : publicRadioControlDescriptor(control)[0],
         });
+        return;
+      }
+      if (message.t === "rig.action.invoke") {
+        exactMessageKeys(
+          message,
+          ["t", "radioId", "controlToken", "id", "commandId"],
+          ["controlToken"],
+        );
+        const id = messageText(message.id, "id", 64);
+        await this.#audit.append({
+          occurredAtMs: this.#now(), action: "radio.action-intent", result: "success",
+          actorUserId: user.id, targetId: radioId, metadata: { "action-id": id },
+        });
+        const lease = await runtime.invokeAction(
+          ownerId,
+          user,
+          message.controlToken === undefined ? "" : controlToken(),
+          id,
+        );
+        void this.#audit.append({
+          occurredAtMs: this.#now(), action: "radio.ptt-start", result: "success",
+          actorUserId: user.id, targetId: radioId, metadata: { mode: lease.mode, "action-id": id },
+        }).catch(() => undefined);
+        try {
+          sendWebSocketJson(webSocket, {
+            t: "rig.action.confirmed",
+            radioId,
+            commandId,
+            id,
+            transmitToken: lease.leaseToken,
+            heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
+            hardDeadlineMs: lease.hardDeadlineMs,
+          });
+        } catch {
+          // The interlock owns the live tuning lease; do not misreport it as rejected.
+        }
         return;
       }
       if (message.t === "digital.snapshot.get") {
@@ -1712,6 +1759,72 @@ function safeInteger(value: unknown, field: string): number {
 
 function optionalSafeInteger(value: unknown, field: string): number | undefined {
   return value === undefined ? undefined : safeInteger(value, field);
+}
+
+function writableRadioControlValue(value: unknown): Exclude<RadioControlValue, null> {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    !/[\0\r\n]/u.test(value)
+  ) {
+    return value;
+  }
+  throw new Error("value must be a boolean, finite number, or non-empty bounded string");
+}
+
+function publicRadioControlDescriptor(control: RadioControl): Array<Record<string, unknown>> {
+  if (
+    control.group === undefined ||
+    control.access === undefined ||
+    control.presentation === undefined
+  ) {
+    return [];
+  }
+  return [{
+    id: control.id,
+    token: control.token,
+    group: control.group,
+    access: control.access,
+    presentation: control.presentation,
+    value: control.value,
+    unit: control.unit,
+    minimum: control.minimum,
+    maximum: control.maximum,
+    step: control.step,
+    options: control.options,
+    transmitLocked: control.transmitLocked,
+  }];
+}
+
+function legacyRadioControlDescriptor(control: RadioControl): Array<Record<string, unknown>> {
+  if (
+    (control.kind !== "level" && control.kind !== "function" && control.kind !== "passband") ||
+    (typeof control.value !== "number" && typeof control.value !== "boolean") ||
+    control.minimum === undefined ||
+    control.maximum === undefined ||
+    control.step === undefined ||
+    control.unit === undefined
+  ) {
+    return [];
+  }
+  return [{
+    id: control.id,
+    kind: control.kind,
+    token: control.token,
+    value: typeof control.value === "boolean" ? Number(control.value) : control.value,
+    minimum: control.minimum,
+    maximum: control.maximum,
+    step: control.step,
+    unit: control.unit,
+    transmitLocked: control.transmitLocked,
+  }];
 }
 
 function optionalNumber(value: unknown, field: string): number | undefined {
