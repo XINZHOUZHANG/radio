@@ -403,6 +403,7 @@ function discoveryWithAudio(): HardwareDiscoveryResult {
     serialDevices: [],
     audioInputs: [{ backend: "alsa", direction: "input", id: "hw:1,0", label: "USB input" }],
     audioOutputs: [{ backend: "alsa", direction: "output", id: "hw:2,0", label: "USB output" }],
+    audioCards: [],
     pttMethods: ["RIG"],
     baudRates: [38_400],
     warnings: [],

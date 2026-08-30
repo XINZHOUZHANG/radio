@@ -10,6 +10,19 @@ export type DiscoveredAudioDevice = {
   direction: "input" | "output";
   id: string;
   label: string;
+  metadata?: AudioDeviceMetadata;
+};
+
+export type AudioDeviceMetadata = {
+  deviceSerial?: string;
+  vendorId?: string;
+  productId?: string;
+  busPath?: string;
+  topology?: string;
+  alsaCard?: string;
+  alsaCardId?: string;
+  alsaCardName?: string;
+  isMonitor?: boolean;
 };
 
 export function serialDevicesFromNames(
@@ -56,18 +69,27 @@ export function parsePactlJson(
     if (typeof record.name !== "string" || record.name.length === 0) {
       continue;
     }
-    const properties = record.properties;
-    const description = properties !== null && typeof properties === "object"
-      ? (properties as Record<string, unknown>)["device.description"]
-      : undefined;
+    const properties = record.properties !== null && typeof record.properties === "object"
+      && !Array.isArray(record.properties)
+      ? record.properties as Record<string, unknown>
+      : {};
+    const isMonitor = direction === "input" && (
+      record.monitor_of_sink !== undefined ||
+      properties["device.class"] === "monitor" ||
+      record.name.endsWith(".monitor")
+    );
+    if (isMonitor) continue;
+    const description = properties["device.description"];
     const label = typeof description === "string" && description.trim()
       ? description.trim()
       : record.name;
+    const metadata = pulseMetadata(properties);
     devices.push({
       backend: "pulse",
       direction,
       id: record.name,
       label,
+      ...(metadata === undefined ? {} : { metadata }),
     });
   }
   return devices.sort((left, right) => left.label.localeCompare(right.label));
@@ -94,9 +116,33 @@ export function parseAlsaHardwareList(
       direction,
       id,
       label: `${match[3].trim()} — ${match[6].trim()}`,
+      metadata: {
+        alsaCard: match[1],
+        alsaCardId: match[2].trim(),
+        alsaCardName: match[3].trim(),
+      },
     });
   }
   return devices;
+}
+
+function pulseMetadata(properties: Record<string, unknown>): AudioDeviceMetadata | undefined {
+  const metadata: AudioDeviceMetadata = {
+    deviceSerial: propertyText(properties, "device.serial"),
+    vendorId: propertyText(properties, "device.vendor.id"),
+    productId: propertyText(properties, "device.product.id"),
+    busPath: propertyText(properties, "device.bus_path"),
+    topology: propertyText(properties, "device.topology"),
+    alsaCard: propertyText(properties, "alsa.card"),
+    alsaCardId: propertyText(properties, "alsa.card_name"),
+    alsaCardName: propertyText(properties, "alsa.long_card_name"),
+  };
+  return Object.values(metadata).some((value) => value !== undefined) ? metadata : undefined;
+}
+
+function propertyText(properties: Record<string, unknown>, key: string): string | undefined {
+  const value = properties[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function safeDeviceName(name: string): boolean {

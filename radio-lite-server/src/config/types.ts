@@ -24,6 +24,15 @@ export type AudioEndpoint = {
   label?: string;
 };
 
+export const AUDIO_LATENCIES = ["low", "balanced", "stable"] as const;
+
+export type AudioLatency = typeof AUDIO_LATENCIES[number];
+
+export type AudioRoute =
+  | { kind: "system-device"; hardwareId: string; latency: AudioLatency }
+  | { kind: "driver-stream" }
+  | { kind: "none" };
+
 export const PTT_METHODS = [
   "RIG",
   "DTR",
@@ -67,6 +76,7 @@ export type RadioProfile = {
   connection: RigConnection;
   audioInput: AudioEndpoint;
   audioOutput: AudioEndpoint;
+  audioRoute?: AudioRoute;
   ptt: PttConfiguration;
   station: StationIdentity;
   hardwareTxEnabled: boolean;
@@ -83,6 +93,7 @@ const GRID_PATTERN = /^[A-R]{2}[0-9]{2}(?:[A-X]{2})?$/;
 const SAFE_HOST_PATTERN = /^[A-Za-z0-9._:-]{1,253}$/;
 const ALLOWED_BAUD_RATES = new Set<number>(SERIAL_BAUD_RATES);
 const ALLOWED_PTT_METHODS = new Set<string>(PTT_METHODS);
+const ALLOWED_AUDIO_LATENCIES = new Set<string>(AUDIO_LATENCIES);
 
 export function parseRadioConfig(value: unknown): RadioConfigFile {
   const root = objectValue(value, "configuration");
@@ -117,6 +128,7 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
       "connection",
       "audioInput",
       "audioOutput",
+      "audioRoute",
       "ptt",
       "station",
       "hardwareTxEnabled",
@@ -149,6 +161,9 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
   if (hardwareTxEnabled && ptt.method === "None") {
     throw new Error(`${field}.ptt None cannot enable hardware transmission`);
   }
+  const audioRoute = radio.audioRoute === undefined
+    ? undefined
+    : parseAudioRoute(radio.audioRoute, `${field}.audioRoute`);
   return {
     id,
     name,
@@ -156,10 +171,33 @@ export function parseRadioProfile(value: unknown, field = "radio"): RadioProfile
     connection,
     audioInput: parseAudioEndpoint(radio.audioInput, `${field}.audioInput`),
     audioOutput: parseAudioEndpoint(radio.audioOutput, `${field}.audioOutput`),
+    ...(audioRoute === undefined ? {} : { audioRoute }),
     ptt,
     station: parseStation(radio.station, `${field}.station`),
     hardwareTxEnabled,
   };
+}
+
+function parseAudioRoute(value: unknown, field: string): AudioRoute {
+  const route = objectValue(value, field);
+  const kind = text(route.kind, `${field}.kind`, 1, 32);
+  if (kind === "system-device") {
+    exactKeys(route, ["kind", "hardwareId", "latency"], field);
+    const hardwareId = text(route.hardwareId, `${field}.hardwareId`, 1, 256);
+    if (/[\0\r\n]/u.test(hardwareId) || hardwareId === "unknown") {
+      throw new Error(`${field}.hardwareId must identify a stable card`);
+    }
+    const latency = text(route.latency, `${field}.latency`, 1, 16);
+    if (!ALLOWED_AUDIO_LATENCIES.has(latency)) {
+      throw new Error(`${field}.latency is unsupported`);
+    }
+    return { kind, hardwareId, latency: latency as AudioLatency };
+  }
+  if (kind === "driver-stream" || kind === "none") {
+    exactKeys(route, ["kind"], field);
+    return { kind };
+  }
+  throw new Error(`${field}.kind is unsupported`);
 }
 
 function parsePttConfiguration(value: unknown, field: string): PttConfiguration {
@@ -302,6 +340,7 @@ function exactKeys(
       required !== "ptt" &&
       required !== "path" &&
       required !== "bit"
+      && required !== "audioRoute"
     ) {
       throw new Error(`${field}.${required} is required`);
     }

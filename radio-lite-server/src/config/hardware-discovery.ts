@@ -8,6 +8,7 @@ import {
   type DiscoveredAudioDevice,
   type SerialDevice,
 } from "./discovery.ts";
+import { pairAudioCards, type DiscoveredAudioCard } from "./audio-cards.ts";
 import {
   parseRigctlModelList,
   resolveCuratedPresets,
@@ -29,6 +30,7 @@ export type HardwareDiscoveryResult = {
   serialDevices: SerialDevice[];
   audioInputs: DiscoveredAudioDevice[];
   audioOutputs: DiscoveredAudioDevice[];
+  audioCards: DiscoveredAudioCard[];
   pttMethods: PttMethod[];
   baudRates: number[];
   warnings: string[];
@@ -61,6 +63,7 @@ export class HardwareDiscovery {
       serialDevices,
       audioInputs: audio.inputs,
       audioOutputs: audio.outputs,
+      audioCards: pairAudioCards(audio),
       pttMethods: [...PTT_METHODS],
       baudRates: [...SERIAL_BAUD_RATES],
       warnings,

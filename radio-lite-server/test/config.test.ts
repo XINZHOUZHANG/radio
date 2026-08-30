@@ -54,6 +54,60 @@ test("validates and normalizes a multi-radio configuration", () => {
   assert.deepEqual(result.radios[0].ptt, { method: "RIG" });
 });
 
+test("legacy version-1 profile remains valid without audioRoute", () => {
+  const result = parseRadioConfig({ version: 1, radios: [validRadio()] });
+  assert.equal(result.radios[0].audioRoute, undefined);
+});
+
+test("system-device routes retain stable identity and resolved legacy endpoints", () => {
+  const result = parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: {
+        kind: "system-device",
+        hardwareId: "usb:1234:5678:SN42",
+        latency: "balanced",
+      },
+    })],
+  });
+  assert.deepEqual(result.radios[0].audioRoute, {
+    kind: "system-device",
+    hardwareId: "usb:1234:5678:SN42",
+    latency: "balanced",
+  });
+  assert.deepEqual(result.radios[0].audioInput, {
+    backend: "alsa", id: "hw:1,0", label: "USB Audio In",
+  });
+  assert.deepEqual(result.radios[0].audioOutput, {
+    backend: "alsa", id: "hw:1,0", label: "USB Audio Out",
+  });
+});
+
+test("audio routes accept only their exact union members", () => {
+  assert.deepEqual(parseRadioConfig({
+    version: 1,
+    radios: [validRadio({ audioRoute: { kind: "driver-stream" } })],
+  }).radios[0].audioRoute, { kind: "driver-stream" });
+  assert.deepEqual(parseRadioConfig({
+    version: 1,
+    radios: [validRadio({ audioRoute: { kind: "none" } })],
+  }).radios[0].audioRoute, { kind: "none" });
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({ audioRoute: { kind: "system-device", hardwareId: "unknown", latency: "balanced" } })],
+  }), /hardwareId must identify a stable card/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({ audioRoute: { kind: "driver-stream", latency: "low" } })],
+  }), /unknown field/u);
+  assert.throws(() => parseRadioConfig({
+    version: 1,
+    radios: [validRadio({
+      audioRoute: { kind: "system-device", hardwareId: "usb:1234\n5678", latency: "low" },
+    })],
+  }), /hardwareId must identify a stable card/u);
+});
+
 test("validates Hamlib PTT methods, device paths and GPIO bit numbers", () => {
   const gpio = parseRadioConfig({
     version: RADIO_CONFIG_VERSION,
@@ -217,5 +271,10 @@ test("parses PulseAudio and ALSA choices for the iOS wizard", () => {
     direction: "output",
     id: "hw:1,0",
     label: "USB Audio CODEC — USB Audio",
+    metadata: {
+      alsaCard: "1",
+      alsaCardId: "CODEC",
+      alsaCardName: "USB Audio CODEC",
+    },
   });
 });
