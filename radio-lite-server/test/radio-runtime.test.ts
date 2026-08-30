@@ -10,6 +10,7 @@ import { ControlBusyError, InvalidControlLeaseError } from "../src/control/contr
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
 import { HamlibDriver } from "../src/rig/hamlib-driver.ts";
 import { HamlibRig } from "../src/rig/hamlib-rig.ts";
+import { NoRadioDriver } from "../src/rig/no-radio-driver.ts";
 import {
   HardwareTransmitDisabledError,
   ManagedSerialDeviceBusyError,
@@ -20,7 +21,12 @@ import {
   RadioRuntimeRegistryClosedError,
   TransmitPermissionError,
 } from "../src/rig/radio-runtime.ts";
-import type { RadioControl, RadioControlValue, RadioDriver } from "../src/rig/radio-driver.ts";
+import {
+  ReceiveOnlyRadioError,
+  type RadioControl,
+  type RadioControlValue,
+  type RadioDriver,
+} from "../src/rig/radio-driver.ts";
 import type { RadioTelemetryClock } from "../src/rig/radio-telemetry.ts";
 import { RigReportError } from "../src/rig/transport.ts";
 
@@ -711,6 +717,39 @@ test("runtime enforces account permission and explicit hardware TX switch", asyn
   assert.equal(rig.ptt, false);
 });
 
+test("no-radio runtime rejects every transmit path before creating a lease or fault", async (context) => {
+  const runtime = new RadioRuntime(noRadioProfile(), new NoRadioDriver());
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user("decode-operator", "operator", true);
+  const control = await runtime.acquireControl("decode-device", operator);
+
+  for (const mode of ["voice", "digital", "tuning"] as const) {
+    await assert.rejects(
+      runtime.startTransmit("decode-device", operator, control.lease.token, mode),
+      ReceiveOnlyRadioError,
+    );
+    assert.equal(runtime.supervisor.snapshot().lease, null);
+    assert.equal(runtime.interlock.snapshot().state, "idle");
+    assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
+    assert.equal(runtime.supervisor.snapshot().faultReason, null);
+  }
+
+  await assert.rejects(
+    runtime.invokeAction(
+      "decode-device",
+      operator,
+      control.lease.token,
+      "action:TUNER",
+    ),
+    ReceiveOnlyRadioError,
+  );
+  assert.equal(runtime.supervisor.snapshot().lease, null);
+  assert.equal(runtime.interlock.snapshot().state, "idle");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
+  assert.equal(runtime.supervisor.snapshot().faultReason, null);
+});
+
 test("tuner is mutually exclusive with voice and disconnect dekeys without bypassing ATU", async (context) => {
   const rig = new FakeRig();
   const runtime = new RadioRuntime(profile(true), rig);
@@ -1282,6 +1321,17 @@ function profile(hardwareTxEnabled: boolean) {
     audioOutput: { backend: "alsa", id: "hw:1,0" },
     station: { callsign: "BI1ABC", grid: "OM89" },
     hardwareTxEnabled,
+  });
+}
+
+function noRadioProfile() {
+  return parseRadioProfile({
+    id: "decode-only",
+    name: "Decode only",
+    connection: { kind: "no-radio" },
+    audioRoute: { kind: "none" },
+    station: { callsign: "BI1ABC", grid: "OM89" },
+    hardwareTxEnabled: false,
   });
 }
 

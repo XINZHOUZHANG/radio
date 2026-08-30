@@ -84,7 +84,15 @@ export type RadioPttReadOptions = {
   purpose?: "off-recovery";
 };
 
+export class ReceiveOnlyRadioError extends Error {
+  constructor(message = "radio is receive-only") {
+    super(message);
+    this.name = "ReceiveOnlyRadioError";
+  }
+}
+
 export interface RadioDriver {
+  readonly receiveOnly?: boolean;
   initialize(): Promise<void>;
   prepareTelemetry?(): Promise<void>;
   close(): Promise<void>;

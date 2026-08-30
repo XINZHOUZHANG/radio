@@ -19,12 +19,13 @@ import {
 } from "./hamlib-rig.ts";
 import { HamlibDriver } from "./hamlib-driver.ts";
 import { ManagedRigctldProcess } from "./managed-process.ts";
-import type {
-  RadioControl,
-  RadioControlValue,
-  RadioDriver,
-  RadioModeState,
-  RadioState,
+import {
+  ReceiveOnlyRadioError,
+  type RadioControl,
+  type RadioControlValue,
+  type RadioDriver,
+  type RadioModeState,
+  type RadioState,
 } from "./radio-driver.ts";
 import {
   RadioTelemetrySampler,
@@ -269,6 +270,7 @@ export class RadioRuntime {
   ): Promise<TransmitLease> {
     return this.#serialize(async () => {
       this.control.assertValid(ownerId, controlToken);
+      this.#assertDriverCanTransmit();
       const action = await this.#controlMetadata(actionId);
       if (action?.access !== "action") {
         throw new Error("action " + actionId + " is unavailable");
@@ -377,6 +379,7 @@ export class RadioRuntime {
     ownerId: string,
     user: PublicUser,
     controlToken: string,
+    checkHardware = true,
   ) {
     const controlLease = this.control.assertValid(ownerId, controlToken);
     if (!user.enabled || controlLease.userId !== user.id) {
@@ -385,10 +388,20 @@ export class RadioRuntime {
     if (!user.canTransmit) {
       throw new TransmitPermissionError("account is not permitted to transmit");
     }
+    if (checkHardware) this.#assertHardwareTransmitAdmission();
+    return controlLease;
+  }
+
+  #assertHardwareTransmitAdmission(): void {
     if (!this.profile.hardwareTxEnabled && this.profile.hamlibModelId !== 1) {
       throw new HardwareTransmitDisabledError("hardware transmission is disabled for this radio");
     }
-    return controlLease;
+  }
+
+  #assertDriverCanTransmit(): void {
+    if (this.#driver.receiveOnly === true) {
+      throw new ReceiveOnlyRadioError();
+    }
   }
 
   async #startTransmit(
@@ -397,7 +410,14 @@ export class RadioRuntime {
     controlToken: string,
     mode: TransmitMode,
   ): Promise<TransmitLease> {
-    const controlLease = this.#assertTransmitAdmission(ownerId, user, controlToken);
+    const controlLease = this.#assertTransmitAdmission(
+      ownerId,
+      user,
+      controlToken,
+      false,
+    );
+    this.#assertDriverCanTransmit();
+    this.#assertHardwareTransmitAdmission();
     if (mode === "tuning" && !(await this.supportsInternalTuner())) {
       throw new InternalTunerUnsupportedError(
         "radio does not support internal tuning via Hamlib TUNE",
