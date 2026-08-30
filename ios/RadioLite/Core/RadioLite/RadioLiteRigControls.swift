@@ -346,3 +346,539 @@ enum RadioLiteRigControlProtocol {
         return updated
     }
 }
+
+enum RadioLiteControlValue: Codable, Equatable, Hashable, Sendable {
+    case boolean(Bool)
+    case number(Double)
+    case string(String)
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .boolean(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else {
+            self = .string(try container.decode(String.self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .boolean(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .null: try container.encodeNil()
+        }
+    }
+
+    var jsonValue: JSONValue {
+        switch self {
+        case .boolean(let value): .bool(value)
+        case .number(let value): .number(value)
+        case .string(let value): .string(value)
+        case .null: .null
+        }
+    }
+
+    var numberValue: Double? {
+        guard case .number(let value) = self else { return nil }
+        return value
+    }
+
+    var booleanValue: Bool? {
+        guard case .boolean(let value) = self else { return nil }
+        return value
+    }
+}
+
+enum RadioLiteCapabilityGroup: Codable, Equatable, Hashable, Sendable {
+    case antenna
+    case rf
+    case audio
+    case mode
+    case cw
+    case repeater
+    case spectrum
+    case system
+    case unknown(String)
+
+    static let productOrder: [Self] = [
+        .antenna, .rf, .audio, .mode, .cw, .repeater, .spectrum, .system,
+    ]
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "antenna": self = .antenna
+        case "rf": self = .rf
+        case "audio": self = .audio
+        case "mode": self = .mode
+        case "cw": self = .cw
+        case "repeater": self = .repeater
+        case "spectrum": self = .spectrum
+        case "system": self = .system
+        default: self = .unknown(value)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wireValue)
+    }
+
+    var wireValue: String {
+        switch self {
+        case .antenna: "antenna"
+        case .rf: "rf"
+        case .audio: "audio"
+        case .mode: "mode"
+        case .cw: "cw"
+        case .repeater: "repeater"
+        case .spectrum: "spectrum"
+        case .system: "system"
+        case .unknown(let value): value
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .antenna: "天线"
+        case .rf: "射频"
+        case .audio: "音频"
+        case .mode: "模式"
+        case .cw: "CW"
+        case .repeater: "中继"
+        case .spectrum: "频谱"
+        case .system: "系统"
+        case .unknown(let value): value.uppercased()
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .antenna: "antenna.radiowaves.left.and.right"
+        case .rf: "wave.3.right"
+        case .audio: "speaker.wave.2.fill"
+        case .mode: "dial.medium"
+        case .cw: "waveform.path.ecg"
+        case .repeater: "repeat"
+        case .spectrum: "chart.bar.xaxis"
+        case .system, .unknown: "gearshape.fill"
+        }
+    }
+
+    var productIndex: Int {
+        Self.productOrder.firstIndex(of: self) ?? Self.productOrder.count
+    }
+}
+
+enum RadioLiteCapabilityAccess: Codable, Equatable, Sendable {
+    case readOnly
+    case readWrite
+    case action
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "read-only": self = .readOnly
+        case "read-write": self = .readWrite
+        case "action": self = .action
+        default: self = .unknown(value)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let value: String
+        switch self {
+        case .readOnly: value = "read-only"
+        case .readWrite: value = "read-write"
+        case .action: value = "action"
+        case .unknown(let unknown): value = unknown
+        }
+        try container.encode(value)
+    }
+
+    var permitsMutation: Bool {
+        self == .readWrite || self == .action
+    }
+}
+
+enum RadioLiteCapabilityPresentation: Codable, Equatable, Sendable {
+    case meter
+    case toggle
+    case slider
+    case discrete
+    case enumeration
+    case offset
+    case button
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "meter": self = .meter
+        case "toggle": self = .toggle
+        case "slider": self = .slider
+        case "discrete": self = .discrete
+        case "enum": self = .enumeration
+        case "offset": self = .offset
+        case "button": self = .button
+        default: self = .unknown(value)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let value: String
+        switch self {
+        case .meter: value = "meter"
+        case .toggle: value = "toggle"
+        case .slider: value = "slider"
+        case .discrete: value = "discrete"
+        case .enumeration: value = "enum"
+        case .offset: value = "offset"
+        case .button: value = "button"
+        case .unknown(let unknown): value = unknown
+        }
+        try container.encode(value)
+    }
+
+    var isSupported: Bool {
+        if case .unknown = self { return false }
+        return true
+    }
+}
+
+enum RadioLiteCapabilityUnit: Codable, Equatable, Sendable {
+    case ratio
+    case decibel
+    case hertz
+    case watts
+    case milliseconds
+    case index
+    case boolean
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "ratio": self = .ratio
+        case "decibel": self = .decibel
+        case "hertz": self = .hertz
+        case "watts": self = .watts
+        case "milliseconds": self = .milliseconds
+        case "index": self = .index
+        case "boolean": self = .boolean
+        default: self = .unknown(value)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let value: String
+        switch self {
+        case .ratio: value = "ratio"
+        case .decibel: value = "decibel"
+        case .hertz: value = "hertz"
+        case .watts: value = "watts"
+        case .milliseconds: value = "milliseconds"
+        case .index: value = "index"
+        case .boolean: value = "boolean"
+        case .unknown(let unknown): value = unknown
+        }
+        try container.encode(value)
+    }
+}
+
+struct RadioLiteCapabilityOption: Codable, Equatable, Sendable {
+    let value: RadioLiteControlValue
+    let label: String
+}
+
+struct RadioLiteCapabilityControl: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let token: String
+    let group: RadioLiteCapabilityGroup
+    let access: RadioLiteCapabilityAccess
+    let presentation: RadioLiteCapabilityPresentation
+    let value: RadioLiteControlValue
+    let minimum: Double?
+    let maximum: Double?
+    let step: Double?
+    let unit: RadioLiteCapabilityUnit?
+    let options: [RadioLiteCapabilityOption]?
+    let transmitLocked: Bool
+
+    func replacingValue(_ replacement: RadioLiteControlValue) -> Self {
+        Self(
+            id: id,
+            token: token,
+            group: group,
+            access: access,
+            presentation: presentation,
+            value: replacement,
+            minimum: minimum,
+            maximum: maximum,
+            step: step,
+            unit: unit,
+            options: options,
+            transmitLocked: transmitLocked
+        )
+    }
+
+    func displayState(
+        isTransmitting: Bool,
+        hasControl: Bool
+    ) -> RadioLiteCapabilityDisplayState {
+        let disabledReason: String?
+        if !presentation.isSupported {
+            disabledReason = "当前版本不支持此控件"
+        } else if access == .readOnly || presentation == .meter {
+            disabledReason = nil
+        } else if !hasControl {
+            disabledReason = "需要先取得电台控制权"
+        } else if transmitLocked && isTransmitting {
+            disabledReason = "发射期间不可调整"
+        } else if !access.permitsMutation {
+            disabledReason = "该控件为只读"
+        } else {
+            disabledReason = nil
+        }
+        return RadioLiteCapabilityDisplayState(
+            label: Self.label(for: token),
+            isEnabled: access.permitsMutation
+                && presentation != .meter
+                && disabledReason == nil,
+            disabledReason: disabledReason
+        )
+    }
+
+    func formattedValue(_ candidate: RadioLiteControlValue? = nil) -> String {
+        let candidate = candidate ?? value
+        if let option = options?.first(where: { $0.value == candidate }) {
+            return option.label
+        }
+        switch candidate {
+        case .boolean(let enabled): return enabled ? "开启" : "关闭"
+        case .string(let value): return value
+        case .null: return "—"
+        case .number(let value):
+            if presentation == .offset {
+                switch unit {
+                case .hertz: return String(format: "%+.0f Hz", value)
+                case .milliseconds: return String(format: "%+.0f ms", value)
+                default: return String(format: "%+.0f", value)
+                }
+            }
+            switch unit {
+            case .ratio: return String(format: "%.0f%%", value * 100)
+            case .decibel: return String(format: abs(value.rounded() - value) < 0.000_001 ? "%.0f dB" : "%.1f dB", value)
+            case .hertz: return String(format: "%.0f Hz", value)
+            case .watts: return String(format: "%.1f W", value)
+            case .milliseconds: return String(format: "%.0f ms", value)
+            case .boolean: return value >= 0.5 ? "开启" : "关闭"
+            case .index, .unknown, .none: return String(format: abs(value.rounded() - value) < 0.000_001 ? "%.0f" : "%.2f", value)
+            }
+        }
+    }
+
+    func validated(_ candidate: RadioLiteControlValue) -> RadioLiteControlValue? {
+        guard access.permitsMutation else { return nil }
+        switch presentation {
+        case .toggle:
+            guard case .boolean = candidate else { return nil }
+        case .slider, .offset, .meter:
+            guard case .number(let number) = candidate, number.isFinite else { return nil }
+            if let minimum, number < minimum { return nil }
+            if let maximum, number > maximum { return nil }
+        case .discrete:
+            if let options, !options.isEmpty {
+                guard options.contains(where: { $0.value == candidate }) else { return nil }
+            } else {
+                guard case .number(let number) = candidate, number.isFinite else { return nil }
+                if let minimum, number < minimum { return nil }
+                if let maximum, number > maximum { return nil }
+            }
+        case .enumeration:
+            guard options?.contains(where: { $0.value == candidate }) == true else { return nil }
+        case .button:
+            guard candidate == .null else { return nil }
+        case .unknown:
+            return nil
+        }
+        return candidate
+    }
+
+    private static func label(for token: String) -> String {
+        switch token.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+        case "RFPOWER": return "发射功率"
+        case "AF": return "音量"
+        case "RF": return "射频增益"
+        case "SQL": return "静噪"
+        case "MICGAIN": return "麦克风增益"
+        case "COMP": return "语音压缩"
+        case "AGC": return "自动增益控制"
+        case "ATT": return "衰减器"
+        case "PREAMP": return "前置放大器"
+        case "NB": return "脉冲噪声抑制"
+        case "NR": return "降噪"
+        case "ANF": return "自动陷波"
+        case "TUNER": return "机内天调"
+        case "CWPITCH": return "CW 音调"
+        case "PASSBAND", "CURRENT": return "滤波器带宽"
+        default: return token.isEmpty ? "Hamlib 控件" : token.uppercased()
+        }
+    }
+}
+
+struct RadioLiteCapabilityDisplayState: Equatable, Sendable {
+    let label: String
+    let isEnabled: Bool
+    let disabledReason: String?
+}
+
+struct RadioLiteCapabilityGroupSection: Identifiable, Equatable, Sendable {
+    let id: RadioLiteCapabilityGroup
+    let controls: [RadioLiteCapabilityControl]
+}
+
+struct RadioLiteCapabilityGroups: Equatable, Sendable {
+    let groups: [RadioLiteCapabilityGroupSection]
+
+    init(_ controls: [RadioLiteCapabilityControl]) {
+        let visible = controls.filter {
+            $0.presentation.isSupported && $0.id != RadioLiteCapabilityProtocol.tunerActionId
+        }
+        let grouped = Dictionary(grouping: visible, by: \.group)
+        groups = grouped.map { RadioLiteCapabilityGroupSection(id: $0.key, controls: $0.value) }
+            .sorted {
+                let left = $0.id.productIndex
+                let right = $1.id.productIndex
+                return left == right ? $0.id.wireValue < $1.id.wireValue : left < right
+            }
+    }
+}
+
+struct RadioLiteCapabilitiesResponse: Codable, Equatable, Sendable {
+    let t: String
+    let radioId: String
+    let commandId: String
+    let controls: [RadioLiteCapabilityControl]
+}
+
+struct RadioLiteCapabilityControlReadback: Codable, Equatable, Sendable {
+    let id: String
+    let value: RadioLiteControlValue
+}
+
+struct RadioLiteCapabilityControlConfirmation: Codable, Equatable, Sendable {
+    let t: String
+    let radioId: String
+    let commandId: String
+    let control: RadioLiteCapabilityControlReadback
+}
+
+struct RadioLiteActionConfirmation: Codable, Equatable, Sendable {
+    let t: String
+    let radioId: String
+    let commandId: String
+    let id: String
+    let transmitToken: String?
+    let heartbeatDeadlineMs: Int64?
+    let hardDeadlineMs: Int64?
+}
+
+struct RadioLiteCapabilityCatalogue: Equatable, Sendable {
+    private(set) var controls: [RadioLiteCapabilityControl] = []
+    private(set) var generation: UInt64 = 0
+    private(set) var isAvailable = false
+
+    @discardableResult
+    mutating func beginDiscovery() -> UInt64 {
+        generation &+= 1
+        controls.removeAll(keepingCapacity: false)
+        isAvailable = false
+        return generation
+    }
+
+    mutating func invalidate() {
+        _ = beginDiscovery()
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        candidate == generation
+    }
+
+    @discardableResult
+    mutating func publish(
+        _ controls: [RadioLiteCapabilityControl],
+        generation candidate: UInt64
+    ) -> Bool {
+        guard isCurrent(candidate) else { return false }
+        self.controls = controls
+        isAvailable = true
+        return true
+    }
+}
+
+enum RadioLiteCapabilityProtocol {
+    static let tunerActionId = "action:TUNER"
+
+    static func getRequest(radioId: String, commandId: String) -> JSONValue {
+        .object([
+            "t": .string("rig.capabilities.get"),
+            "radioId": .string(radioId),
+            "commandId": .string(commandId),
+        ])
+    }
+
+    static func setRequest(
+        radioId: String,
+        controlToken: String,
+        controlId: String,
+        value: RadioLiteControlValue,
+        commandId: String
+    ) -> JSONValue {
+        .object([
+            "t": .string("rig.control.set"),
+            "radioId": .string(radioId),
+            "controlToken": .string(controlToken),
+            "controlId": .string(controlId),
+            "value": value.jsonValue,
+            "commandId": .string(commandId),
+        ])
+    }
+
+    static func actionRequest(
+        radioId: String,
+        controlToken: String,
+        id: String,
+        commandId: String
+    ) -> JSONValue {
+        .object([
+            "t": .string("rig.action.invoke"),
+            "radioId": .string(radioId),
+            "controlToken": .string(controlToken),
+            "id": .string(id),
+            "commandId": .string(commandId),
+        ])
+    }
+
+    static func applying(
+        _ confirmation: RadioLiteCapabilityControlConfirmation,
+        to controls: [RadioLiteCapabilityControl]
+    ) -> [RadioLiteCapabilityControl] {
+        controls.map {
+            $0.id == confirmation.control.id
+                ? $0.replacingValue(confirmation.control.value)
+                : $0
+        }
+    }
+}

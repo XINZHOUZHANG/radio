@@ -26,6 +26,8 @@ const audioRuntimePolicy = read('ios', 'RadioLite', 'Core', 'Support', 'AudioRun
 const microphonePolicy = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMicrophonePolicy.swift');
 const receiveMonitoringPreference = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteReceiveMonitoringPreference.swift');
 const rigControls = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteRigControls.swift');
+const capabilityGroupView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteCapabilityGroupView.swift');
+const capabilityControlRow = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteCapabilityControlRow.swift');
 const spectrumAGC = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteSpectrumAGC.swift');
 const digitalSlotClock = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteDigitalSlotClock.swift');
 const rigControlsView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteRigControlsView.swift');
@@ -37,6 +39,62 @@ const frame = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMediaFrame
 const socket = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
 const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
+
+const capabilityModelFields = [
+  'id', 'token', 'group', 'access', 'presentation', 'value', 'minimum', 'maximum',
+  'step', 'unit', 'options', 'transmitLocked',
+];
+const capabilityFixture = {
+  t: 'rig.capabilities', radioId: 'main', commandId: 'capabilities-1', controls: [
+    { id: 'parameter:CWPITCH', token: 'CWPITCH', group: 'cw', access: 'read-write', presentation: 'discrete', value: 700, minimum: 300, maximum: 1_000, step: 50, unit: 'hertz', options: [{ value: 600, label: '600 Hz' }, { value: 700, label: '700 Hz' }], transmitLocked: false },
+    { id: 'level:AF', token: 'AF', group: 'audio', access: 'read-write', presentation: 'slider', value: 0.42, minimum: 0, maximum: 1, step: 0.01, unit: 'ratio', transmitLocked: false },
+    { id: 'level:RFPOWER', token: 'RFPOWER', group: 'rf', access: 'read-write', presentation: 'slider', value: 0.25, minimum: 0, maximum: 1, step: 0.01, unit: 'ratio', transmitLocked: true },
+    { id: 'function:NB', token: 'NB', group: 'rf', access: 'read-write', presentation: 'toggle', value: true, minimum: 0, maximum: 1, step: 1, unit: 'boolean', transmitLocked: false },
+    { id: 'action:TUNER', token: 'TUNER', group: 'rf', access: 'action', presentation: 'button', value: null, transmitLocked: true },
+  ],
+};
+for (const field of capabilityModelFields) {
+  assert(new RegExp(`\\blet ${field}:`, 'u').test(rigControls), `iOS capability model is missing ${field}`);
+}
+const decodedCapabilityFixture = capabilityFixture.controls.map((control) =>
+  Object.fromEntries(capabilityModelFields.filter((field) => Object.hasOwn(control, field)).map((field) => [field, control[field]])));
+assert.deepEqual(decodedCapabilityFixture[3].value, true, 'boolean controls must not be coerced to numbers');
+assert.equal(decodedCapabilityFixture[0].options[1].value, 700);
+const groupOrder = ['antenna', 'rf', 'audio', 'mode', 'cw', 'repeater', 'spectrum', 'system'];
+assert.deepEqual(
+  [...new Set(decodedCapabilityFixture.filter((control) => control.id !== 'action:TUNER').map((control) => control.group))]
+    .sort((left, right) => groupOrder.indexOf(left) - groupOrder.indexOf(right)),
+  ['rf', 'audio', 'cw'],
+);
+function capabilityGetRequest(radioId, commandId) {
+  return { t: 'rig.capabilities.get', radioId, commandId };
+}
+function typedControlSetRequest(radioId, controlToken, controlId, value, commandId) {
+  return { t: 'rig.control.set', radioId, controlToken, controlId, value, commandId };
+}
+function actionInvokeRequest(radioId, controlToken, id, commandId) {
+  return { t: 'rig.action.invoke', radioId, controlToken, id, commandId };
+}
+assert.deepEqual(
+  capabilityGetRequest('main', 'capabilities-1'),
+  { t: 'rig.capabilities.get', radioId: 'main', commandId: 'capabilities-1' },
+);
+assert.deepEqual(
+  typedControlSetRequest('main', 'lease-token', 'function:NB', false, 'control-nb-1'),
+  { t: 'rig.control.set', radioId: 'main', controlToken: 'lease-token', controlId: 'function:NB', value: false, commandId: 'control-nb-1' },
+);
+assert.deepEqual(
+  actionInvokeRequest('main', 'lease-token', 'action:TUNER', 'tuner-1'),
+  { t: 'rig.action.invoke', radioId: 'main', controlToken: 'lease-token', id: 'action:TUNER', commandId: 'tuner-1' },
+);
+assert(rigControls.includes('"rig.capabilities.get"'));
+assert(rigControls.includes('RadioLiteControlValue'));
+assert(session.includes('expecting: ["rig.capabilities"]'));
+assert(session.includes('expecting: ["rig.action.confirmed"]'));
+assert(capabilityGroupView.includes('RadioLiteCapabilityControlRow'));
+for (const nativeControl of ['Toggle(', 'Slider(', 'Picker(', 'Button(']) {
+  assert(capabilityControlRow.includes(nativeControl), `native capability row is missing ${nativeControl}`);
+}
 
 function controlTelemetryContract(radioId, subscribeCommandId, unsubscribeCommandId) {
   return {
@@ -139,8 +197,9 @@ assert(rigControls.includes('reflectingSuccessfulTuneStart('));
 assert(rigControls.includes('static func tunerSwitch(in controls:'));
 assert(rigControls.includes('static func generalControls(in controls:'));
 assert(rigControls.includes('case "TUNER": return "机内天调接入"'));
-assert(radioView.includes('RadioLiteTunerInteractionPolicy.action('));
-assert(radioView.includes('Toggle("机内天调接入", isOn: tunerSwitchBinding)'));
+assert(radioView.includes('session.tunerActionCapability'));
+assert(radioView.includes('capability.displayState('));
+assert(!radioView.includes('supportsInternalTuner'));
 assert(rigControlsView.includes('RadioLiteTunerInteractionPolicy.generalControls('));
 assert(session.includes('reflectSuccessfulTunerStart(radioId:'));
 assert(session.includes('endTuning(reason: .operatorCancellation)'));

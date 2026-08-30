@@ -7,28 +7,45 @@ struct RadioLiteRigControlsView: View {
     let hasControl: Bool
 
     var body: some View {
+        VStack(spacing: 14) {
+            if session.radioCapabilitiesAvailable {
+                capabilityHeader
+                let groups = RadioLiteCapabilityGroups(session.radioCapabilities).groups
+                if groups.isEmpty {
+                    unavailablePanel(
+                        title: "没有可显示控件",
+                        description: "当前电台未报告此 App 支持的 Hamlib 控件。"
+                    )
+                } else {
+                    ForEach(groups) { group in
+                        RadioLiteCapabilityGroupView(
+                            group: group,
+                            isTransmitting: isTransmitting,
+                            hasControl: hasControl
+                        )
+                    }
+                }
+            } else {
+                legacyPanel
+            }
+        }
+    }
+
+    private var capabilityHeader: some View {
+        RadioPanel {
+            header(refreshAction: refreshCapabilities)
+        }
+    }
+
+    private var legacyPanel: some View {
         RadioPanel {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Label("Hamlib 控件", systemImage: "slider.horizontal.3")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        Task { await refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(RadioPalette.accent)
-                    .disabled(session.selectedRadioId == nil)
-                    .accessibilityLabel("刷新 Hamlib 控件")
-                }
-
+                header(refreshAction: refreshLegacyControls)
                 if generalControls.isEmpty {
                     ContentUnavailableView(
-                        "没有可调控件",
+                        "分组控件不可用",
                         systemImage: "dial.low",
-                        description: Text("当前电台未报告其他可安全读写的 Hamlib 控件，可点右上角重新读取。")
+                        description: Text("服务器未提供分组能力描述；仍可使用其报告的兼容 Hamlib 控件。")
                     )
                     .frame(maxWidth: .infinity)
                 } else {
@@ -47,11 +64,47 @@ struct RadioLiteRigControlsView: View {
         }
     }
 
+    private func unavailablePanel(title: String, description: String) -> some View {
+        RadioPanel {
+            ContentUnavailableView(
+                title,
+                systemImage: "dial.low",
+                description: Text(description)
+            )
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func header(refreshAction: @escaping () async -> Void) -> some View {
+        HStack {
+            Label("Hamlib 控件", systemImage: "slider.horizontal.3")
+                .font(.headline)
+            Spacer()
+            Button {
+                Task { await refreshAction() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(RadioPalette.accent)
+            .disabled(session.selectedRadioId == nil)
+            .accessibilityLabel("刷新 Hamlib 控件")
+        }
+    }
+
     private var generalControls: [RadioLiteRigControl] {
         RadioLiteTunerInteractionPolicy.generalControls(in: session.rigControls)
     }
 
-    private func refresh() async {
+    private func refreshCapabilities() async {
+        do {
+            try await session.refreshRadioCapabilities()
+        } catch {
+            session.errorMessage = "读取 Hamlib 分组控件失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func refreshLegacyControls() async {
         do {
             try await session.refreshRigControls()
         } catch {

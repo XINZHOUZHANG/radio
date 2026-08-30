@@ -7,8 +7,6 @@ struct RadioLiteRadioView: View {
     @AppStorage("radio-lite.receive-audio.has-visited") private var hasVisitedRadioPage = false
     @AppStorage("radio-lite.receive-audio.explicit-choice") private var receiveMonitoringChoice = -1
     @State private var frequencyMHz = "14.074000"
-    @State private var pendingTunerSwitchValue: Bool?
-    @State private var isTunerSwitchSubmitting = false
     @FocusState private var frequencyFocused: Bool
 
     private let modes = RadioLiteRigMode.allCases
@@ -212,27 +210,6 @@ struct RadioLiteRadioView: View {
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                 }
             }
-            if let tunerSwitch {
-                HStack(spacing: 10) {
-                    Label("机内天调接入", systemImage: "antenna.radiowaves.left.and.right")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    if isTunerSwitchSubmitting {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(tunerSwitchIsOn ? "已接入" : "旁路")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(tunerSwitchIsOn ? RadioPalette.accent : RadioPalette.muted)
-                    Toggle("机内天调接入", isOn: tunerSwitchBinding)
-                        .labelsHidden()
-                        .tint(RadioPalette.accent)
-                        .disabled(!canSetTunerSwitch)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            }
             HStack(spacing: 12) {
                 RadioLiteHoldButton(
                     title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
@@ -245,40 +222,34 @@ struct RadioLiteRadioView: View {
                 } onRelease: {
                     session.endVoicePTT()
                 }
-                Button {
-                    switch RadioLiteTunerInteractionPolicy.action(
-                        isTuning: session.isTuning,
-                        tuneSupported: session.rigState?.supportsInternalTuner != false
-                    ) {
-                    case .start:
-                        session.beginTuning()
-                    case .stop:
-                        session.endTuning()
-                    case .unavailable:
-                        break
+                if let tunerAction = session.tunerActionCapability {
+                    Button {
+                        if session.isTuning {
+                            session.endTuning()
+                        } else {
+                            session.beginTuning()
+                        }
+                    } label: {
+                        Label(
+                            session.isTuning ? "停止调谐" : tunerActionButtonLabel(tunerAction),
+                            systemImage: "tuningfork"
+                        )
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(session.isTuning ? Color.white : RadioPalette.warning)
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .background(
+                            session.isTuning ? RadioPalette.warning : RadioPalette.warning.opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(RadioPalette.warning.opacity(session.isTuning ? 0.8 : 0.34))
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
-                } label: {
-                    Label(
-                        session.rigState?.supportsInternalTuner == false
-                            ? "不支持机内天调"
-                            : (session.isTuning ? "停止调谐" : "开始调谐"),
-                        systemImage: "tuningfork"
-                    )
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(session.isTuning ? Color.white : RadioPalette.warning)
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .background(
-                        session.isTuning ? RadioPalette.warning : RadioPalette.warning.opacity(0.12),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(RadioPalette.warning.opacity(session.isTuning ? 0.8 : 0.34))
-                    }
-                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .buttonStyle(.plain)
+                    .disabled(!canUseTunerAction(tunerAction))
                 }
-                .buttonStyle(.plain)
-                .disabled(!session.hasControl || !session.canUseInternalTuner)
             }
             if session.isVoicePTTHeld {
                 ProgressView(value: audio.microphoneLevel)
@@ -301,34 +272,18 @@ struct RadioLiteRadioView: View {
         session.isVoicePTTHeld || session.isTuning || session.rigState?.ptt == true
     }
 
-    private var tunerSwitch: RadioLiteRigControl? {
-        RadioLiteTunerInteractionPolicy.tunerSwitch(in: session.rigControls)
+    private func canUseTunerAction(_ capability: RadioLiteCapabilityControl) -> Bool {
+        if session.isTuning { return session.hasControl }
+        return session.canUseInternalTuner
+            && capability.displayState(
+                isTransmitting: isTransmitting,
+                hasControl: session.hasControl
+            ).isEnabled
     }
 
-    private var tunerSwitchIsOn: Bool {
-        pendingTunerSwitchValue ?? ((tunerSwitch?.value ?? 0) >= 0.5)
-    }
-
-    private var canSetTunerSwitch: Bool {
-        session.hasControl && !isTransmitting && !isTunerSwitchSubmitting
-    }
-
-    private var tunerSwitchBinding: Binding<Bool> {
-        Binding(
-            get: { tunerSwitchIsOn },
-            set: { enabled in setTunerSwitch(enabled) }
-        )
-    }
-
-    private func setTunerSwitch(_ enabled: Bool) {
-        guard canSetTunerSwitch else { return }
-        pendingTunerSwitchValue = enabled
-        isTunerSwitchSubmitting = true
-        Task {
-            _ = await session.setRigControl("function:TUNER", value: enabled ? 1 : 0)
-            pendingTunerSwitchValue = nil
-            isTunerSwitchSubmitting = false
-        }
+    private func tunerActionButtonLabel(_ capability: RadioLiteCapabilityControl) -> String {
+        let label = capability.displayState(isTransmitting: false, hasControl: true).label
+        return label == "机内天调" ? "开始调谐" : label
     }
 
     private func syncFrequency() {

@@ -54,6 +54,8 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var rigState: RadioLiteRigState?
     @Published private(set) var telemetry: RadioLiteTelemetry?
     @Published private(set) var rigControls: [RadioLiteRigControl] = []
+    @Published private(set) var radioCapabilities: [RadioLiteCapabilityControl] = []
+    @Published private(set) var radioCapabilitiesAvailable = false
     @Published private(set) var decodeBatches: [RadioLiteDigitalDecodeBatch] = []
     @Published private(set) var callQueue: RadioLiteCallQueueSnapshot?
     @Published private(set) var automaticQSO: RadioLiteAutoQSO?
@@ -116,6 +118,7 @@ final class RadioLiteSession: ObservableObject {
     private var receiveAudioEpoch = RadioLiteOperationEpoch()
     private var receiveMonitoringIntent = RadioLiteReceiveMonitoringIntent()
     private var rigControlCatalogue = RadioLiteRigControlCatalogue()
+    private var capabilityCatalogue = RadioLiteCapabilityCatalogue()
     private var noticeState = RadioLiteNoticeState()
     private var telemetrySubscriptionOwnership: RadioLiteTelemetrySubscriptionOwnership?
 
@@ -166,7 +169,14 @@ final class RadioLiteSession: ObservableObject {
         principal?.canTransmit == true && (selectedRadio?.hardwareTxEnabled == true || selectedRadio?.hamlibModelId == 1)
     }
     var canUseInternalTuner: Bool {
-        canTransmit && rigState?.supportsInternalTuner != false
+        canTransmit && tunerActionCapability != nil
+    }
+    var tunerActionCapability: RadioLiteCapabilityControl? {
+        radioCapabilities.first { control in
+            control.id == RadioLiteCapabilityProtocol.tunerActionId
+                && control.access == .action
+                && control.presentation == .button
+        }
     }
     var selectedRadio: RadioLiteRadioProfile? {
         guard let selectedRadioId else { return nil }
@@ -557,6 +567,7 @@ final class RadioLiteSession: ObservableObject {
                 presentNotice("电台当前由其他操作员控制，可稍后接管")
             }
             try await refreshRigState()
+            await refreshRadioCapabilitiesAutomatically()
             await refreshRigControlsAutomatically()
             try await refreshDigitalSnapshot()
         } catch {
@@ -720,6 +731,63 @@ final class RadioLiteSession: ObservableObject {
         }
     }
 
+    func refreshRadioCapabilities(
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async throws {
+        guard let radioId = selectedRadioId else { throw RadioLiteSessionError.radioUnavailable }
+        guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+            throw CancellationError()
+        }
+        let catalogueGeneration = beginCapabilityDiscovery()
+        let commandId = UUID().uuidString
+        do {
+            let reply = try await control.request(
+                RadioLiteCapabilityProtocol.getRequest(radioId: radioId, commandId: commandId),
+                expecting: ["rig.capabilities"],
+                commandId: commandId
+            )
+            guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true,
+                  selectedRadioId == radioId,
+                  capabilityCatalogue.isCurrent(catalogueGeneration) else {
+                throw CancellationError()
+            }
+            guard let response: RadioLiteCapabilitiesResponse = reply.decoded(),
+                  response.t == "rig.capabilities",
+                  response.radioId == radioId,
+                  response.commandId == commandId else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            guard capabilityCatalogue.publish(
+                response.controls,
+                generation: catalogueGeneration
+            ) else { return }
+            publishCapabilityCatalogue()
+        } catch {
+            guard authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true,
+                  selectedRadioId == radioId,
+                  capabilityCatalogue.isCurrent(catalogueGeneration) else {
+                throw CancellationError()
+            }
+            publishCapabilityCatalogue()
+            throw error
+        }
+    }
+
+    private func refreshRadioCapabilitiesAutomatically(
+        authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
+    ) async {
+        do {
+            try await refreshRadioCapabilities(authenticationOwnership: authenticationOwnership)
+        } catch {
+            guard !(error is CancellationError),
+                  authenticationOwnership.map(authenticationOwnershipState.isCurrent) ?? true else {
+                return
+            }
+            // Older servers do not implement rig.capabilities. Keep the grouped surface
+            // unavailable and let the existing flat controls remain as the fallback.
+        }
+    }
+
     private func refreshRigControlsAutomatically(
         authenticationOwnership: RadioLiteAuthenticationOwnership? = nil
     ) async {
@@ -818,6 +886,129 @@ final class RadioLiteSession: ObservableObject {
             }
             errorMessage = error.localizedDescription
             return nil
+        }
+    }
+
+    @discardableResult
+    func setCapabilityControl(
+        _ controlId: String,
+        value requestedValue: RadioLiteControlValue
+    ) async -> RadioLiteCapabilityControl? {
+        guard let radioId = selectedRadioId, let controlToken else {
+            errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
+            return nil
+        }
+        guard let current = radioCapabilities.first(where: { $0.id == controlId }) else {
+            errorMessage = RadioLiteSessionError.rigControlUnavailable.localizedDescription
+            return nil
+        }
+        let operationOwnership = RadioLiteRigControlOperationOwnership(
+            radioId: radioId,
+            catalogueGeneration: capabilityCatalogue.generation
+        )
+        let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
+        let display = current.displayState(isTransmitting: transmitting, hasControl: true)
+        guard display.isEnabled else {
+            errorMessage = RadioLiteSessionError.rigControlLocked(
+                display.disabledReason ?? "该控件当前不可调整"
+            ).localizedDescription
+            return nil
+        }
+        guard let value = current.validated(requestedValue) else {
+            errorMessage = RadioLiteSessionError.invalidRigControlValue.localizedDescription
+            return nil
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let commandId = UUID().uuidString
+            let reply = try await control.request(
+                RadioLiteCapabilityProtocol.setRequest(
+                    radioId: radioId,
+                    controlToken: controlToken,
+                    controlId: controlId,
+                    value: value,
+                    commandId: commandId
+                ),
+                expecting: ["rig.control.confirmed"],
+                commandId: commandId
+            )
+            guard let confirmation: RadioLiteCapabilityControlConfirmation = reply.decoded(),
+                  confirmation.t == "rig.control.confirmed",
+                  confirmation.radioId == radioId,
+                  confirmation.commandId == commandId,
+                  confirmation.control.id == controlId else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            guard operationOwnership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                catalogueGeneration: capabilityCatalogue.generation
+            ) else { return nil }
+            let updated = RadioLiteCapabilityProtocol.applying(
+                confirmation,
+                to: capabilityCatalogue.controls
+            )
+            guard capabilityCatalogue.publish(
+                updated,
+                generation: operationOwnership.catalogueGeneration
+            ) else { return nil }
+            publishCapabilityCatalogue()
+            return radioCapabilities.first { $0.id == controlId }
+        } catch {
+            guard operationOwnership.isCurrent(
+                selectedRadioId: selectedRadioId,
+                catalogueGeneration: capabilityCatalogue.generation
+            ) else { return nil }
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func invokeCapabilityAction(_ id: String) async -> Bool {
+        guard let radioId = selectedRadioId, let controlToken else {
+            errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
+            return false
+        }
+        guard let capability = radioCapabilities.first(where: { $0.id == id }),
+              capability.access == .action,
+              capability.presentation == .button,
+              id != RadioLiteCapabilityProtocol.tunerActionId else {
+            errorMessage = RadioLiteSessionError.rigControlUnavailable.localizedDescription
+            return false
+        }
+        let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
+        let display = capability.displayState(isTransmitting: transmitting, hasControl: true)
+        guard display.isEnabled else {
+            errorMessage = display.disabledReason
+                ?? RadioLiteSessionError.rigControlUnavailable.localizedDescription
+            return false
+        }
+        do {
+            let commandId = UUID().uuidString
+            let reply = try await control.request(
+                RadioLiteCapabilityProtocol.actionRequest(
+                    radioId: radioId,
+                    controlToken: controlToken,
+                    id: id,
+                    commandId: commandId
+                ),
+                expecting: ["rig.action.confirmed"],
+                commandId: commandId
+            )
+            guard let confirmation: RadioLiteActionConfirmation = reply.decoded(),
+                  confirmation.t == "rig.action.confirmed",
+                  confirmation.radioId == radioId,
+                  confirmation.commandId == commandId,
+                  confirmation.id == id,
+                  confirmation.transmitToken == nil else {
+                throw RadioLiteHTTPError.invalidResponse
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -1273,12 +1464,22 @@ final class RadioLiteSession: ObservableObject {
             errorMessage = RadioLiteSessionError.transmitNotAllowed.localizedDescription
             return
         }
-        guard rigState?.supportsInternalTuner != false else {
+        guard let tunerActionCapability else {
             errorMessage = "当前电台或 Hamlib 后端不支持机内天调"
             return
         }
         guard let radioId = selectedRadioId, let token = controlToken else {
             errorMessage = RadioLiteSessionError.controlRequired.localizedDescription
+            return
+        }
+        let transmitting = isVoicePTTHeld || isTuning || rigState?.ptt == true
+        let tunerDisplay = tunerActionCapability.displayState(
+            isTransmitting: transmitting,
+            hasControl: true
+        )
+        guard tunerDisplay.isEnabled else {
+            errorMessage = tunerDisplay.disabledReason
+                ?? RadioLiteSessionError.rigControlUnavailable.localizedDescription
             return
         }
         voicePTTReleaseState.beginTransmit()
@@ -1295,21 +1496,24 @@ final class RadioLiteSession: ObservableObject {
             do {
                 let commandId = UUID().uuidString
                 let reply = try await self.control.request(
-                    .object([
-                        "t": .string("tx.start"),
-                        "radioId": .string(radioId),
-                        "controlToken": .string(token),
-                        "mode": .string("tuning"),
-                        "commandId": .string(commandId),
-                    ]),
-                    expecting: ["tx.started"],
+                    RadioLiteCapabilityProtocol.actionRequest(
+                        radioId: radioId,
+                        controlToken: token,
+                        id: tunerActionCapability.id,
+                        commandId: commandId
+                    ),
+                    expecting: ["rig.action.confirmed"],
                     commandId: commandId
                 )
-                guard let transmitToken = reply["transmitToken"]?.stringValue else {
+                guard let confirmation: RadioLiteActionConfirmation = reply.decoded(),
+                      confirmation.t == "rig.action.confirmed",
+                      confirmation.radioId == radioId,
+                      confirmation.commandId == commandId,
+                      confirmation.id == tunerActionCapability.id,
+                      let transmitToken = confirmation.transmitToken else {
                     throw RadioLiteHTTPError.invalidResponse
                 }
                 startedToken = transmitToken
-                self.reflectSuccessfulTunerStart(radioId: radioId)
                 guard !Task.isCancelled,
                       self.isTuning,
                       self.transmitEpoch.owns(generation) else {
@@ -1665,6 +1869,7 @@ final class RadioLiteSession: ObservableObject {
                 expectedRadioId: operationOwnership.radioId,
                 configurationOwnership: operationOwnership
             )
+            await refreshRadioCapabilitiesAutomatically()
             await refreshRigControlsAutomatically()
             guard radioConfigurationReconnectState.complete(
                 operationOwnership,
@@ -1888,6 +2093,7 @@ final class RadioLiteSession: ObservableObject {
             presentNotice("已连接，但电台控制权当前由其他操作员持有")
         }
         try await refreshRigState(authenticationOwnership: authenticationOwnership)
+        await refreshRadioCapabilitiesAutomatically(authenticationOwnership: authenticationOwnership)
         await refreshRigControlsAutomatically(authenticationOwnership: authenticationOwnership)
         try requireCurrentAuthentication(authenticationOwnership)
         do {
@@ -2449,6 +2655,7 @@ final class RadioLiteSession: ObservableObject {
             expectedRadioId: radioId,
             reconnectOwnership: reconnectOwnership
         )
+        await refreshRadioCapabilitiesAutomatically()
         await refreshRigControlsAutomatically()
         try requireCurrentReconnect(reconnectOwnership)
         try? await refreshDigitalSnapshot(
@@ -2880,9 +3087,23 @@ final class RadioLiteSession: ObservableObject {
         return generation
     }
 
+    @discardableResult
+    private func beginCapabilityDiscovery() -> UInt64 {
+        let generation = capabilityCatalogue.beginDiscovery()
+        publishCapabilityCatalogue()
+        return generation
+    }
+
+    private func publishCapabilityCatalogue() {
+        radioCapabilities = capabilityCatalogue.controls
+        radioCapabilitiesAvailable = capabilityCatalogue.isAvailable
+    }
+
     private func invalidateRigControlCatalogue() {
         rigControlCatalogue.invalidate()
         rigControls = rigControlCatalogue.controls
+        capabilityCatalogue.invalidate()
+        publishCapabilityCatalogue()
     }
 
     private func presentNotice(_ message: String, deduplicationKey: String? = nil) {
