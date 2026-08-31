@@ -293,14 +293,14 @@ final class RadioLiteFTMessageTests: XCTestCase {
         )
     }
 
-    func testPortableCallsignLookupUsesTheMainCallsignSegment() {
+    func testSlashCallsignLookupDistinguishesPortableDesignatorsFromOperatingPrefixes() {
         XCTAssertEqual(
             RadioLiteCallsignCountryResolver.offline.country(for: "JA1ABC/P"),
             "日本"
         )
         XCTAssertEqual(
             RadioLiteCallsignCountryResolver.offline.country(for: "F/JA1ABC"),
-            "日本"
+            "法国"
         )
         XCTAssertEqual(
             RadioLiteCallsignCountryResolver.offline.country(for: "ON4ABC/M"),
@@ -310,6 +310,77 @@ final class RadioLiteFTMessageTests: XCTestCase {
             RadioLiteCallsignCountryResolver.offline.country(for: "YB1ABC/QRP"),
             "印度尼西亚"
         )
+    }
+
+    func testFlagLookupUsesReliableEntityCodes() {
+        let expectedFlags = [
+            "JA1ABC": "🇯🇵",
+            "BH4ABC": "🇨🇳",
+            "VR2ABC": "🇭🇰",
+            "XX9ABC": "🇲🇴",
+            "BV2ABC": "🇹🇼",
+            "KP4ABC": "🇵🇷",
+            "KL7ABC": "🇺🇸",
+        ]
+
+        for (callsign, expectedFlag) in expectedFlags {
+            XCTAssertEqual(
+                RadioLiteCallsignCountryResolver.offline.flag(for: callsign),
+                expectedFlag,
+                callsign
+            )
+        }
+    }
+
+    func testFlagLookupOmitsUnknownOrFlaglessEntities() {
+        XCTAssertNil(RadioLiteCallsignCountryResolver.offline.flag(for: "QZ0ZZZ"))
+        XCTAssertNil(RadioLiteCallsignCountryResolver.offline.flag(for: "1A1ZZZ"))
+    }
+
+    func testFlagLookupUsesExplicitOperatingPrefix() {
+        XCTAssertEqual(
+            RadioLiteCallsignCountryResolver.offline.flag(for: "JA1ABC/P"),
+            "🇯🇵"
+        )
+        XCTAssertEqual(
+            RadioLiteCallsignCountryResolver.offline.flag(for: "F/JA1ABC"),
+            "🇫🇷"
+        )
+    }
+
+    func testFlagLookupRejectsConflictingSlashLocations() {
+        XCTAssertNil(
+            RadioLiteCallsignCountryResolver.offline.flag(for: "F/JA1ABC/VE3")
+        )
+    }
+
+    func testDecodeMessageDisplayPlacesFlagImmediatelyAfterTheSenderCallsign() {
+        let examples = [
+            ("CQ JA1ABC PM95", "CQ JA1ABC 🇯🇵 PM95"),
+            ("BG2TEST HL2ABC -07", "BG2TEST HL2ABC 🇰🇷 -07"),
+            ("CQ <JA1ABC> PM95", "CQ <JA1ABC> 🇯🇵 PM95"),
+            ("CQ JA1ABC/P PM95", "CQ JA1ABC/P 🇯🇵 PM95"),
+            ("CQ F/JA1ABC JN18", "CQ F/JA1ABC 🇫🇷 JN18"),
+        ]
+
+        for (message, expected) in examples {
+            XCTAssertEqual(
+                RadioLiteFTDecodeMessageFormatter.text(message),
+                expected,
+                message
+            )
+        }
+    }
+
+    func testDecodeMessageDisplayLeavesUnknownAndAmbiguousCallsignsUnchanged() {
+        for message in [
+            "CQ QZ0ZZZ AA00",
+            "CQ F/JA1ABC/VE3 JN18",
+            "CQ F4ABC/JA1ABC JN18",
+            "RR73",
+        ] {
+            XCTAssertEqual(RadioLiteFTDecodeMessageFormatter.text(message), message)
+        }
     }
 
     func testMessageEmphasisPrioritizesMessagesAddressedToThisStation() {

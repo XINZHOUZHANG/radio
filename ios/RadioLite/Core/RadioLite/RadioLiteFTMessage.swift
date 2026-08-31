@@ -56,7 +56,7 @@ struct RadioLiteFTMessage: Equatable, Sendable {
         return recipient == "CQ" ? .cq : .normal
     }
 
-    private static func normalizeToken(_ value: String) -> String {
+    fileprivate static func normalizeToken(_ value: String) -> String {
         value
             .uppercased()
             .trimmingCharacters(in: CharacterSet(charactersIn: "<>[]{}(),"))
@@ -79,9 +79,44 @@ struct RadioLiteFTMessage: Equatable, Sendable {
     }
 }
 
+enum RadioLiteFTDecodeMessageFormatter {
+    static func text(_ rawValue: String) -> String {
+        let message = RadioLiteFTMessage.parse(rawValue)
+        guard let sender = message.sender,
+              let flag = RadioLiteCallsignCountryResolver.offline.flag(for: sender) else {
+            return rawValue
+        }
+        let rawTokens = rawValue.split(whereSeparator: { $0.isWhitespace })
+        let normalizedTokens = rawTokens.map {
+            RadioLiteFTMessage.normalizeToken(String($0))
+        }
+        let senderIndex: Int?
+        if normalizedTokens.first == "CQ" {
+            senderIndex = normalizedTokens.indices.dropFirst().first {
+                normalizedTokens[$0] == sender
+            }
+        } else if normalizedTokens.indices.contains(1), normalizedTokens[1] == sender {
+            senderIndex = 1
+        } else {
+            senderIndex = nil
+        }
+        guard let senderIndex else { return rawValue }
+
+        let insertionOffset = rawValue.distance(
+            from: rawValue.startIndex,
+            to: rawTokens[senderIndex].endIndex
+        )
+        var result = rawValue
+        let insertionIndex = result.index(result.startIndex, offsetBy: insertionOffset)
+        result.insert(contentsOf: " \(flag)", at: insertionIndex)
+        return result
+    }
+}
+
 struct RadioLiteCallsignLocation: Equatable, Sendable {
     let country: String
     let region: String?
+    let flag: String?
 }
 
 enum RadioLiteFTDecodeMetadataFormatter {
@@ -322,38 +357,190 @@ struct RadioLiteCallsignCountryResolver: Sendable {
             .split(separator: "/")
             .map(String.init)
             .filter { !$0.isEmpty }
-        let likelyMainCallsigns = segments
-            .filter {
-                $0.contains(where: \.isLetter)
-                    && $0.contains(where: \.isNumber)
-            }
-            .sorted {
-                if $0.count == $1.count { return $0 < $1 }
-                return $0.count > $1.count
-            }
         let portableDesignators: Set<String> = ["P", "M", "MM", "AM", "QRP"]
-        let fallbackSegments = segments.filter { !portableDesignators.contains($0) }
-        var visited: Set<String> = []
-        for candidate in likelyMainCallsigns + fallbackSegments + [normalized]
-        where visited.insert(candidate).inserted {
-            if let entry = entries.first(where: { candidate.hasPrefix($0.prefix) }) {
-                let region = entry.region
-                    ?? (entry.country == "中国"
-                        ? RadioLiteChineseCallsignRegion.region(for: candidate)
-                        : nil)
-                return RadioLiteCallsignLocation(country: entry.country, region: region)
-            }
+        let meaningfulSegments = segments.enumerated().filter {
+            !portableDesignators.contains($0.element)
         }
-        return nil
+        guard let main = meaningfulSegments
+            .filter({ candidate in
+                candidate.element.contains(where: \.isLetter)
+                    && candidate.element.contains(where: \.isNumber)
+            })
+            .max(by: { left, right in
+                if left.element.count == right.element.count {
+                    return left.offset > right.offset
+                }
+                return left.element.count < right.element.count
+            }),
+              let mainLocation = matchedLocation(for: main.element) else { return nil }
+
+        var explicitLocations: [RadioLiteCallsignLocation] = []
+        for candidate in meaningfulSegments where candidate.offset != main.offset {
+            if candidate.element.allSatisfy(\.isNumber) { continue }
+            guard let location = matchedOperatingLocation(for: candidate.element) else {
+                return nil
+            }
+            explicitLocations.append(location)
+        }
+        guard let explicitLocation = explicitLocations.first else {
+            return mainLocation
+        }
+        guard explicitLocations.dropFirst().allSatisfy({
+            $0.country == explicitLocation.country
+                && $0.region == explicitLocation.region
+                && $0.flag == explicitLocation.flag
+        }) else { return nil }
+        return explicitLocation
     }
 
     func country(for callsign: String) -> String? {
         location(for: callsign)?.country
     }
 
+    func flag(for callsign: String) -> String? {
+        location(for: callsign)?.flag
+    }
+
     func countryLabel(for callsign: String) -> String {
         country(for: callsign) ?? "未知地区"
     }
+
+    private static let flagRegionCodes: [String: String] = [
+        "阿尔及利亚": "DZ",
+        "阿富汗": "AF",
+        "阿根廷": "AR",
+        "阿联酋": "AE",
+        "阿曼": "OM",
+        "埃及": "EG",
+        "埃塞俄比亚": "ET",
+        "爱尔兰": "IE",
+        "爱沙尼亚": "EE",
+        "安道尔": "AD",
+        "安哥拉": "AO",
+        "奥地利": "AT",
+        "澳大利亚": "AU",
+        "巴巴多斯": "BB",
+        "巴布亚新几内亚": "PG",
+        "巴哈马": "BS",
+        "巴基斯坦": "PK",
+        "巴拉圭": "PY",
+        "巴林": "BH",
+        "巴拿马": "PA",
+        "巴西": "BR",
+        "白俄罗斯": "BY",
+        "保加利亚": "BG",
+        "北马其顿": "MK",
+        "比利时": "BE",
+        "冰岛": "IS",
+        "波多黎各": "PR",
+        "波黑": "BA",
+        "波兰": "PL",
+        "玻利维亚": "BO",
+        "博茨瓦纳": "BW",
+        "丹麦": "DK",
+        "德国": "DE",
+        "多米尼加共和国": "DO",
+        "俄罗斯": "RU",
+        "厄瓜多尔": "EC",
+        "法国": "FR",
+        "菲律宾": "PH",
+        "斐济": "FJ",
+        "芬兰": "FI",
+        "哥伦比亚": "CO",
+        "哥斯达黎加": "CR",
+        "古巴": "CU",
+        "圭亚那": "GY",
+        "哈萨克斯坦": "KZ",
+        "韩国": "KR",
+        "荷兰": "NL",
+        "吉尔吉斯斯坦": "KG",
+        "加拿大": "CA",
+        "加纳": "GH",
+        "柬埔寨": "KH",
+        "捷克": "CZ",
+        "津巴布韦": "ZW",
+        "卡塔尔": "QA",
+        "科威特": "KW",
+        "克罗地亚": "HR",
+        "肯尼亚": "KE",
+        "拉脱维亚": "LV",
+        "老挝": "LA",
+        "立陶宛": "LT",
+        "列支敦士登": "LI",
+        "卢森堡": "LU",
+        "罗马尼亚": "RO",
+        "马达加斯加": "MG",
+        "马耳他": "MT",
+        "马来西亚": "MY",
+        "毛里求斯": "MU",
+        "美国": "US",
+        "美国阿拉斯加": "US",
+        "美国夏威夷": "US",
+        "蒙古": "MN",
+        "孟加拉国": "BD",
+        "秘鲁": "PE",
+        "密克罗尼西亚联邦": "FM",
+        "缅甸": "MM",
+        "摩尔多瓦": "MD",
+        "摩洛哥": "MA",
+        "摩纳哥": "MC",
+        "莫桑比克": "MZ",
+        "墨西哥": "MX",
+        "纳米比亚": "NA",
+        "南非": "ZA",
+        "尼泊尔": "NP",
+        "尼日利亚": "NG",
+        "挪威": "NO",
+        "帕劳": "PW",
+        "葡萄牙": "PT",
+        "日本": "JP",
+        "瑞典": "SE",
+        "瑞士": "CH",
+        "萨摩亚": "WS",
+        "塞尔维亚": "RS",
+        "塞内加尔": "SN",
+        "塞浦路斯": "CY",
+        "沙特阿拉伯": "SA",
+        "斯里兰卡": "LK",
+        "斯洛伐克": "SK",
+        "斯洛文尼亚": "SI",
+        "苏里南": "SR",
+        "所罗门群岛": "SB",
+        "塔吉克斯坦": "TJ",
+        "泰国": "TH",
+        "坦桑尼亚": "TZ",
+        "汤加": "TO",
+        "特立尼达和多巴哥": "TT",
+        "突尼斯": "TN",
+        "土耳其": "TR",
+        "土库曼斯坦": "TM",
+        "瓦努阿图": "VU",
+        "委内瑞拉": "VE",
+        "乌干达": "UG",
+        "乌克兰": "UA",
+        "乌拉圭": "UY",
+        "乌兹别克斯坦": "UZ",
+        "西班牙": "ES",
+        "希腊": "GR",
+        "新加坡": "SG",
+        "新西兰": "NZ",
+        "匈牙利": "HU",
+        "牙买加": "JM",
+        "伊拉克": "IQ",
+        "伊朗": "IR",
+        "以色列": "IL",
+        "意大利": "IT",
+        "印度": "IN",
+        "印度尼西亚": "ID",
+        "英国": "GB",
+        "越南": "VN",
+        "赞比亚": "ZM",
+        "智利": "CL",
+        "中国": "CN",
+        "中国/澳门": "MO",
+        "中国/台湾": "TW",
+        "中国/香港": "HK",
+    ]
 
     private static func entries(
         country: String,
@@ -361,6 +548,57 @@ struct RadioLiteCallsignCountryResolver: Sendable {
         prefixes: [String]
     ) -> [Entry] {
         prefixes.map { Entry(prefix: $0, country: country, region: region) }
+    }
+
+    private func matchedLocation(for candidate: String) -> RadioLiteCallsignLocation? {
+        guard let entry = entries.first(where: { candidate.hasPrefix($0.prefix) }) else {
+            return nil
+        }
+        return location(for: candidate, entry: entry)
+    }
+
+    private func matchedOperatingLocation(
+        for candidate: String
+    ) -> RadioLiteCallsignLocation? {
+        guard let entry = entries.first(where: { candidate.hasPrefix($0.prefix) }) else {
+            return nil
+        }
+        let suffix = candidate.dropFirst(entry.prefix.count)
+        guard suffix.isEmpty || suffix.allSatisfy(\.isNumber) else { return nil }
+        return location(for: candidate, entry: entry)
+    }
+
+    private func location(
+        for candidate: String,
+        entry: Entry
+    ) -> RadioLiteCallsignLocation {
+        let region = entry.region
+            ?? (entry.country == "中国"
+                ? RadioLiteChineseCallsignRegion.region(for: candidate)
+                : nil)
+        let regionCode = Self.flagRegionCodes["\(entry.country)/\(region ?? "")"]
+            ?? Self.flagRegionCodes[entry.country]
+        return RadioLiteCallsignLocation(
+            country: entry.country,
+            region: region,
+            flag: RadioLiteUnicodeFlag.emoji(forRegionCode: regionCode)
+        )
+    }
+}
+
+private enum RadioLiteUnicodeFlag {
+    static func emoji(forRegionCode regionCode: String?) -> String? {
+        guard let normalized = regionCode?.uppercased(),
+              normalized.unicodeScalars.count == 2,
+              normalized.unicodeScalars.allSatisfy({ (65...90).contains($0.value) }) else {
+            return nil
+        }
+        var flag = ""
+        for scalar in normalized.unicodeScalars {
+            guard let indicator = UnicodeScalar(127_397 + scalar.value) else { return nil }
+            flag.unicodeScalars.append(indicator)
+        }
+        return flag
     }
 }
 

@@ -247,7 +247,7 @@ struct RadioLiteFT8View: View {
                 .foregroundStyle(tint.opacity(decode.snrDb >= -10 ? 1 : 0.7))
                 .frame(width: 34, alignment: .trailing)
             VStack(alignment: .leading, spacing: 4) {
-                Text(decode.message)
+                Text(RadioLiteFTDecodeMessageFormatter.text(decode.message))
                     .font(.subheadline.monospaced().weight(emphasis == .normal ? .regular : .semibold))
                     .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.82) : Color.white)
                     .lineLimit(2)
