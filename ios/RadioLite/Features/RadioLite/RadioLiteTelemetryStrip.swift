@@ -44,8 +44,7 @@ struct RadioLiteTelemetryStrip: View {
                     meter(
                         title: "S",
                         value: strength?.relativeDb,
-                        range: RadioLiteSMeterReading.minimumRelativeDb
-                            ...RadioLiteSMeterReading.maximumRelativeDb,
+                        range: RadioLiteSMeterReading.minimumRelativeDb...RadioLiteSMeterReading.maximumRelativeDb,
                         suffix: "",
                         labels: "S0                         S9              S9+60"
                     )
