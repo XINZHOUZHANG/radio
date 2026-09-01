@@ -25,6 +25,7 @@ class TuningMeterDriver implements RadioDriver {
   };
   readonly telemetryModes: Array<"receive" | "transmit"> = [];
   readonly events: string[] = [];
+  tunerEnabled = false;
 
   async initialize() {}
   async close() {}
@@ -48,6 +49,19 @@ class TuningMeterDriver implements RadioDriver {
   }
   async readControls(): Promise<RadioControl[]> {
     return [{
+      id: "function:TUNER",
+      kind: "function",
+      token: "TUNER",
+      group: "rf",
+      access: "read-write",
+      presentation: "toggle",
+      value: this.tunerEnabled,
+      minimum: 0,
+      maximum: 1,
+      step: 1,
+      unit: "boolean",
+      transmitLocked: true,
+    }, {
       id: "action:TUNER",
       kind: "action",
       token: "TUNER",
@@ -64,11 +78,16 @@ class TuningMeterDriver implements RadioDriver {
     this.state.passbandHz = passbandHz;
     return { mode, passbandHz };
   }
-  async setControl(_id: string, _value: RadioControlValue): Promise<RadioControl> {
-    throw new Error("control unavailable");
+  async setControl(id: string, value: RadioControlValue): Promise<RadioControl> {
+    if (id !== "function:TUNER" || typeof value !== "boolean") {
+      throw new Error("control unavailable");
+    }
+    this.tunerEnabled = value;
+    return (await this.readControls())[0]!;
   }
   async invokeAction(id: string) {
     if (id !== "action:TUNER") throw new Error("action unavailable");
+    this.tunerEnabled = true;
     this.events.push("tune");
   }
   async writePtt(enabled: boolean) {
@@ -88,8 +107,7 @@ test("explicit tuning activity samples transmit meters without falsifying physic
   sampler.start();
   await sampler.readState();
 
-  (sampler as unknown as { confirmTransmitActivity(active: boolean): void })
-    .confirmTransmitActivity(true);
+  sampler.confirmTransmitActivity(true);
   await clock.advanceBy(1_000);
 
   assert.deepEqual(driver.telemetryModes, ["receive", "transmit"]);
@@ -97,8 +115,7 @@ test("explicit tuning activity samples transmit meters without falsifying physic
   assert.equal(sampler.snapshot()?.meters.rfPowerWatts, 9.5);
   assert.equal(sampler.snapshot()?.meters.alcRatio, 0.18);
 
-  (sampler as unknown as { confirmTransmitActivity(active: boolean): void })
-    .confirmTransmitActivity(false);
+  sampler.confirmTransmitActivity(false);
   await clock.advanceBy(2_000);
 
   assert.deepEqual(driver.telemetryModes, ["receive", "transmit", "receive"]);
@@ -135,6 +152,33 @@ test("runtime tuning lease activates transmit meters and confirmed stop restores
 
   assert.deepEqual(driver.telemetryModes, ["receive", "transmit", "receive"]);
   assert.equal(runtime.telemetry.snapshot()?.meters.alcRatio, undefined);
+});
+
+test("successful tuner action updates the cached persistent tuner switch", async (context) => {
+  const driver = new TuningMeterDriver();
+  const runtime = new RadioRuntime(profile(), driver);
+  context.after(() => runtime.close());
+  await runtime.initialize();
+  const operator = user();
+  const control = await runtime.acquireControl("device-a", operator);
+
+  assert.equal(
+    (await runtime.readControls()).find(({ id }) => id === "function:TUNER")?.value,
+    false,
+  );
+  const transmit = await runtime.invokeAction(
+    "device-a",
+    operator,
+    control.lease.token,
+    "action:TUNER",
+  );
+
+  assert.equal(driver.tunerEnabled, true);
+  assert.equal(
+    (await runtime.readControls()).find(({ id }) => id === "function:TUNER")?.value,
+    true,
+  );
+  await runtime.stopTransmit("device-a", transmit.leaseToken);
 });
 
 function profile() {
