@@ -1,0 +1,112 @@
+name: One-shot tuner readback test updates
+
+on:
+  push:
+    branches:
+      - codex/fix-tuner-telemetry-meters
+
+permissions:
+  contents: write
+
+jobs:
+  patch-tests:
+    if: github.event.head_commit.message == 'chore: apply tuner readback test updates'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update legacy tuner command expectations
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def test_block(text: str, name: str) -> tuple[int, int, str]:
+              marker = f'test("{name}"'
+              start = text.index(marker)
+              next_test = text.find('\ntest("', start + len(marker))
+              end = len(text) if next_test < 0 else next_test
+              return start, end, text[start:end]
+
+          def patch_block(path: str, name: str, edits: list[tuple[str, str]]) -> None:
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              start, end, block = test_block(text, name)
+              for old, new in edits:
+                  count = block.count(old)
+                  if count != 1:
+                      raise SystemExit(
+                          f'{path}: expected one match in {name!r}, found {count}: {old!r}'
+                      )
+                  block = block.replace(old, new, 1)
+              file.write_text(text[:start] + block + text[end:], encoding='utf-8', newline='\n')
+
+          command_pair = (
+              '    "\\\\set_func TUNER 1",\n'
+              '    "\\\\vfo_op TUNE",',
+              '    "\\\\set_func TUNER 1",\n'
+              '    "\\\\get_func TUNER",\n'
+              '    "\\\\vfo_op TUNE",',
+          )
+
+          patch_block(
+              'radio-lite-server/test/radio-runtime.test.ts',
+              'runtime tuning stop dekeys safely without disabling the persistent tuner switch',
+              [command_pair],
+          )
+
+          readback_branch = (
+              '      if (command === "\\\\set_func ?") {\n'
+              '        return response("set_func", { Func: "NB NR TUNER" });\n'
+              '      }\n'
+              '      return response(command.slice(1).split(" ")[0], {});',
+              '      if (command === "\\\\set_func ?") {\n'
+              '        return response("set_func", { Func: "NB NR TUNER" });\n'
+              '      }\n'
+              '      if (command === "\\\\get_func TUNER") {\n'
+              '        return response("get_func", { TUNER: "1" });\n'
+              '      }\n'
+              '      return response(command.slice(1).split(" ")[0], {});',
+          )
+          patch_block(
+              'radio-lite-server/test/rigctld-transport.test.ts',
+              'internal tuner start enables a supported tuner switch before the TUNE action',
+              [readback_branch, command_pair],
+          )
+
+          rejected_readback = (
+              '      if (command === "\\\\set_func TUNER 1") {\n'
+              '        return response("set_func", {});\n'
+              '      }\n'
+              '      if (command === "\\\\vfo_op TUNE") {',
+              '      if (command === "\\\\set_func TUNER 1") {\n'
+              '        return response("set_func", {});\n'
+              '      }\n'
+              '      if (command === "\\\\get_func TUNER") {\n'
+              '        return response("get_func", { TUNER: "1" });\n'
+              '      }\n'
+              '      if (command === "\\\\vfo_op TUNE") {',
+          )
+          patch_block(
+              'radio-lite-server/test/rigctld-transport.test.ts',
+              'internal tuner surfaces a rejected TUNE action after enabling the supported switch',
+              [rejected_readback, command_pair],
+          )
+          PY
+
+          git diff --check
+          git diff -- radio-lite-server/test/radio-runtime.test.ts radio-lite-server/test/rigctld-transport.test.ts
+
+      - name: Commit the focused test update
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            radio-lite-server/test/radio-runtime.test.ts \
+            radio-lite-server/test/rigctld-transport.test.ts
+          git commit -m "test(server): update tuner read-back expectations"
+          git push origin HEAD:codex/fix-tuner-telemetry-meters
