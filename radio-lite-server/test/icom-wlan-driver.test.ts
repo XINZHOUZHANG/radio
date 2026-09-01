@@ -20,6 +20,7 @@ class FakeIcomWlanPort implements IcomWlanPort {
   frequencyHz = 14_074_000;
   mode: IcomWlanMode = { mode: "USB", dataMode: true };
   ptt = false;
+  tunerState: "off" | "on" | "tuning" = "off";
   meters: IcomWlanMeters = {
     strengthDbRelativeS9: -12,
     swr: 1.4,
@@ -99,8 +100,19 @@ class FakeIcomWlanPort implements IcomWlanPort {
     this.controlValues.set(id, value);
   }
 
+  async readTunerState(): Promise<"off" | "on" | "tuning"> {
+    this.calls.push("readTunerState");
+    return this.tunerState;
+  }
+
+  async writeTunerEnabled(enabled: boolean): Promise<void> {
+    this.calls.push(`writeTunerEnabled:${enabled}`);
+    this.tunerState = enabled ? "on" : "off";
+  }
+
   async invokeTuner(): Promise<void> {
     this.calls.push("invokeTuner");
+    this.tunerState = "tuning";
   }
 
   onFatalConnection(listener: (error: Error) => void): () => void {
@@ -180,6 +192,7 @@ test("ICOM driver exposes only documented available controls", async () => {
   assert.deepEqual((await driver.readControls()).map((control) => control.id), [
     "operation:SPLIT",
     "operation:RIT",
+    "function:TUNER",
   ]);
   assert.deepEqual(await driver.setControl("operation:SPLIT", true), {
     id: "operation:SPLIT",
@@ -192,7 +205,46 @@ test("ICOM driver exposes only documented available controls", async () => {
     unit: "boolean",
     transmitLocked: true,
   });
+  assert.deepEqual(await driver.setControl("function:TUNER", true), {
+    id: "function:TUNER",
+    kind: "function",
+    token: "TUNER",
+    group: "rf",
+    access: "read-write",
+    presentation: "toggle",
+    value: true,
+    minimum: 0,
+    maximum: 1,
+    step: 1,
+    unit: "boolean",
+    transmitLocked: true,
+  });
   await assert.rejects(driver.setControl("operation:XIT", 10), /unavailable/u);
+});
+
+test("ICOM driver enables and verifies the tuner before manual tuning", async () => {
+  const port = new FakeIcomWlanPort();
+  const driver = new IcomWlanDriver(port);
+
+  await driver.invokeAction("action:TUNER");
+
+  assert.deepEqual(port.calls, [
+    "writeTunerEnabled:true",
+    "readTunerState",
+    "invokeTuner",
+  ]);
+  assert.equal(port.tunerState, "tuning");
+});
+
+test("ICOM driver rejects manual tuning when tuner engagement is not confirmed", async () => {
+  const port = new FakeIcomWlanPort();
+  port.writeTunerEnabled = async (enabled) => {
+    port.calls.push(`writeTunerEnabled:${enabled}`);
+  };
+  const driver = new IcomWlanDriver(port);
+
+  await assert.rejects(driver.invokeAction("action:TUNER"), /tuner enable read-back mismatch/u);
+  assert.deepEqual(port.calls, ["writeTunerEnabled:true", "readTunerState"]);
 });
 
 test("ICOM driver forwards exact audio frames and surfaces fatal disconnect", async () => {

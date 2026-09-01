@@ -22,6 +22,7 @@ test("maps reported Hamlib tokens to grouped descriptors", async () => {
     { id: "level:STRENGTH", group: "rf", access: "read-only", presentation: "meter" },
     { id: "level:MICGAIN", group: "audio", access: "read-write", presentation: "slider" },
     { id: "function:NB", group: "rf", access: "read-write", presentation: "toggle" },
+    { id: "function:TUNER", group: "rf", access: "read-write", presentation: "toggle" },
     { id: "action:TUNER", group: "rf", access: "action", presentation: "button" },
     { id: "parameter:KEYSPD", group: "cw", access: "read-write", presentation: "discrete" },
   ]);
@@ -57,7 +58,7 @@ test("describes the complete generic level and function surface", async () => {
     "level:KEYSPD", "level:STRENGTH", "level:SWR", "level:ALC", "level:RFPOWER_METER",
     "level:RFPOWER_METER_WATTS", "function:NB", "function:NR", "function:APF", "function:ANF",
     "function:MN", "function:COMP", "function:MON", "function:VOX", "function:MUTE",
-    "function:LOCK", "action:TUNER", "function:SBKIN", "function:FBKIN",
+    "function:LOCK", "function:TUNER", "function:SBKIN", "function:FBKIN", "action:TUNER",
   ]);
 
   assert.deepEqual(controls.find(({ id }) => id === "level:RFPOWER"), {
@@ -73,6 +74,15 @@ test("describes the complete generic level and function surface", async () => {
     id: "function:LOCK", kind: "function", token: "LOCK", group: "mode", access: "read-write",
     presentation: "toggle", value: null, minimum: 0, maximum: 1, step: 1, unit: "boolean",
     transmitLocked: false,
+  });
+  assert.deepEqual(controls.find(({ id }) => id === "function:TUNER"), {
+    id: "function:TUNER", kind: "function", token: "TUNER", group: "rf", access: "read-write",
+    presentation: "toggle", value: null, minimum: 0, maximum: 1, step: 1, unit: "boolean",
+    transmitLocked: true,
+  });
+  assert.deepEqual(controls.find(({ id }) => id === "action:TUNER"), {
+    id: "action:TUNER", kind: "action", token: "TUNER", group: "rf", access: "action",
+    presentation: "button", value: null, transmitLocked: true,
   });
 });
 
