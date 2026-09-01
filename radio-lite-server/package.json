@@ -9,9 +9,10 @@
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:watch": "node --experimental-strip-types --test --watch test/*.test.ts",
+    "test:ci": "node --experimental-strip-types --test --test-timeout=30000 --test-force-exit test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "check:ci": "npm run typecheck && npm run test:ci"
   },
   "dependencies": {
     "icom-wlan-node": "0.6.4",

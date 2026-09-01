@@ -18,12 +18,6 @@ on:
       - .github/workflows/ios.yml
   pull_request:
   workflow_dispatch:
-    inputs:
-      upload_ipa:
-        description: Upload the unsigned IPA as a temporary Actions artifact
-        required: false
-        default: false
-        type: boolean
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -112,6 +106,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: macos-15
     timeout-minutes: 35
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
@@ -158,19 +154,14 @@ jobs:
           )
           shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
             > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
-      - name: Upload unsigned IPA
-        # Push uploads require both a matching path change and [upload-ipa] in the head commit.
-        if: >-
-          ${{ (github.event_name == 'workflow_dispatch' && inputs.upload_ipa) ||
-              (github.event_name == 'push' && contains(github.event.head_commit.message, '[upload-ipa]')) }}
-        uses: actions/upload-artifact@v4
+      - name: Publish unsigned IPA release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Radio-Lite-Debug-unsigned-${{ github.sha }}
-          path: |
+          tag_name: ios-build-${{ github.run_number }}
+          files: |
             Radio-Lite-Debug-unsigned.ipa
             Radio-Lite-Debug-unsigned.ipa.sha256
-          if-no-files-found: error
-          retention-days: 14
+          fail_on_unmatched_files: true
       - name: Publish Swift compiler diagnostics
         if: failure() && hashFiles('xcodebuild-device.log') != ''
         run: python3 scripts/annotate-xcodebuild.py xcodebuild-device.log
