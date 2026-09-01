@@ -26,6 +26,7 @@ import {
   type RadioControl,
   type RadioControlValue,
   type RadioDriver,
+  type RadioPttReadOptions,
 } from "../src/rig/radio-driver.ts";
 import type { RadioTelemetryClock } from "../src/rig/radio-telemetry.ts";
 import { RigReportError } from "../src/rig/transport.ts";
@@ -113,6 +114,28 @@ class FakeRig implements RadioDriver {
     this.invokeActionCalls += 1;
     if (id !== "action:TUNER") throw new Error("action unavailable");
     await this.startInternalTuner();
+  }
+}
+
+class ObservablePttRig extends FakeRig {
+  #nextNormalRead: ReturnType<typeof deferred<boolean>> | null = null;
+
+  observeNextNormalPttRead(): Promise<boolean> {
+    if (this.#nextNormalRead !== null) {
+      throw new Error("a normal PTT observation is already pending");
+    }
+    this.#nextNormalRead = deferred<boolean>();
+    return this.#nextNormalRead.promise;
+  }
+
+  override async readPtt(options?: RadioPttReadOptions) {
+    const observed = await super.readPtt();
+    if (options?.purpose !== "off-recovery") {
+      const pending = this.#nextNormalRead;
+      this.#nextNormalRead = null;
+      pending?.resolve(observed);
+    }
+    return observed;
   }
 }
 
@@ -563,6 +586,99 @@ test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch",
 
   assert.deepEqual(requester.commands, ["\\set_ptt 0", "\\get_ptt"]);
   assert.equal(runtime.interlock.snapshot().state, "idle");
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
+});
+
+test("runtime releases a tuning lease within one second after two normal PTT OFF samples", async (context) => {
+  const rig = new ObservablePttRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("automatic-tune-completion", "operator", true);
+  const control = await runtime.acquireControl("automatic-tune-device", operator);
+  rig.ptt = true;
+
+  await runtime.startTransmit(
+    "automatic-tune-device",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+
+  assert.equal(
+    await within(rig.observeNextNormalPttRead(), 1_500, "tuning PTT was not observed"),
+    true,
+  );
+  rig.ptt = false;
+  const pttOffAtMs = Date.now();
+  assert.equal(
+    await within(rig.observeNextNormalPttRead(), 1_000, "first PTT OFF sample was not observed"),
+    false,
+  );
+  assert.equal(
+    await within(rig.observeNextNormalPttRead(), 1_000, "second PTT OFF sample was not observed"),
+    false,
+  );
+  await within(
+    waitFor(() => runtime.interlock.snapshot().lease === null),
+    1_000,
+    "tuning lease remained active after confirmed PTT OFF",
+  );
+
+  assert.ok(Date.now() - pttOffAtMs < 1_000, "normal tuning completion waited for the hard limit");
+  assert.equal(runtime.interlock.snapshot().state, "idle");
+  assert.deepEqual(rig.events.slice(-2), ["ptt-write:false", "ptt-read:false"]);
+});
+
+test("runtime does not treat PTT OFF during the tuning startup grace period as completion", async (context) => {
+  const rig = new ObservablePttRig();
+  const runtime = new RadioRuntime(profile(true), rig);
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("tuning-startup-grace", "operator", true);
+  const control = await runtime.acquireControl("tuning-grace-device", operator);
+  rig.ptt = false;
+
+  const transmit = await runtime.startTransmit(
+    "tuning-grace-device",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+  rig.events.length = 0;
+  await new Promise<void>((resolve) => setTimeout(resolve, 450));
+
+  assert.equal(runtime.interlock.snapshot().lease?.leaseToken, transmit.leaseToken);
+  assert.deepEqual(rig.events, []);
+  await runtime.stopTransmit("tuning-grace-device", transmit.leaseToken);
+});
+
+test("runtime keeps the 30 second tuning hard limit and force-dekeys when PTT remains ON", async (context) => {
+  let nowMs = 0;
+  const rig = new ObservablePttRig();
+  const runtime = new RadioRuntime(profile(true), rig, undefined, () => nowMs);
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("tuning-hard-limit", "operator", true);
+  const control = await runtime.acquireControl("tuning-hard-limit-device", operator);
+  rig.ptt = true;
+  const transmit = await runtime.startTransmit(
+    "tuning-hard-limit-device",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+  rig.events.length = 0;
+
+  assert.equal(transmit.hardDeadlineMs - transmit.startedAtMs, 30_000);
+  nowMs = transmit.hardDeadlineMs;
+  await within(
+    waitFor(() => runtime.interlock.snapshot().state === "idle"),
+    1_000,
+    "tuning hard limit did not force de-key",
+  );
+
+  assert.deepEqual(rig.events, ["ptt-write:false", "ptt-read:false"]);
   assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
 });
 
@@ -1420,6 +1536,32 @@ function deferred<T = void>(): {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function waitFor(predicate: () => boolean): Promise<void> {
+  if (predicate()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      if (!predicate()) return;
+      clearInterval(timer);
+      resolve();
+    }, 5);
+    timer.unref();
+  });
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function rigResponse(
