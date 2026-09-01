@@ -66,6 +66,7 @@ final class RadioLiteSession: ObservableObject {
     @Published private(set) var issuedPairingCode: RadioLiteIssuedCode?
     @Published private(set) var isVoicePTTHeld = false
     @Published private(set) var isTuning = false
+    @Published private(set) var isTuningPending = false
     @Published private(set) var isWorking = false
     @Published private(set) var isRestoringSession = false
     @Published private(set) var digitalActionStatus: String?
@@ -98,6 +99,7 @@ final class RadioLiteSession: ObservableObject {
     private var mediaRetryOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTStartupTask: Task<Void, Never>?
     private var tuningStartupTask: Task<Void, Never>?
+    private var tuningPendingTask: Task<Void, Never>?
     private var receiveAudioStartupTask: Task<Void, Never>?
     private var receiveAudioStartupOwnership: RadioLiteReceiveMonitoringOwnership?
     private var voicePTTReceiveRestoreState = RadioLiteVoicePTTReceiveRestoreState()
@@ -111,6 +113,7 @@ final class RadioLiteSession: ObservableObject {
     private var keepsReceiveAudioInBackground = false
     private var radioConfigurationReconnectState = RadioLiteRadioConfigurationReconnectOwnershipState()
     private var activeTransmitToken: String?
+    private var earlyTuningCompletionToken: String?
     private var voicePTTGeneration: UInt64?
     private var activeCaptureOwnership: RadioLiteMicrophoneCaptureOwnership?
     private var activeUplinkOwnership: RadioLiteUplinkOwnership?
@@ -1459,7 +1462,7 @@ final class RadioLiteSession: ObservableObject {
     }
 
     func beginTuning() {
-        guard !isTuning, !isVoicePTTHeld else { return }
+        guard !isTuning, !isTuningPending, !isVoicePTTHeld else { return }
         guard canTransmit else {
             errorMessage = RadioLiteSessionError.transmitNotAllowed.localizedDescription
             return
@@ -1488,8 +1491,20 @@ final class RadioLiteSession: ObservableObject {
         audioInterruptionRecoveryTask?.cancel()
         audioInterruptionRecoveryTask = nil
         tuningStartupTask?.cancel()
+        tuningPendingTask?.cancel()
         let generation = transmitEpoch.begin()
         isTuning = true
+        isTuningPending = true
+        earlyTuningCompletionToken = nil
+        tuningPendingTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled,
+                  let self,
+                  self.isTuningPending,
+                  self.transmitEpoch.owns(generation) else { return }
+            self.isTuningPending = false
+            self.tuningPendingTask = nil
+        }
         tuningStartupTask = Task { [weak self] in
             guard let self else { return }
             var startedToken: String?
@@ -1514,6 +1529,14 @@ final class RadioLiteSession: ObservableObject {
                     throw RadioLiteHTTPError.invalidResponse
                 }
                 startedToken = transmitToken
+                if self.earlyTuningCompletionToken == transmitToken {
+                    self.earlyTuningCompletionToken = nil
+                    let stopped = self.stopLocalTransmit(expectedEpoch: generation)
+                    if stopped {
+                        self.finishReceiveMonitoringAfterTransmit(reason: .userRelease)
+                    }
+                    return
+                }
                 guard !Task.isCancelled,
                       self.isTuning,
                       self.transmitEpoch.owns(generation) else {
@@ -1585,6 +1608,24 @@ final class RadioLiteSession: ObservableObject {
         )
         guard rigControlCatalogue.publish(updated, generation: generation) else { return }
         rigControls = rigControlCatalogue.controls
+    }
+
+    private func handleTuningCompletion(_ completion: RadioLiteActionCompletion) {
+        guard completion.id == RadioLiteCapabilityProtocol.tunerActionId,
+              completion.radioId == selectedRadioId,
+              isTuning else { return }
+        if activeTransmitToken == nil, tuningStartupTask != nil {
+            earlyTuningCompletionToken = completion.transmitToken
+            isTuningPending = false
+            tuningPendingTask?.cancel()
+            tuningPendingTask = nil
+            return
+        }
+        guard activeTransmitToken == completion.transmitToken else { return }
+        let stopped = stopLocalTransmit()
+        if stopped {
+            finishReceiveMonitoringAfterTransmit(reason: .userRelease)
+        }
     }
 
     func refreshDigitalSnapshot(
@@ -2170,6 +2211,10 @@ final class RadioLiteSession: ObservableObject {
             }
         case "control.alive":
             controlExpiresAtMs = value["expiresAtMs"]?.int64Value
+        case "rig.action.completed":
+            if let completion: RadioLiteActionCompletion = value.decoded() {
+                handleTuningCompletion(completion)
+            }
         case "digital.decode.batch":
             if let batch: RadioLiteDigitalDecodeBatch = value["batch"]?.decoded() {
                 if let index = decodeBatches.firstIndex(where: { $0.id == batch.id }) {
@@ -2388,11 +2433,15 @@ final class RadioLiteSession: ObservableObject {
         transmitEpoch.invalidate()
         voicePTTStartupTask?.cancel()
         tuningStartupTask?.cancel()
+        tuningPendingTask?.cancel()
         voicePTTStartupTask = nil
         tuningStartupTask = nil
+        tuningPendingTask = nil
         voicePTTGeneration = nil
         isVoicePTTHeld = false
         isTuning = false
+        isTuningPending = false
+        earlyTuningCompletionToken = nil
         if let capture = activeCaptureOwnership {
             audio.stopMicrophoneCapture(
                 epoch: capture.epoch,
@@ -3001,6 +3050,7 @@ final class RadioLiteSession: ObservableObject {
         mediaRetryTask?.cancel()
         voicePTTStartupTask?.cancel()
         tuningStartupTask?.cancel()
+        tuningPendingTask?.cancel()
         receiveAudioStartupTask?.cancel()
         voicePTTReceiveResumeTask?.cancel()
         audioInterruptionRecoveryTask?.cancel()
@@ -3024,6 +3074,9 @@ final class RadioLiteSession: ObservableObject {
         voicePTTStartupTask = nil
         voicePTTGeneration = nil
         tuningStartupTask = nil
+        tuningPendingTask = nil
+        isTuningPending = false
+        earlyTuningCompletionToken = nil
         receiveAudioStartupTask = nil
         receiveAudioStartupOwnership = nil
     }
