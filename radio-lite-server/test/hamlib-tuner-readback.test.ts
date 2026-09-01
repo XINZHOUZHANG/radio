@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { RigResponse } from "../src/rig/extended-protocol.ts";
 import { HamlibRig } from "../src/rig/hamlib-rig.ts";
 
+// These tests pin the FT-710-style Hamlib contract: engage first, verify, then tune.
 class TunerRequester {
   readonly commands: string[] = [];
   tunerEnabled = false;
