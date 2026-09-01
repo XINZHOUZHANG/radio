@@ -872,6 +872,7 @@ export class RadioLiteService {
           message.controlToken === undefined ? "" : controlToken(),
           id,
         );
+        const tuningCompletion = runtime.waitForTuningCompletion(lease.leaseToken);
         void this.#audit.append({
           occurredAtMs: this.#now(), action: "radio.ptt-start", result: "success",
           actorUserId: user.id, targetId: radioId, metadata: { mode: lease.mode, "action-id": id },
@@ -886,6 +887,26 @@ export class RadioLiteService {
             heartbeatDeadlineMs: lease.heartbeatDeadlineMs,
             hardDeadlineMs: lease.hardDeadlineMs,
           });
+          void tuningCompletion.then((completion) => {
+            if (
+              completion.ownerId !== ownerId ||
+              (
+                completion.reason !== "ptt_off" &&
+                completion.reason !== "hard_limit" &&
+                completion.reason !== "heartbeat_timeout"
+              )
+            ) {
+              return;
+            }
+            if (webSocket.readyState !== WebSocket.OPEN) return;
+            sendWebSocketJson(webSocket, {
+              t: "rig.action.completed",
+              radioId: completion.radioId,
+              id,
+              transmitToken: completion.transmitToken,
+              reason: completion.reason,
+            });
+          }).catch(() => undefined);
         } catch {
           // The interlock owns the live tuning lease; do not misreport it as rejected.
         }
