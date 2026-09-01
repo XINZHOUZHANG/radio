@@ -190,29 +190,43 @@ private struct RadioLiteControlSectionSheet: View {
                 Label("机内天调", systemImage: "tuningfork")
                     .font(.headline)
                 Spacer()
-                Text(session.isTuning ? "调谐中" : "就绪")
+                Text(tunerStatusText)
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(session.isTuning ? RadioPalette.warning : RadioPalette.cyan)
+                    .foregroundStyle(
+                        session.isTuning || session.isTuningPending
+                            ? RadioPalette.warning
+                            : RadioPalette.cyan
+                    )
             }
             Text("调谐会短暂进入发射状态。请确认天线系统已连接并保持现场安全。")
                 .font(.caption)
                 .foregroundStyle(RadioPalette.muted)
             Button {
-                if session.isTuning {
-                    session.endTuning()
-                } else {
-                    session.beginTuning()
-                }
+                session.beginTuning()
             } label: {
                 Label(
-                    session.isTuning ? "停止调谐" : "开始调谐",
+                    session.isTuningPending ? "正在启动…" : "开始调谐",
                     systemImage: "tuningfork"
                 )
                 .font(.headline)
                 .frame(maxWidth: .infinity, minHeight: 50)
             }
-            .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning, prominent: session.isTuning))
-            .disabled(!canUseTuner)
+            .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning, prominent: false))
+            .disabled(!canStartTuner)
+            if RadioLiteTunerInteractionPolicy.canEmergencyStop(isTuning: session.isTuning) {
+                Button {
+                    session.endTuning()
+                } label: {
+                    Label("停止调谐", systemImage: "stop.circle.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 46)
+                }
+                .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.transmit, prominent: true))
+                .disabled(!hasControl)
+                Text("仅在电台未自动结束调谐时使用。")
+                    .font(.caption)
+                    .foregroundStyle(RadioPalette.muted)
+            }
             if !hasControl {
                 Label("需要先取得电台控制权", systemImage: "lock.fill")
                     .font(.caption)
@@ -223,8 +237,14 @@ private struct RadioLiteControlSectionSheet: View {
         .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private var canUseTuner: Bool {
-        if session.isTuning { return hasControl }
+    private var tunerStatusText: String {
+        if session.isTuningPending { return "正在启动" }
+        if session.isTuning { return "调谐中" }
+        return "就绪"
+    }
+
+    private var canStartTuner: Bool {
+        guard !session.isTuning, !session.isTuningPending else { return false }
         guard let capability = session.tunerActionCapability else { return false }
         return session.canUseInternalTuner
             && capability.displayState(
