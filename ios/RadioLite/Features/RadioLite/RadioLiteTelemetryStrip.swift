@@ -137,7 +137,7 @@ struct RadioLiteTelemetryStrip: View {
         guard let value, value.isFinite else { return "—" }
         if title == "PWR", suffix == "%" { return String(format: "%.0f%%", value * 100) }
         if title == "PWR" { return String(format: "%.1f%@", value, suffix) }
-        if title == "SWR" { return String(format: "%.2f", value) }
+        if title == "SWR" { return String(format: "%.2f:1", value) }
         if title == "ALC" { return String(format: "%.0f%%", value * 100) }
         return String(format: "%+.0f%@", value, suffix)
     }

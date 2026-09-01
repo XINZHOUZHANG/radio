@@ -210,46 +210,16 @@ struct RadioLiteRadioView: View {
                     .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning))
                 }
             }
-            HStack(spacing: 12) {
-                RadioLiteHoldButton(
-                    title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
-                    systemImage: "mic.fill",
-                    active: session.isVoicePTTHeld,
-                    tint: RadioPalette.transmit,
-                    enabled: session.hasControl && session.canTransmit
-                ) {
-                    session.beginVoicePTT()
-                } onRelease: {
-                    session.endVoicePTT()
-                }
-                if let tunerAction = session.tunerActionCapability {
-                    Button {
-                        if session.isTuning {
-                            session.endTuning()
-                        } else {
-                            session.beginTuning()
-                        }
-                    } label: {
-                        Label(
-                            session.isTuning ? "停止调谐" : tunerActionButtonLabel(tunerAction),
-                            systemImage: "tuningfork"
-                        )
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(session.isTuning ? Color.white : RadioPalette.warning)
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                        .background(
-                            session.isTuning ? RadioPalette.warning : RadioPalette.warning.opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(RadioPalette.warning.opacity(session.isTuning ? 0.8 : 0.34))
-                        }
-                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canUseTunerAction(tunerAction))
-                }
+            RadioLiteHoldButton(
+                title: session.isVoicePTTHeld ? "正在发射" : "按住 PTT",
+                systemImage: "mic.fill",
+                active: session.isVoicePTTHeld,
+                tint: RadioPalette.transmit,
+                enabled: session.hasControl && session.canTransmit
+            ) {
+                session.beginVoicePTT()
+            } onRelease: {
+                session.endVoicePTT()
             }
             if session.isVoicePTTHeld {
                 ProgressView(value: audio.microphoneLevel)
@@ -270,20 +240,6 @@ struct RadioLiteRadioView: View {
 
     private var isTransmitting: Bool {
         session.isVoicePTTHeld || session.isTuning || session.rigState?.ptt == true
-    }
-
-    private func canUseTunerAction(_ capability: RadioLiteCapabilityControl) -> Bool {
-        if session.isTuning { return session.hasControl }
-        return session.canUseInternalTuner
-            && capability.displayState(
-                isTransmitting: isTransmitting,
-                hasControl: session.hasControl
-            ).isEnabled
-    }
-
-    private func tunerActionButtonLabel(_ capability: RadioLiteCapabilityControl) -> String {
-        let label = capability.displayState(isTransmitting: false, hasControl: true).label
-        return label == "机内天调" ? "开始调谐" : label
     }
 
     private func syncFrequency() {
