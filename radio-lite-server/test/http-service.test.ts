@@ -34,7 +34,8 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   let deviceNumber = 0;
   let tokenNumber = 0;
   const codes = [123456, 654321];
-  const now = () => 10_000;
+  let nowMs = 10_000;
+  const now = () => nowMs;
   const users = new UserStore(join(directory, "users.json"), {
     now,
     idFactory: () => `user-${++userNumber}`,
@@ -673,6 +674,7 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(reply.t, "rig.control.confirmed");
   assert.equal(reply.control.value, 0);
 
+  rig.ptt = true;
   reply = await sendJsonAndReceive(webSocket, {
     t: "rig.action.invoke",
     radioId: "main",
@@ -687,14 +689,20 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(typeof reply.heartbeatDeadlineMs, "number");
   assert.equal(typeof reply.hardDeadlineMs, "number");
   assert.equal(rig.tuner, true);
+  const tuningTransmitToken = reply.transmitToken;
+  const pttReadsBeforeCompletionCheck = rig.readPttCalls;
+  nowMs += 500;
+  await waitFor(() => rig.readPttCalls > pttReadsBeforeCompletionCheck);
+  rig.ptt = false;
 
-  reply = await sendJsonAndReceive(webSocket, {
-    t: "tx.stop",
+  reply = await nextJsonOfTypeWithin(webSocket, "rig.action.completed", 1_000);
+  assert.deepEqual(reply, {
+    t: "rig.action.completed",
     radioId: "main",
-    transmitToken: reply.transmitToken,
-    commandId: "action-tuner-stop",
+    id: "action:TUNER",
+    transmitToken: tuningTransmitToken,
+    reason: "ptt_off",
   });
-  assert.equal(reply.t, "tx.stopped");
 
   reply = await sendJsonAndReceive(webSocket, {
     t: "digital.snapshot.get",
@@ -1130,6 +1138,35 @@ function nextJsonMessage(webSocket: WebSocket): Promise<any> {
   return new Promise((resolve, reject) => queue.waiters.push({ resolve, reject }));
 }
 
+async function nextJsonOfTypeWithin(
+  webSocket: WebSocket,
+  expectedType: string,
+  timeoutMs: number,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`message ${expectedType} was not received before timeout`);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const message = await Promise.race([
+        nextJsonMessage(webSocket),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`message ${expectedType} was not received before timeout`)),
+            remainingMs,
+          );
+        }),
+      ]);
+      if (message?.t === expectedType) return message;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+}
+
 async function sendJsonAndReceive(webSocket: WebSocket, value: unknown): Promise<any> {
   let response = nextJsonMessage(webSocket);
   webSocket.send(JSON.stringify(value));
@@ -1224,6 +1261,7 @@ class ApiFakeRig implements RadioDriver {
   supportsTuner = true;
   rejectedMode: string | null = null;
   readStateCalls = 0;
+  readPttCalls = 0;
   controls = new Map<string, RadioControlValue>([
     ["level:RFPOWER", 0.5],
     ["level:AF", 0.4],
@@ -1260,7 +1298,7 @@ class ApiFakeRig implements RadioDriver {
   }
   async setPtt(value: boolean) { this.ptt = value; return value; }
   async writePtt(value: boolean) { this.ptt = value; }
-  async readPtt() { return this.ptt; }
+  async readPtt() { this.readPttCalls += 1; return this.ptt; }
   async supportsInternalTuner() { return this.supportsTuner; }
   async startInternalTuner() { this.tuner = true; }
   async writeInternalTuner(value: boolean) { this.tuner = value; }
