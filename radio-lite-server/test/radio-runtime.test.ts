@@ -620,9 +620,9 @@ test("runtime releases a tuning lease within one second after two normal PTT OFF
     false,
   );
   await within(
-    waitFor(() => runtime.interlock.snapshot().lease === null),
+    waitFor(() => runtime.interlock.snapshot().state === "idle"),
     1_000,
-    "tuning lease remained active after confirmed PTT OFF",
+    "tuning de-key did not reach confirmed idle after PTT OFF",
   );
 
   assert.ok(Date.now() - pttOffAtMs < 1_000, "normal tuning completion waited for the hard limit");
