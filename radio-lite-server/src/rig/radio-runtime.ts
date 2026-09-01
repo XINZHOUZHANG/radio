@@ -458,6 +458,9 @@ export class RadioRuntime {
       const lease = await this.supervisor.commitTransmitStart(permit, () => {
         this.#assertTransmitAdmission(ownerId, user, controlToken);
       });
+      if (mode === "tuning") {
+        this.#reflectPersistentTunerEnabled();
+      }
       this.#syncTelemetryTransmitActivity();
       return lease;
     } catch (error) {
@@ -465,6 +468,15 @@ export class RadioRuntime {
       this.#syncTelemetryTransmitActivity();
       throw error;
     }
+  }
+
+  #reflectPersistentTunerEnabled(): void {
+    const current = this.#controlsById?.get("function:TUNER");
+    if (current === undefined) return;
+    this.#controlsById = new Map(this.#controlsById).set("function:TUNER", {
+      ...current,
+      value: true,
+    });
   }
 
   #syncTelemetryTransmitActivity(): void {
