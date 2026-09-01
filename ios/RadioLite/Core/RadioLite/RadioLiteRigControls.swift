@@ -280,14 +280,21 @@ struct RadioLiteRigControlOperationOwnership: Equatable, Sendable {
 
 enum RadioLiteTunerTapAction: Equatable, Sendable {
     case start
-    case stop
     case unavailable
 }
 
 enum RadioLiteTunerInteractionPolicy {
-    static func action(isTuning: Bool, tuneSupported: Bool) -> RadioLiteTunerTapAction {
-        guard tuneSupported else { return .unavailable }
-        return isTuning ? .stop : .start
+    static func startAction(
+        isTuning: Bool,
+        isPending: Bool,
+        tuneSupported: Bool
+    ) -> RadioLiteTunerTapAction {
+        guard tuneSupported, !isTuning, !isPending else { return .unavailable }
+        return .start
+    }
+
+    static func canEmergencyStop(isTuning: Bool) -> Bool {
+        isTuning
     }
 
     static func reflectingSuccessfulTuneStart(
@@ -793,6 +800,14 @@ struct RadioLiteActionConfirmation: Codable, Equatable, Sendable {
     let transmitToken: String?
     let heartbeatDeadlineMs: Int64?
     let hardDeadlineMs: Int64?
+}
+
+struct RadioLiteActionCompletion: Codable, Equatable, Sendable {
+    let t: String
+    let radioId: String
+    let id: String
+    let transmitToken: String
+    let reason: String
 }
 
 struct RadioLiteCapabilityCatalogue: Equatable, Sendable {
