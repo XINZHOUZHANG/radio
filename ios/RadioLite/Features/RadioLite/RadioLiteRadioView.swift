@@ -37,6 +37,9 @@ struct RadioLiteRadioView: View {
                         isTransmitting: isTransmitting,
                         hasControl: session.hasControl
                     )
+                    .accessibilityHint(
+                        canUseTunerAction ? "天调功能可用" : "天调功能不可用"
+                    )
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 18)
@@ -240,6 +243,16 @@ struct RadioLiteRadioView: View {
 
     private var isTransmitting: Bool {
         session.isVoicePTTHeld || session.isTuning || session.rigState?.ptt == true
+    }
+
+    private var canUseTunerAction: Bool {
+        if session.isTuning { return session.hasControl }
+        guard let capability = session.tunerActionCapability else { return false }
+        return session.canUseInternalTuner
+            && capability.displayState(
+                isTransmitting: isTransmitting,
+                hasControl: session.hasControl
+            ).isEnabled
     }
 
     private func syncFrequency() {
