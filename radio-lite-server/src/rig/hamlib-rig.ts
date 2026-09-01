@@ -49,6 +49,7 @@ type HamlibCapabilityTokens = ReadonlySet<string> | null;
 
 export type HamlibRigOptions = {
   pttMethod?: PttMethod;
+  onWarning?: (message: string) => void;
 };
 
 export type RigModeErrorReason = "rejected" | "unconfirmed";
@@ -133,6 +134,7 @@ export class HamlibRig {
   readonly #transport: RigRequester;
   readonly #controlCatalogue = new HamlibControlCatalogue();
   readonly #unavailablePttIsSafe: boolean;
+  readonly #onWarning: (message: string) => void;
   #lastCommandedPttForDisplayOnly = false;
   #controlDefinitions: Promise<readonly HamlibRigControlDefinition[]> | null = null;
   #vfoOperations: Promise<HamlibCapabilityTokens> | null = null;
@@ -144,6 +146,9 @@ export class HamlibRig {
   constructor(transport: RigRequester, options: HamlibRigOptions = {}) {
     this.#transport = transport;
     this.#unavailablePttIsSafe = options.pttMethod === "None";
+    this.#onWarning = options.onWarning ?? ((message) => {
+      process.emitWarning(message, { code: "RADIO_LITE_TUNER_READBACK" });
+    });
   }
 
   async readState(): Promise<HamlibRigState> {
@@ -301,6 +306,12 @@ export class HamlibRig {
       confirmedValue = normalized;
     }
     if (!controlValuesMatch(definition, normalized, confirmedValue)) {
+      if (definition.id === "function:TUNER") {
+        this.#onWarning(
+          "TUNER read-back mismatch: requested " + normalized + ", received " + confirmedValue,
+        );
+        return { ...definition, value: normalized };
+      }
       throw new Error(
         "control read-back mismatch: requested " + normalized + ", received " + confirmedValue,
       );
@@ -400,21 +411,14 @@ export class HamlibRig {
         "radio does not support internal tuning via Hamlib TUNE",
       );
     }
-    const tunerSwitchSupport = await this.#discoverTunerSwitchSupport();
-    if (tunerSwitchSupport !== false) {
-      try {
-        await this.#transport.request("\\set_func TUNER 1");
-        this.#tunerSwitchWritable = true;
-      } catch (error) {
-        if (
-          tunerSwitchSupport !== null ||
-          !(error instanceof RigReportError) ||
-          error.report !== -11
-        ) {
-          throw error;
-        }
-        this.#tunerSwitchWritable = false;
+    try {
+      await this.#transport.request("\\set_func TUNER 1");
+      this.#tunerSwitchWritable = true;
+    } catch (error) {
+      if (!(error instanceof RigReportError) || error.report !== -11) {
+        throw error;
       }
+      this.#tunerSwitchWritable = false;
     }
     await this.#transport.request("\\vfo_op TUNE");
   }
@@ -549,11 +553,13 @@ export class HamlibRig {
     const writableFunctionSet = writableFunctions ?? new Set<string>();
     const supportedOperations = await this.#discoverSupportedOperations(modes);
     const tunerActionSupported = vfoOperations?.has("TUNE") === true;
+    const tunerSwitchSupported = tunerActionSupported || writableFunctionSet.has("TUNER");
     const candidates = await this.#controlCatalogue.discover({
       levels: [...readableLevelSet],
-      functions: tunerActionSupported
+      functions: tunerSwitchSupported
         ? [...new Set([...readableFunctionSet, "TUNER"])]
         : [...readableFunctionSet].filter((token) => token !== "TUNER"),
+      actions: tunerActionSupported ? ["TUNER"] : [],
       operations: supportedOperations,
       modes: modes === null ? [] : [...modes],
     });
@@ -564,6 +570,9 @@ export class HamlibRig {
       if (definition.kind === "function" || definition.kind === "action") {
         if (definition.kind === "action" && definition.token === "TUNER") {
           return tunerActionSupported;
+        }
+        if (definition.kind === "function" && definition.token === "TUNER") {
+          return tunerSwitchSupported;
         }
         return writableFunctionSet.has(definition.token);
       }

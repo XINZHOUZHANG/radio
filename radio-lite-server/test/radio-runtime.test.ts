@@ -525,7 +525,6 @@ test("runtime tuning stop dekeys safely without disabling the persistent tuner s
 
   assert.deepEqual(requester.commands, [
     "\\vfo_op ?",
-    "\\set_func ?",
     "\\set_func TUNER 1",
     "\\vfo_op TUNE",
   ]);
@@ -553,7 +552,11 @@ test("runtime TUNE-only stop confirms PTT OFF without leaving the safety latch",
     "tuning",
   );
 
-  assert.deepEqual(requester.commands, ["\\vfo_op ?", "\\set_func ?", "\\vfo_op TUNE"]);
+  assert.deepEqual(requester.commands, [
+    "\\vfo_op ?",
+    "\\set_func TUNER 1",
+    "\\vfo_op TUNE",
+  ]);
   requester.clear();
 
   await runtime.stopTransmit("tune-only-device", transmit.leaseToken);

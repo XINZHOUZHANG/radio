@@ -8,6 +8,7 @@ import type {
 export type HamlibControlReport = {
   levels?: readonly string[];
   functions?: readonly string[];
+  actions?: readonly string[];
   parameters?: readonly string[];
   operations?: readonly string[];
   modes?: readonly string[];
@@ -70,9 +71,13 @@ const FUNCTIONS = new Map<string, CatalogueDefinition>([
   ["VOX", toggle("audio", true)],
   ["MUTE", toggle("audio")],
   ["LOCK", toggle("mode")],
-  ["TUNER", action("rf", true)],
+  ["TUNER", toggle("rf", true)],
   ["SBKIN", toggle("cw", true)],
   ["FBKIN", toggle("cw", true)],
+]);
+
+const ACTIONS = new Map<string, CatalogueDefinition>([
+  ["TUNER", action("rf", true)],
 ]);
 
 const PARAMETERS = new Map<string, CatalogueDefinition>([
@@ -103,6 +108,7 @@ export class HamlibControlCatalogue {
     const controls: RadioControl[] = [];
     appendReported(controls, report.levels, LEVELS);
     appendReported(controls, report.functions, FUNCTIONS);
+    appendReported(controls, report.actions, ACTIONS);
     appendReported(controls, report.parameters, PARAMETERS);
     for (const rawToken of report.operations ?? []) {
       const token = validToken(rawToken);

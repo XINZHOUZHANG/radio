@@ -9,6 +9,7 @@ test("maps reported Hamlib tokens to grouped descriptors", async () => {
   const controls = await catalogue.discover({
     levels: ["RFPOWER", "STRENGTH", "MICGAIN"],
     functions: ["NB", "TUNER"],
+    actions: ["TUNER"],
     parameters: ["KEYSPD"],
   });
 
@@ -22,6 +23,7 @@ test("maps reported Hamlib tokens to grouped descriptors", async () => {
     { id: "level:STRENGTH", group: "rf", access: "read-only", presentation: "meter" },
     { id: "level:MICGAIN", group: "audio", access: "read-write", presentation: "slider" },
     { id: "function:NB", group: "rf", access: "read-write", presentation: "toggle" },
+    { id: "function:TUNER", group: "rf", access: "read-write", presentation: "toggle" },
     { id: "action:TUNER", group: "rf", access: "action", presentation: "button" },
     { id: "parameter:KEYSPD", group: "cw", access: "read-write", presentation: "discrete" },
   ]);
@@ -57,7 +59,7 @@ test("describes the complete generic level and function surface", async () => {
     "level:KEYSPD", "level:STRENGTH", "level:SWR", "level:ALC", "level:RFPOWER_METER",
     "level:RFPOWER_METER_WATTS", "function:NB", "function:NR", "function:APF", "function:ANF",
     "function:MN", "function:COMP", "function:MON", "function:VOX", "function:MUTE",
-    "function:LOCK", "action:TUNER", "function:SBKIN", "function:FBKIN",
+    "function:LOCK", "function:TUNER", "function:SBKIN", "function:FBKIN",
   ]);
 
   assert.deepEqual(controls.find(({ id }) => id === "level:RFPOWER"), {
