@@ -184,16 +184,49 @@ private struct RadioLiteControlSectionSheet: View {
         dashboard.section(for: category)
     }
 
+    private var tunerSwitch: RadioLiteCapabilityControl? {
+        section?
+            .items
+            .flatMap(\.members)
+            .map(\.control)
+            .first(where: { $0.id == "function:TUNER" })
+    }
+
+    private var tunerStatusLabel: String {
+        if session.isTuning { return "调谐中" }
+        guard let tunerSwitch else { return "状态未知" }
+        return tunerSwitch.value.booleanValue == true ? "已接入" : "旁路"
+    }
+
+    private var effectiveIsTransmitting: Bool {
+        isTransmitting || session.isTuning || session.rigState?.ptt == true
+    }
+
     private var tunerPanel: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("机内天调", systemImage: "tuningfork")
                     .font(.headline)
                 Spacer()
-                Text(session.isTuning ? "调谐中" : "就绪")
+                Text(tunerStatusLabel)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(session.isTuning ? RadioPalette.warning : RadioPalette.cyan)
             }
+
+            if let tunerSwitch {
+                RadioLiteDashboardControlEditor(
+                    control: tunerSwitch,
+                    label: "机内天调接入",
+                    isTransmitting: effectiveIsTransmitting,
+                    hasControl: hasControl
+                )
+                Divider().overlay(Color.white.opacity(0.08))
+            } else {
+                Label("当前电台只提供调谐动作，无法读取天调接入状态", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(RadioPalette.muted)
+            }
+
             Text("调谐会短暂进入发射状态。请确认天线系统已连接并保持现场安全。")
                 .font(.caption)
                 .foregroundStyle(RadioPalette.muted)
@@ -201,7 +234,7 @@ private struct RadioLiteControlSectionSheet: View {
                 if session.isTuning {
                     session.endTuning()
                 } else {
-                    session.beginTuning()
+                    Task { await beginTuningWithPersistentSwitch() }
                 }
             } label: {
                 Label(
@@ -228,9 +261,22 @@ private struct RadioLiteControlSectionSheet: View {
         guard let capability = session.tunerActionCapability else { return false }
         return session.canUseInternalTuner
             && capability.displayState(
-                isTransmitting: isTransmitting,
+                isTransmitting: effectiveIsTransmitting,
                 hasControl: hasControl
             ).isEnabled
+    }
+
+    private func beginTuningWithPersistentSwitch() async {
+        if let tunerSwitch,
+           tunerSwitch.value.booleanValue != true {
+            guard let confirmed = await session.setCapabilityControl(
+                tunerSwitch.id,
+                value: .boolean(true)
+            ), confirmed.value.booleanValue == true else {
+                return
+            }
+        }
+        session.beginTuning()
     }
 }
 

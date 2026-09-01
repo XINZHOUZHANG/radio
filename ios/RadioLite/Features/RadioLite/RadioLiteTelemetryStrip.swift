@@ -40,11 +40,13 @@ struct RadioLiteTelemetryStrip: View {
                         )
                     }
                 } else {
+                    let strength = receiveStrength(nowMs: milliseconds(context.date))
                     meter(
                         title: "S",
-                        value: receiveStrength(nowMs: milliseconds(context.date)),
-                        range: -54...60,
-                        suffix: " dB",
+                        value: strength?.relativeDb,
+                        range: RadioLiteSMeterReading.minimumRelativeDb
+                            ...RadioLiteSMeterReading.maximumRelativeDb,
+                        suffix: "",
                         labels: "S0                         S9              S9+60"
                     )
                 }
@@ -58,11 +60,12 @@ struct RadioLiteTelemetryStrip: View {
         .accessibilityLabel(isTransmitting ? "发射遥测" : "接收信号强度")
     }
 
-    private func receiveStrength(nowMs: UInt64) -> Double? {
+    private func receiveStrength(nowMs: UInt64) -> RadioLiteSMeterReading? {
         guard let telemetry,
               !telemetry.isStale(nowMs: nowMs, periodMs: 2_000),
-              telemetry.supportsMeter("STRENGTH") else { return nil }
-        return telemetry.meters.strengthDbRelativeS9
+              telemetry.supportsMeter("STRENGTH"),
+              let value = telemetry.meters.strengthDbRelativeS9 else { return nil }
+        return RadioLiteSMeterReading(relativeDb: value)
     }
 
     private func transmitValue(
@@ -106,6 +109,8 @@ struct RadioLiteTelemetryStrip: View {
                 Text(formatted(value, title: title, suffix: suffix))
                     .font(.caption.monospacedDigit().weight(.semibold))
                     .foregroundStyle(value == nil ? RadioPalette.muted : meterTint)
+                    .minimumScaleFactor(0.72)
+                    .lineLimit(1)
             }
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
@@ -135,6 +140,9 @@ struct RadioLiteTelemetryStrip: View {
 
     private func formatted(_ value: Double?, title: String, suffix: String) -> String {
         guard let value, value.isFinite else { return "—" }
+        if title == "S", let reading = RadioLiteSMeterReading(relativeDb: value) {
+            return "\(reading.label) · \(String(format: "%+.0f dB", value))"
+        }
         if title == "PWR", suffix == "%" { return String(format: "%.0f%%", value * 100) }
         if title == "PWR" { return String(format: "%.1f%@", value, suffix) }
         if title == "SWR" { return String(format: "%.2f:1", value) }

@@ -22,6 +22,51 @@ struct RadioLiteMeterSample: Codable, Equatable, Sendable {
     }
 }
 
+struct RadioLiteSMeterReading: Equatable, Sendable {
+    static let minimumRelativeDb = -54.0
+    static let maximumRelativeDb = 60.0
+
+    let relativeDb: Double
+
+    init?(relativeDb: Double) {
+        guard relativeDb.isFinite else { return nil }
+        self.relativeDb = relativeDb
+    }
+
+    var label: String {
+        if relativeDb <= Self.minimumRelativeDb {
+            return "S0"
+        }
+        if relativeDb < 0 {
+            let sUnits = min(9, max(0, 9 + relativeDb / 6))
+            return "S\(Self.formattedNumber(sUnits))"
+        }
+        if abs(relativeDb) < 0.000_001 {
+            return "S9"
+        }
+        return "S9+\(Self.formattedNumber(relativeDb))"
+    }
+
+    var relativeDbLabel: String {
+        let sign = relativeDb >= 0 ? "+" : ""
+        return "\(sign)\(Self.formattedNumber(relativeDb)) dB rel. S9"
+    }
+
+    var normalizedValue: Double {
+        let clamped = min(Self.maximumRelativeDb, max(Self.minimumRelativeDb, relativeDb))
+        return (clamped - Self.minimumRelativeDb)
+            / (Self.maximumRelativeDb - Self.minimumRelativeDb)
+    }
+
+    private static func formattedNumber(_ value: Double) -> String {
+        let roundedTenth = (value * 10).rounded() / 10
+        if abs(roundedTenth.rounded() - roundedTenth) < 0.000_001 {
+            return String(format: "%.0f", roundedTenth)
+        }
+        return String(format: "%.1f", roundedTenth)
+    }
+}
+
 struct RadioLiteTelemetry: Codable, Equatable, Sendable {
     let t: String
     let radioId: String

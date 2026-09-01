@@ -68,6 +68,7 @@ struct RadioLiteControlDashboardSection: Identifiable, Equatable, Sendable {
 
 struct RadioLiteControlDashboard: Equatable, Sendable {
     private static let tunerActionID = "action:TUNER"
+    private static let tunerSwitchID = "function:TUNER"
     private static let noiseBlankerPairIDs = ["function:NB", "level:NB"]
     private static let noiseReductionPairIDs = ["function:NR", "level:NR"]
     private static let compressorPairIDs = ["function:COMP", "level:COMP"]
@@ -215,7 +216,14 @@ struct RadioLiteControlDashboard: Equatable, Sendable {
     ) -> String {
         switch category {
         case .tuner:
-            return isTuning ? "调谐中" : "就绪"
+            if isTuning { return "调谐中" }
+            if let tunerSwitch = items
+                .flatMap(\.members)
+                .first(where: { $0.control.id == tunerSwitchID }),
+               case .boolean(let enabled) = tunerSwitch.control.value {
+                return enabled ? "已接入" : "旁路"
+            }
+            return "可调谐"
         case .rf:
             if let power = items.first(where: { item in
                 item.members.contains { $0.control.normalizedDashboardToken == "RFPOWER" }
@@ -297,7 +305,7 @@ extension RadioLiteCapabilityControl {
         case "APF": return id.hasPrefix("level:") ? "音频峰值滤波强度" : "音频峰值滤波"
         case "MON": return "监听"
         case "MONITOR_GAIN": return "监听音量"
-        case "TUNER": return "机内天调"
+        case "TUNER": return id == "function:TUNER" ? "机内天调接入" : "开始调谐"
         case "CWPITCH": return "CW 音调"
         case "KEYSPD": return "CW 速度"
         case "PASSBAND", "CURRENT": return "滤波器带宽"
