@@ -193,10 +193,14 @@ export class RadioRuntime {
         force,
       });
       if (result.displacedOwnerId !== null) {
-        await this.supervisor.ownerDisconnected(
-          result.displacedOwnerId,
-          "control force takeover",
-        );
+        try {
+          await this.supervisor.ownerDisconnected(
+            result.displacedOwnerId,
+            "control force takeover",
+          );
+        } finally {
+          this.#syncTelemetryTransmitActivity();
+        }
       }
       return result;
     });
@@ -213,6 +217,7 @@ export class RadioRuntime {
       try {
         await this.supervisor.ownerDisconnected(ownerId, "control released");
       } finally {
+        this.#syncTelemetryTransmitActivity();
         released = this.control.release(ownerId, token);
       }
       return released;
@@ -302,11 +307,20 @@ export class RadioRuntime {
     transmitToken: string,
   ): Promise<TransmitLease> {
     this.control.heartbeat(ownerId, controlToken);
-    return this.supervisor.heartbeat(ownerId, transmitToken);
+    try {
+      return await this.supervisor.heartbeat(ownerId, transmitToken);
+    } finally {
+      this.#syncTelemetryTransmitActivity();
+    }
   }
 
   async stopTransmit(ownerId: string, transmitToken: string): Promise<void> {
-    const outcome = await this.supervisor.stop(ownerId, transmitToken, "released by owner");
+    let outcome: DeKeyOutcome;
+    try {
+      outcome = await this.supervisor.stop(ownerId, transmitToken, "released by owner");
+    } finally {
+      this.#syncTelemetryTransmitActivity();
+    }
     if (outcome.kind === "offConfirmed") {
       return;
     }
@@ -321,14 +335,19 @@ export class RadioRuntime {
     throw new InvalidLeaseError("invalid transmit lease");
   }
 
-  stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
-    return this.supervisor.stop(ownerId, transmitToken, "automatic transmit stop");
+  async stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
+    try {
+      return await this.supervisor.stop(ownerId, transmitToken, "automatic transmit stop");
+    } finally {
+      this.#syncTelemetryTransmitActivity();
+    }
   }
 
   async ownerDisconnected(ownerId: string): Promise<void> {
     try {
       await this.supervisor.ownerDisconnected(ownerId, "control owner disconnected");
     } finally {
+      this.#syncTelemetryTransmitActivity();
       this.control.release(ownerId);
     }
   }
@@ -364,14 +383,18 @@ export class RadioRuntime {
   }
 
   async #checkSafety(): Promise<void> {
-    await this.supervisor.checkDeadlines().catch(() => undefined);
-    const transmitOwner = this.supervisor.snapshot().lease?.ownerId;
-    const controlOwner = this.control.snapshot()?.ownerId;
-    if (transmitOwner !== undefined && transmitOwner !== controlOwner) {
-      await this.supervisor.ownerDisconnected(
-        transmitOwner,
-        "transmit owner lost control authority",
-      ).catch(() => undefined);
+    try {
+      await this.supervisor.checkDeadlines().catch(() => undefined);
+      const transmitOwner = this.supervisor.snapshot().lease?.ownerId;
+      const controlOwner = this.control.snapshot()?.ownerId;
+      if (transmitOwner !== undefined && transmitOwner !== controlOwner) {
+        await this.supervisor.ownerDisconnected(
+          transmitOwner,
+          "transmit owner lost control authority",
+        ).catch(() => undefined);
+      }
+    } finally {
+      this.#syncTelemetryTransmitActivity();
     }
   }
 
@@ -432,13 +455,23 @@ export class RadioRuntime {
       profileRevision: 1,
     });
     try {
-      return await this.supervisor.commitTransmitStart(permit, () => {
+      const lease = await this.supervisor.commitTransmitStart(permit, () => {
         this.#assertTransmitAdmission(ownerId, user, controlToken);
       });
+      this.#syncTelemetryTransmitActivity();
+      return lease;
     } catch (error) {
       this.supervisor.abandonTransmitStart(permit, "transmit start failed");
+      this.#syncTelemetryTransmitActivity();
       throw error;
     }
+  }
+
+  #syncTelemetryTransmitActivity(): void {
+    const snapshot = this.interlock.snapshot();
+    this.telemetry.confirmTransmitActivity(
+      snapshot.lease !== null || snapshot.dekeyRequired,
+    );
   }
 
   #serialize<T>(operation: () => Promise<T>): Promise<T> {

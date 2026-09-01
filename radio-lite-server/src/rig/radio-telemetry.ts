@@ -48,7 +48,7 @@ export class RadioTelemetrySampler {
   #inFlight: Promise<void> | null = null;
   #started = false;
   #closed = false;
-  #phase: "receive" | "transmit" = "receive";
+  #explicitTransmitActivity = false;
   #confirmedRevision = 0;
   #pendingConfirmedState: Partial<RadioState> = {};
 
@@ -116,14 +116,20 @@ export class RadioTelemetrySampler {
   }
 
   confirmPtt(ptt: boolean): void {
-    const previous = this.#phase;
-    this.#phase = ptt ? "transmit" : "receive";
+    const previous = this.#samplingMode();
     this.#confirmState({ ptt });
-    if (previous !== this.#phase && this.#timer !== null) {
-      this.#clock.clearTimeout(this.#timer);
-      this.#timer = null;
-      this.#scheduleNext();
-    }
+    this.#rescheduleForModeChange(previous);
+  }
+
+  /**
+   * Select transmit-rate meter sampling for an admitted transmit lease without
+   * claiming that the physical PTT read-back is ON. Internal tuner cycles can
+   * produce PWR/SWR/ALC while a rig continues to report PTT=false.
+   */
+  confirmTransmitActivity(active: boolean): void {
+    const previous = this.#samplingMode();
+    this.#explicitTransmitActivity = active;
+    this.#rescheduleForModeChange(previous);
   }
 
   close(): Promise<void> {
@@ -165,9 +171,7 @@ export class RadioTelemetrySampler {
   async #performSample(): Promise<void> {
     const confirmedRevision = this.#confirmedRevision;
     this.#pendingConfirmedState = {};
-    const mode = this.#phase === "transmit" && this.#value !== null
-      ? "transmit"
-      : "receive";
+    const mode = this.#samplingMode();
     let state: RadioState;
     let meters: RadioMeterSample;
     if (mode === "receive") {
@@ -195,7 +199,6 @@ export class RadioTelemetrySampler {
       meters: meterValues(meters),
       availableMeters: [...(meters.availableMeters ?? [])],
     };
-    this.#phase = state.ptt ? "transmit" : "receive";
     this.#value = value;
     for (const listener of [...this.#listeners]) {
       this.#deliver(listener, cloneTelemetry(value));
@@ -205,6 +208,22 @@ export class RadioTelemetrySampler {
       this.#timer = null;
       this.#scheduleNext();
     }
+  }
+
+  #samplingMode(): "receive" | "transmit" {
+    if (this.#value === null) return "receive";
+    return this.#explicitTransmitActivity || this.#value.state.ptt
+      ? "transmit"
+      : "receive";
+  }
+
+  #rescheduleForModeChange(previous: "receive" | "transmit"): void {
+    if (!this.#started || this.#closed || previous === this.#samplingMode()) return;
+    if (this.#timer !== null) {
+      this.#clock.clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    this.#scheduleNext();
   }
 
   #deliver(listener: RadioTelemetryListener, value: RadioTelemetry): void {
@@ -217,7 +236,7 @@ export class RadioTelemetrySampler {
 
   #scheduleNext(): void {
     if (!this.#started || this.#closed || this.#timer !== null) return;
-    const delayMs = this.#phase === "transmit"
+    const delayMs = this.#samplingMode() === "transmit"
       ? this.#transmitPeriodMs
       : this.#receivePeriodMs;
     this.#timer = this.#clock.setTimeout(() => {
