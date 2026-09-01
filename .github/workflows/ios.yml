@@ -64,6 +64,7 @@ jobs:
         with:
           node-version-file: .node-version
       - run: node scripts/check-ios-radio-lite-contract.mjs
+      - run: node scripts/check-radio-control-dashboard.mjs
 
   xcode-build-and-test:
     runs-on: macos-15
