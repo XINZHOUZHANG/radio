@@ -454,6 +454,9 @@ test("internal tuner start enables a supported tuner switch before the TUNE acti
       if (command === "\\set_func ?") {
         return response("set_func", { Func: "NB NR TUNER" });
       }
+      if (command === "\\get_func TUNER") {
+        return response("get_func", { TUNER: "1" });
+      }
       return response(command.slice(1).split(" ")[0], {});
     },
   });
@@ -465,6 +468,7 @@ test("internal tuner start enables a supported tuner switch before the TUNE acti
     "\\vfo_op ?",
     "\\set_func ?",
     "\\set_func TUNER 1",
+    "\\get_func TUNER",
     "\\vfo_op TUNE",
   ]);
 });
@@ -673,6 +677,9 @@ test("internal tuner surfaces a rejected TUNE action after enabling the supporte
       if (command === "\\set_func TUNER 1") {
         return response("set_func", {});
       }
+      if (command === "\\get_func TUNER") {
+        return response("get_func", { TUNER: "1" });
+      }
       if (command === "\\vfo_op TUNE") {
         throw new RigReportError("vfo_op", -1);
       }
@@ -687,6 +694,7 @@ test("internal tuner surfaces a rejected TUNE action after enabling the supporte
     "\\vfo_op ?",
     "\\set_func ?",
     "\\set_func TUNER 1",
+    "\\get_func TUNER",
     "\\vfo_op TUNE",
   ]);
 });

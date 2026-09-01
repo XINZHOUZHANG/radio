@@ -527,6 +527,7 @@ test("runtime tuning stop dekeys safely without disabling the persistent tuner s
     "\\vfo_op ?",
     "\\set_func ?",
     "\\set_func TUNER 1",
+    "\\get_func TUNER",
     "\\vfo_op TUNE",
   ]);
   requester.clear();
