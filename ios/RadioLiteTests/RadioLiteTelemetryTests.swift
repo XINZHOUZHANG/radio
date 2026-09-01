@@ -33,6 +33,46 @@ final class RadioLiteTelemetryTests: XCTestCase {
         XCTAssertFalse(settingOnly.hasActualPowerMeter)
     }
 
+    func testSMeterUsesHamlibIdealScale() throws {
+        let cases: [(Double, String)] = [
+            (-54, "S0"),
+            (-48, "S1"),
+            (-36, "S3"),
+            (-12, "S7"),
+            (-6, "S8"),
+            (0, "S9"),
+            (10, "S9+10"),
+            (20, "S9+20"),
+            (60, "S9+60"),
+        ]
+
+        for (relativeDb, expected) in cases {
+            XCTAssertEqual(
+                try XCTUnwrap(RadioLiteSMeterReading(relativeDb: relativeDb)).label,
+                expected,
+                "Unexpected S-meter label for \(relativeDb) dB relative to S9"
+            )
+        }
+    }
+
+    func testSMeterKeepsFractionalResolutionAndClampsOnlyTheVisualBar() throws {
+        let fractional = try XCTUnwrap(RadioLiteSMeterReading(relativeDb: -9))
+        XCTAssertEqual(fractional.label, "S7.5")
+        XCTAssertEqual(fractional.relativeDbLabel, "-9 dB rel. S9")
+
+        let belowFloor = try XCTUnwrap(RadioLiteSMeterReading(relativeDb: -73))
+        XCTAssertEqual(belowFloor.label, "S0")
+        XCTAssertEqual(belowFloor.normalizedValue, 0)
+        XCTAssertEqual(belowFloor.relativeDbLabel, "-73 dB rel. S9")
+
+        let aboveCeiling = try XCTUnwrap(RadioLiteSMeterReading(relativeDb: 75))
+        XCTAssertEqual(aboveCeiling.label, "S9+75")
+        XCTAssertEqual(aboveCeiling.normalizedValue, 1)
+
+        XCTAssertNil(RadioLiteSMeterReading(relativeDb: .nan))
+        XCTAssertNil(RadioLiteSMeterReading(relativeDb: .infinity))
+    }
+
     func testTelemetryBecomesStaleAfterThreeSamplePeriods() throws {
         let sample = try JSONDecoder().decode(
             RadioLiteTelemetry.self,
