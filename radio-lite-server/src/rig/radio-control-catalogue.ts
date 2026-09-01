@@ -70,7 +70,7 @@ const FUNCTIONS = new Map<string, CatalogueDefinition>([
   ["VOX", toggle("audio", true)],
   ["MUTE", toggle("audio")],
   ["LOCK", toggle("mode")],
-  ["TUNER", action("rf", true)],
+  ["TUNER", toggle("rf", true)],
   ["SBKIN", toggle("cw", true)],
   ["FBKIN", toggle("cw", true)],
 ]);
@@ -103,6 +103,9 @@ export class HamlibControlCatalogue {
     const controls: RadioControl[] = [];
     appendReported(controls, report.levels, LEVELS);
     appendReported(controls, report.functions, FUNCTIONS);
+    if (includesReportedToken(report.functions, "TUNER")) {
+      controls.push(descriptor("TUNER", action("rf", true)));
+    }
     appendReported(controls, report.parameters, PARAMETERS);
     for (const rawToken of report.operations ?? []) {
       const token = validToken(rawToken);
@@ -141,6 +144,10 @@ function appendReported(
     const definition = definitions.get(token);
     if (definition !== undefined) output.push(descriptor(token, definition));
   }
+}
+
+function includesReportedToken(reported: readonly string[] | undefined, expected: string): boolean {
+  return (reported ?? []).some((rawToken) => validToken(rawToken) === expected);
 }
 
 function descriptor(token: string, definition: CatalogueDefinition): RadioControl {

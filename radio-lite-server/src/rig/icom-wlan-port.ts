@@ -23,7 +23,12 @@ export const ICOM_WLAN_MODELS = [
 ] as const;
 
 export type SupportedIcomWlanModel = typeof ICOM_WLAN_MODELS[number];
-export type IcomWlanControlId = "operation:SPLIT" | "operation:RIT" | "operation:XIT";
+export type IcomWlanControlId =
+  | "operation:SPLIT"
+  | "operation:RIT"
+  | "operation:XIT"
+  | "function:TUNER";
+export type IcomWlanTunerState = "off" | "on" | "tuning";
 
 export type IcomWlanMode = {
   mode: string;
@@ -59,6 +64,8 @@ export interface IcomWlanPort {
   readMeters(mode: "receive" | "transmit"): Promise<IcomWlanMeters>;
   readControl(id: IcomWlanControlId): Promise<boolean | number>;
   writeControl(id: IcomWlanControlId, value: boolean | number): Promise<void>;
+  readTunerState(): Promise<IcomWlanTunerState>;
+  writeTunerEnabled(enabled: boolean): Promise<void>;
   invokeTuner(): Promise<void>;
   onFatalConnection(listener: (error: Error) => void): () => void;
 }
@@ -135,14 +142,16 @@ export class IcomWlanNodePort implements IcomWlanPort {
 
   async capabilities(): Promise<IcomWlanPortCapabilities> {
     const profile = this.#control.profile;
+    const supportsInternalTuner = profile.functions.includes("TUNER");
     return {
       model: this.#supportedModel(),
       canTransmit: this.#supportTx ?? true,
-      supportsInternalTuner: profile.functions.includes("TUNER"),
+      supportsInternalTuner,
       controls: [
         ...(profile.supportsX25X26 ? ["operation:SPLIT" as const] : []),
         ...(profile.functions.includes("RIT") ? ["operation:RIT" as const] : []),
         ...(profile.functions.includes("XIT") ? ["operation:XIT" as const] : []),
+        ...(supportsInternalTuner ? ["function:TUNER" as const] : []),
       ],
     };
   }
@@ -204,10 +213,15 @@ export class IcomWlanNodePort implements IcomWlanPort {
         return this.#required("control read", () => this.#control.getRitOffset());
       case "operation:XIT":
         return this.#required("control read", () => this.#control.getXitOffset());
+      case "function:TUNER":
+        return (await this.readTunerState()) !== "off";
     }
   }
 
   writeControl(id: IcomWlanControlId, value: boolean | number): Promise<void> {
+    if (id === "function:TUNER") {
+      return this.writeTunerEnabled(value as boolean);
+    }
     return this.#run("control write", () => {
       switch (id) {
         case "operation:SPLIT":
@@ -221,6 +235,19 @@ export class IcomWlanNodePort implements IcomWlanPort {
           break;
       }
     });
+  }
+
+  async readTunerState(): Promise<IcomWlanTunerState> {
+    const status = await this.#required("tuner status read", () => this.#control.readTunerStatus());
+    switch (status.state) {
+      case "OFF": return "off";
+      case "ON": return "on";
+      case "TUNING": return "tuning";
+    }
+  }
+
+  writeTunerEnabled(enabled: boolean): Promise<void> {
+    return this.#run("tuner enable write", () => this.#control.setTunerEnabled(enabled));
   }
 
   invokeTuner(): Promise<void> {

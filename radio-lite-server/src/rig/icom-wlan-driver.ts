@@ -16,10 +16,13 @@ import type {
   IcomWlanPort,
 } from "./icom-wlan-port.ts";
 
+const TUNER_CONTROL_ID = "function:TUNER" as const;
+
 const CONTROL_ORDER: readonly IcomWlanControlId[] = [
   "operation:SPLIT",
   "operation:RIT",
   "operation:XIT",
+  TUNER_CONTROL_ID,
 ];
 
 const CONTROL_DEFINITIONS: Readonly<Record<IcomWlanControlId, Omit<RadioControl, "value">>> = {
@@ -57,6 +60,19 @@ const CONTROL_DEFINITIONS: Readonly<Record<IcomWlanControlId, Omit<RadioControl,
     maximum: 9_999,
     step: 1,
     unit: "hertz",
+    transmitLocked: true,
+  },
+  "function:TUNER": {
+    id: TUNER_CONTROL_ID,
+    kind: "function",
+    token: "TUNER",
+    group: "rf",
+    access: "read-write",
+    presentation: "toggle",
+    minimum: 0,
+    maximum: 1,
+    step: 1,
+    unit: "boolean",
     transmitLocked: true,
   },
 };
@@ -150,11 +166,16 @@ export class IcomWlanDriver implements RadioDriver {
   }
 
   async readControls(): Promise<RadioControl[]> {
-    const available = new Set((await this.#port.capabilities()).controls);
+    const capabilities = await this.#port.capabilities();
+    const available = new Set(capabilities.controls);
+    if (capabilities.supportsInternalTuner) available.add(TUNER_CONTROL_ID);
     const controls: RadioControl[] = [];
     for (const id of CONTROL_ORDER) {
       if (!available.has(id)) continue;
-      controls.push({ ...CONTROL_DEFINITIONS[id], value: await this.#port.readControl(id) });
+      const value = id === TUNER_CONTROL_ID
+        ? (await this.#port.readTunerState()) !== "off"
+        : await this.#port.readControl(id);
+      controls.push({ ...CONTROL_DEFINITIONS[id], value });
     }
     return controls;
   }
@@ -184,9 +205,17 @@ export class IcomWlanDriver implements RadioDriver {
 
   async setControl(id: string, value: RadioControlValue): Promise<RadioControl> {
     if (!isIcomControlId(id)) throw new Error(`control ${id} is unavailable`);
-    const available = (await this.#port.capabilities()).controls.includes(id);
+    const capabilities = await this.#port.capabilities();
+    const available = capabilities.controls.includes(id)
+      || (id === TUNER_CONTROL_ID && capabilities.supportsInternalTuner);
     if (!available) throw new Error(`control ${id} is unavailable`);
     const normalized = normalizeControlValue(id, value);
+    if (id === TUNER_CONTROL_ID) {
+      await this.#port.writeTunerEnabled(normalized as boolean);
+      const confirmed = (await this.#port.readTunerState()) !== "off";
+      if (confirmed !== normalized) throw new Error(`control ${id} read-back mismatch`);
+      return { ...CONTROL_DEFINITIONS[id], value: confirmed };
+    }
     await this.#port.writeControl(id, normalized);
     const confirmed = await this.#port.readControl(id);
     if (confirmed !== normalized) throw new Error(`control ${id} read-back mismatch`);
@@ -196,6 +225,10 @@ export class IcomWlanDriver implements RadioDriver {
   async invokeAction(id: string): Promise<void> {
     if (id !== "action:TUNER" || !(await this.capabilities()).supportsInternalTuner) {
       throw new Error(`action ${id} is unavailable`);
+    }
+    await this.#port.writeTunerEnabled(true);
+    if ((await this.#port.readTunerState()) === "off") {
+      throw new Error("tuner enable read-back mismatch");
     }
     await this.#port.invokeTuner();
   }
@@ -243,7 +276,7 @@ function normalizeControlValue(
   id: IcomWlanControlId,
   value: RadioControlValue,
 ): boolean | number {
-  if (id === "operation:SPLIT") {
+  if (id === "operation:SPLIT" || id === TUNER_CONTROL_ID) {
     if (typeof value !== "boolean") throw new TypeError(`${id} requires a boolean value`);
     return value;
   }
