@@ -187,19 +187,62 @@ final class RadioLiteRigControlsTests: XCTestCase {
         )
     }
 
-    func testTunerButtonTapStartsAndStopsAOneShotTune() {
+    func testTunerStartActionNeverBecomesAStopToggle() {
         XCTAssertEqual(
-            RadioLiteTunerInteractionPolicy.action(isTuning: false, tuneSupported: true),
+            RadioLiteTunerInteractionPolicy.startAction(
+                isTuning: false,
+                isPending: false,
+                tuneSupported: true
+            ),
             .start
         )
         XCTAssertEqual(
-            RadioLiteTunerInteractionPolicy.action(isTuning: true, tuneSupported: true),
-            .stop
-        )
-        XCTAssertEqual(
-            RadioLiteTunerInteractionPolicy.action(isTuning: false, tuneSupported: false),
+            RadioLiteTunerInteractionPolicy.startAction(
+                isTuning: true,
+                isPending: false,
+                tuneSupported: true
+            ),
             .unavailable
         )
+        XCTAssertEqual(
+            RadioLiteTunerInteractionPolicy.startAction(
+                isTuning: false,
+                isPending: true,
+                tuneSupported: true
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            RadioLiteTunerInteractionPolicy.startAction(
+                isTuning: false,
+                isPending: false,
+                tuneSupported: false
+            ),
+            .unavailable
+        )
+        XCTAssertTrue(RadioLiteTunerInteractionPolicy.canEmergencyStop(isTuning: true))
+        XCTAssertFalse(RadioLiteTunerInteractionPolicy.canEmergencyStop(isTuning: false))
+    }
+
+    func testDecodesACompletedTuningLeaseEvent() throws {
+        let completion = try JSONDecoder().decode(
+            RadioLiteActionCompletion.self,
+            from: Data(#"""
+            {
+              "t":"rig.action.completed",
+              "radioId":"main",
+              "id":"action:TUNER",
+              "transmitToken":"tuning-lease-token",
+              "reason":"ptt_off"
+            }
+            """#.utf8)
+        )
+
+        XCTAssertEqual(completion.t, "rig.action.completed")
+        XCTAssertEqual(completion.radioId, "main")
+        XCTAssertEqual(completion.id, "action:TUNER")
+        XCTAssertEqual(completion.transmitToken, "tuning-lease-token")
+        XCTAssertEqual(completion.reason, "ptt_off")
     }
 
     func testSuccessfulTuneStartReflectsThePersistentTunerSwitchWithoutAnotherCATWrite() throws {
