@@ -66,6 +66,8 @@ export type RadioLiteServiceOptions = {
   digitalWorkerFactory?: DigitalWorkerFactory;
   logStore?: AdifLogStore;
   logPath?: string;
+  shutdownDeadlineMs?: number;
+  onShutdownWarning?: (message: string) => void;
 };
 
 type SessionPrincipal = {
@@ -100,6 +102,8 @@ export class RadioLiteService {
   readonly #hardwareDiscovery: HardwareDiscovery;
   readonly #hardwarePreflight: HardwarePreflightRunner;
   readonly #secureCookies: boolean;
+  readonly #shutdownDeadlineMs: number;
+  readonly #onShutdownWarning: (message: string) => void;
   #safetyAuditUnsubscribe: (() => void) | null = null;
   #server: Server | null = null;
   #webSocketServer: WebSocketServer | null = null;
@@ -183,6 +187,13 @@ export class RadioLiteService {
       discover: () => this.#hardwareDiscovery.discover(),
     });
     this.#secureCookies = options.secureCookies === true;
+    this.#shutdownDeadlineMs = options.shutdownDeadlineMs ?? 5_000;
+    if (!Number.isSafeInteger(this.#shutdownDeadlineMs) || this.#shutdownDeadlineMs < 1) {
+      throw new Error("shutdownDeadlineMs must be a positive safe integer");
+    }
+    this.#onShutdownWarning = options.onShutdownWarning ?? ((message) => {
+      process.stderr.write(`${message}\n`);
+    });
   }
 
   get setupCode(): string | null {
@@ -260,7 +271,7 @@ export class RadioLiteService {
     });
     server.requestTimeout = 310_000;
     server.headersTimeout = 300_000;
-    server.keepAliveTimeout = 30_000;
+    server.keepAliveTimeout = 5_000;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, host, () => {
@@ -295,18 +306,47 @@ export class RadioLiteService {
       : new Promise<void>((resolve, reject) => {
           server.close((error) => error === undefined ? resolve() : reject(error));
         });
+    server?.closeIdleConnections();
     const failures: unknown[] = [];
+    try {
+      await this.#runtimes.close();
+    } catch (error) {
+      failures.push(error);
+    }
     for (const operation of [
-      () => this.#runtimes.close(),
       () => this.#digital.close(),
       () => this.#media.close(),
       () => webSocketServerClosing,
-      () => serverClosing,
     ]) {
       try {
         await operation();
       } catch (error) {
         failures.push(error);
+      }
+    }
+    if (server !== null) {
+      server.closeIdleConnections();
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        deadlineTimer = setTimeout(() => {
+          const message = "Radio Lite HTTP shutdown deadline exceeded; forcing active HTTP connections closed.";
+          try {
+            this.#onShutdownWarning(message);
+          } catch {
+            // A logging failure must not block bounded shutdown.
+          }
+          server.closeAllConnections();
+          resolve();
+        }, this.#shutdownDeadlineMs);
+        deadlineTimer.unref();
+      });
+      try {
+        await Promise.race([serverClosing, deadline]);
+        await serverClosing;
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       }
     }
     this.#safetyAuditUnsubscribe?.();
