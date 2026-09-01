@@ -7,45 +7,25 @@ struct RadioLiteRigControlsView: View {
     let hasControl: Bool
 
     var body: some View {
-        VStack(spacing: 14) {
-            if session.radioCapabilitiesAvailable {
-                capabilityHeader
-                let groups = RadioLiteCapabilityGroups(session.radioCapabilities).groups
-                if groups.isEmpty {
-                    unavailablePanel(
-                        title: "没有可显示控件",
-                        description: "当前电台未报告此 App 支持的 Hamlib 控件。"
-                    )
-                } else {
-                    ForEach(groups) { group in
-                        RadioLiteCapabilityGroupView(
-                            group: group,
-                            isTransmitting: isTransmitting,
-                            hasControl: hasControl
-                        )
-                    }
-                }
-            } else {
-                legacyPanel
-            }
-        }
-    }
-
-    private var capabilityHeader: some View {
-        RadioPanel {
-            header(refreshAction: refreshCapabilities)
+        if session.radioCapabilitiesAvailable {
+            RadioLiteControlDashboardView(
+                isTransmitting: isTransmitting,
+                hasControl: hasControl
+            )
+        } else {
+            legacyPanel
         }
     }
 
     private var legacyPanel: some View {
         RadioPanel {
             VStack(alignment: .leading, spacing: 14) {
-                header(refreshAction: refreshLegacyControls)
+                header
                 if generalControls.isEmpty {
                     ContentUnavailableView(
-                        "分组控件不可用",
+                        "兼容控制不可用",
                         systemImage: "dial.low",
-                        description: Text("服务器未提供分组能力描述；仍可使用其报告的兼容 Hamlib 控件。")
+                        description: Text("服务器尚未提供分组能力描述或兼容 Hamlib 控件。")
                     )
                     .frame(maxWidth: .infinity)
                 } else {
@@ -64,51 +44,39 @@ struct RadioLiteRigControlsView: View {
         }
     }
 
-    private func unavailablePanel(title: String, description: String) -> some View {
-        RadioPanel {
-            ContentUnavailableView(
-                title,
-                systemImage: "dial.low",
-                description: Text(description)
-            )
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    private func header(refreshAction: @escaping () async -> Void) -> some View {
+    private var header: some View {
         HStack {
-            Label("Hamlib 控件", systemImage: "slider.horizontal.3")
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("兼容电台控制")
+                    .font(.headline)
+                Text("服务器未提供新版分组控制")
+                    .font(.caption)
+                    .foregroundStyle(RadioPalette.muted)
+            }
             Spacer()
             Button {
-                Task { await refreshAction() }
+                Task { await refreshLegacyControls() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
             .foregroundStyle(RadioPalette.accent)
             .disabled(session.selectedRadioId == nil)
-            .accessibilityLabel("刷新 Hamlib 控件")
+            .accessibilityLabel("刷新兼容电台控制")
         }
     }
 
     private var generalControls: [RadioLiteRigControl] {
-        RadioLiteTunerInteractionPolicy.generalControls(in: session.rigControls)
-    }
-
-    private func refreshCapabilities() async {
-        do {
-            try await session.refreshRadioCapabilities()
-        } catch {
-            session.errorMessage = "读取 Hamlib 分组控件失败：\(error.localizedDescription)"
-        }
+        let meterTokens = Set(["STRENGTH", "SWR", "ALC", "RFPOWER_METER", "RFPOWER_METER_WATTS"])
+        return RadioLiteTunerInteractionPolicy.generalControls(in: session.rigControls)
+            .filter { !meterTokens.contains($0.token.uppercased()) }
     }
 
     private func refreshLegacyControls() async {
         do {
             try await session.refreshRigControls()
         } catch {
-            session.errorMessage = "读取 Hamlib 控件失败：\(error.localizedDescription)"
+            session.errorMessage = "读取兼容电台控制失败：\(error.localizedDescription)"
         }
     }
 }
