@@ -55,6 +55,33 @@ export type RadioRuntimeOptions = {
   ) => Promise<void>;
 };
 
+export type TuningCompletionReason =
+  | "ptt_off"
+  | "hard_limit"
+  | "heartbeat_timeout"
+  | "stopped"
+  | "owner_disconnected"
+  | "runtime_closed";
+
+export type TuningCompletion = Readonly<{
+  radioId: string;
+  ownerId: string;
+  transmitToken: string;
+  reason: TuningCompletionReason;
+}>;
+
+type TuningObservation = {
+  ownerId: string;
+  transmitToken: string;
+  observeAfterMs: number;
+  consecutiveOffSamples: number;
+  completion: Promise<TuningCompletion>;
+  resolve: (completion: TuningCompletion) => void;
+};
+
+const TUNING_STARTUP_GRACE_MS = 500;
+const TUNING_OFF_SAMPLES_REQUIRED = 2;
+
 export class RadioRuntime {
   readonly profile: RadioProfile;
   readonly control: ControlLeaseManager;
@@ -62,6 +89,7 @@ export class RadioRuntime {
   readonly supervisor: RigRuntimeSupervisor;
   readonly telemetry: RadioTelemetrySampler;
   readonly #driver: RadioDriver;
+  readonly #now: () => number;
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
   #initializePromise: Promise<void> | null = null;
@@ -69,6 +97,9 @@ export class RadioRuntime {
   #controlsPromise: Promise<RadioControl[]> | null = null;
   #telemetryClosing: Promise<void> = Promise.resolve();
   #tail: Promise<void> = Promise.resolve();
+  #tuningObservation: TuningObservation | null = null;
+  #lastTuningCompletion: TuningCompletion | null = null;
+  #tuningCheckInFlight = false;
 
   constructor(
     profile: RadioProfile,
@@ -79,6 +110,7 @@ export class RadioRuntime {
   ) {
     this.profile = profile;
     this.#driver = driver;
+    this.#now = now;
     this.telemetry = new RadioTelemetrySampler(profile.id, driver, {
       clock: options.telemetryClock,
       now,
@@ -302,11 +334,30 @@ export class RadioRuntime {
     transmitToken: string,
   ): Promise<TransmitLease> {
     this.control.heartbeat(ownerId, controlToken);
-    return this.supervisor.heartbeat(ownerId, transmitToken);
+    try {
+      return await this.supervisor.heartbeat(ownerId, transmitToken);
+    } catch (error) {
+      if (this.supervisor.snapshot().lease === null) {
+        this.#completeTuning(transmitToken, "heartbeat_timeout");
+      }
+      throw error;
+    }
+  }
+
+  waitForTuningCompletion(transmitToken: string): Promise<TuningCompletion> {
+    const observation = this.#tuningObservation;
+    if (observation?.transmitToken === transmitToken) {
+      return observation.completion;
+    }
+    if (this.#lastTuningCompletion?.transmitToken === transmitToken) {
+      return Promise.resolve(this.#lastTuningCompletion);
+    }
+    return Promise.reject(new InvalidLeaseError("invalid tuning lease"));
   }
 
   async stopTransmit(ownerId: string, transmitToken: string): Promise<void> {
     const outcome = await this.supervisor.stop(ownerId, transmitToken, "released by owner");
+    this.#completeTuning(transmitToken, "stopped");
     if (outcome.kind === "offConfirmed") {
       return;
     }
@@ -321,14 +372,20 @@ export class RadioRuntime {
     throw new InvalidLeaseError("invalid transmit lease");
   }
 
-  stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
-    return this.supervisor.stop(ownerId, transmitToken, "automatic transmit stop");
+  async stopTransmitOutcome(ownerId: string, transmitToken: string): Promise<DeKeyOutcome> {
+    const outcome = await this.supervisor.stop(ownerId, transmitToken, "automatic transmit stop");
+    this.#completeTuning(transmitToken, "stopped");
+    return outcome;
   }
 
   async ownerDisconnected(ownerId: string): Promise<void> {
     try {
       await this.supervisor.ownerDisconnected(ownerId, "control owner disconnected");
     } finally {
+      const observation = this.#tuningObservation;
+      if (observation?.ownerId === ownerId) {
+        this.#completeTuning(observation.transmitToken, "owner_disconnected");
+      }
       this.control.release(ownerId);
     }
   }
@@ -347,6 +404,10 @@ export class RadioRuntime {
       } catch (error) {
         failures.push(error);
       }
+      const observation = this.#tuningObservation;
+      if (observation !== null) {
+        this.#completeTuning(observation.transmitToken, "runtime_closed");
+      }
       try {
         await this.#driver.close();
       } catch (error) {
@@ -364,7 +425,14 @@ export class RadioRuntime {
   }
 
   async #checkSafety(): Promise<void> {
-    await this.supervisor.checkDeadlines().catch(() => undefined);
+    const deadline = await this.supervisor.checkDeadlines().catch(() => null);
+    if (deadline !== null) {
+      const observation = this.#tuningObservation;
+      if (observation !== null) {
+        this.#completeTuning(observation.transmitToken, deadline);
+      }
+      return;
+    }
     const transmitOwner = this.supervisor.snapshot().lease?.ownerId;
     const controlOwner = this.control.snapshot()?.ownerId;
     if (transmitOwner !== undefined && transmitOwner !== controlOwner) {
@@ -372,7 +440,13 @@ export class RadioRuntime {
         transmitOwner,
         "transmit owner lost control authority",
       ).catch(() => undefined);
+      const observation = this.#tuningObservation;
+      if (observation?.ownerId === transmitOwner) {
+        this.#completeTuning(observation.transmitToken, "owner_disconnected");
+      }
+      return;
     }
+    await this.#checkTuningCompletion();
   }
 
   #assertTransmitAdmission(
@@ -432,9 +506,13 @@ export class RadioRuntime {
       profileRevision: 1,
     });
     try {
-      return await this.supervisor.commitTransmitStart(permit, () => {
+      const lease = await this.supervisor.commitTransmitStart(permit, () => {
         this.#assertTransmitAdmission(ownerId, user, controlToken);
       });
+      if (mode === "tuning") {
+        this.#beginTuningObservation(lease);
+      }
+      return lease;
     } catch (error) {
       this.supervisor.abandonTransmitStart(permit, "transmit start failed");
       throw error;
@@ -457,6 +535,91 @@ export class RadioRuntime {
       }
     }
     return this.#controlsById.get(id);
+  }
+
+  #beginTuningObservation(lease: TransmitLease): void {
+    let resolve!: (completion: TuningCompletion) => void;
+    const completion = new Promise<TuningCompletion>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    this.#lastTuningCompletion = null;
+    this.#tuningObservation = {
+      ownerId: lease.ownerId,
+      transmitToken: lease.leaseToken,
+      observeAfterMs: this.#now() + TUNING_STARTUP_GRACE_MS,
+      consecutiveOffSamples: 0,
+      completion,
+      resolve,
+    };
+  }
+
+  async #checkTuningCompletion(): Promise<void> {
+    const observation = this.#tuningObservation;
+    if (
+      observation === null ||
+      this.#tuningCheckInFlight ||
+      this.#now() < observation.observeAfterMs
+    ) {
+      return;
+    }
+    const lease = this.supervisor.snapshot().lease;
+    if (
+      lease?.mode !== "tuning" ||
+      lease.ownerId !== observation.ownerId ||
+      lease.leaseToken !== observation.transmitToken
+    ) {
+      return;
+    }
+
+    this.#tuningCheckInFlight = true;
+    try {
+      let ptt: boolean;
+      try {
+        ptt = await this.#driver.readPtt();
+        this.telemetry.confirmPtt(ptt);
+      } catch {
+        observation.consecutiveOffSamples = 0;
+        return;
+      }
+      if (this.#tuningObservation !== observation) return;
+      const currentLease = this.supervisor.snapshot().lease;
+      if (
+        currentLease?.mode !== "tuning" ||
+        currentLease.ownerId !== observation.ownerId ||
+        currentLease.leaseToken !== observation.transmitToken
+      ) {
+        return;
+      }
+      if (ptt) {
+        observation.consecutiveOffSamples = 0;
+        return;
+      }
+      observation.consecutiveOffSamples += 1;
+      if (observation.consecutiveOffSamples < TUNING_OFF_SAMPLES_REQUIRED) return;
+
+      await this.supervisor.stop(
+        observation.ownerId,
+        observation.transmitToken,
+        "tuning completed after consecutive PTT OFF read-back",
+      );
+      this.#completeTuning(observation.transmitToken, "ptt_off");
+    } finally {
+      this.#tuningCheckInFlight = false;
+    }
+  }
+
+  #completeTuning(transmitToken: string, reason: TuningCompletionReason): void {
+    const observation = this.#tuningObservation;
+    if (observation?.transmitToken !== transmitToken) return;
+    const completion: TuningCompletion = Object.freeze({
+      radioId: this.profile.id,
+      ownerId: observation.ownerId,
+      transmitToken,
+      reason,
+    });
+    this.#tuningObservation = null;
+    this.#lastTuningCompletion = completion;
+    observation.resolve(completion);
   }
 }
 
