@@ -405,6 +405,15 @@ export class HamlibRig {
       try {
         await this.#transport.request("\\set_func TUNER 1");
         this.#tunerSwitchWritable = true;
+        if (tunerSwitchSupport === true) {
+          const confirmed = numericResponseValue(
+            await this.#transport.request("\\get_func TUNER"),
+            "TUNER",
+          ) !== 0;
+          if (!confirmed) {
+            throw new Error("tuner enable read-back mismatch");
+          }
+        }
       } catch (error) {
         if (
           tunerSwitchSupport !== null ||
