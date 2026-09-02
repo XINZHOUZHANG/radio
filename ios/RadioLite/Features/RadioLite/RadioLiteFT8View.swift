@@ -146,6 +146,9 @@ struct RadioLiteFT8View: View {
                         .labelsHidden()
                         .tint(RadioPalette.accent)
                 }
+                if !decodeFeed.displayedBatches.isEmpty {
+                    decodeTableHeader
+                }
                 if decodeFeed.displayedBatches.isEmpty {
                     ContentUnavailableView(
                         "暂无 \(decodeFeed.mode) 解码",
@@ -159,7 +162,7 @@ struct RadioLiteFT8View: View {
                                 Color.clear
                                     .frame(height: 1)
                                     .id(DecodeHistoryAnchor.latest)
-                                LazyVStack(spacing: 12) {
+                                LazyVStack(spacing: 8) {
                                     ForEach(decodeFeed.displayedBatches) { batch in
                                         decodeBatchSection(batch)
                                     }
@@ -185,9 +188,34 @@ struct RadioLiteFT8View: View {
         }
     }
 
+    private var decodeTableHeader: some View {
+        HStack(spacing: 7) {
+            ForEach(RadioLiteFTDecodeTableColumn.allCases) { column in
+                decodeTableHeaderCell(column)
+            }
+        }
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(RadioPalette.muted)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("解码列表列：消息、频率、信噪比、UTC 时差")
+    }
+
+    @ViewBuilder
+    private func decodeTableHeaderCell(_ column: RadioLiteFTDecodeTableColumn) -> some View {
+        switch column {
+        case .message:
+            Text(column.title)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .frequencyHz, .snr, .utcDelta:
+            Text(column.title)
+                .frame(width: column.fixedWidth, alignment: .trailing)
+        }
+    }
+
     private func decodeBatchSection(_ batch: RadioLiteDigitalDecodeBatch) -> some View {
         let decodes = decodeFeed.filteredDecodes(in: batch)
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text(Self.utcSlotFormatter.string(from: slotDate(batch.slotStartMs)))
                     .font(.caption.monospacedDigit().weight(.semibold))
@@ -202,6 +230,8 @@ struct RadioLiteFT8View: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(RadioPalette.muted)
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
             if decodes.isEmpty {
                 Text("此时隙没有符合筛选条件的消息")
                     .font(.caption)
@@ -214,16 +244,26 @@ struct RadioLiteFT8View: View {
                         decodeRow(decode)
                     }
                     .buttonStyle(.plain)
+                    if decode.id != decodes.last?.id {
+                        Divider()
+                            .overlay(Color.white.opacity(0.055))
+                            .padding(.leading, 8)
+                    }
                 }
             }
         }
-        .padding(10)
         .background(
-            RadioPalette.panelRaised.opacity(0.38),
-            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RadioPalette.panelRaised.opacity(0.3),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(RadioPalette.accent.opacity(0.9))
+                .frame(width: 3)
+                .padding(.vertical, 6)
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.045))
         }
     }
@@ -237,43 +277,75 @@ struct RadioLiteFT8View: View {
             from: stationGrid,
             to: message.grid
         )
+        let presentation = RadioLiteFTDecodeRowPresentation(decode: decode)
         let metadata = RadioLiteFTDecodeMetadataFormatter.text(
             sender: message.sender,
             distanceKilometers: distance
         )
-        return HStack(alignment: .top, spacing: 10) {
-            Text(String(format: "%+.0f", decode.snrDb))
-                .font(.caption.monospacedDigit().weight(.bold))
-                .foregroundStyle(tint.opacity(decode.snrDb >= -10 ? 1 : 0.7))
-                .frame(width: 34, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(RadioLiteFTDecodeMessageFormatter.text(decode.message))
-                    .font(.subheadline.monospaced().weight(emphasis == .normal ? .regular : .semibold))
-                    .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.82) : Color.white)
-                    .lineLimit(2)
-                if let metadata {
-                    Text(metadata)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(tint.opacity(emphasis == .normal ? 0.68 : 0.9))
-                        .lineLimit(2)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                ForEach(RadioLiteFTDecodeTableColumn.allCases) { column in
+                    decodeTableCell(
+                        column,
+                        presentation: presentation,
+                        emphasis: emphasis,
+                        tint: tint,
+                        snrDb: decode.snrDb
+                    )
                 }
-                Text("\(decode.audioFrequencyHz) Hz · Δt \(String(format: "%+.1f", decode.deltaTimeSeconds)) s")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(RadioPalette.muted.opacity(0.78))
             }
-            Spacer(minLength: 4)
-            Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
-                .foregroundStyle(selected ? tint : RadioPalette.muted)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            if selected, let metadata {
+                Text(metadata)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(tint.opacity(emphasis == .normal ? 0.72 : 0.92))
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 7)
+            }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 10)
+        .contentShape(Rectangle())
         .background(
             decodeBackground(emphasis, selected: selected),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(selected ? tint.opacity(0.58) : tint.opacity(emphasis == .normal ? 0.04 : 0.22))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityValue(Text(selected ? "已选中" : "未选中"))
+    }
+
+    @ViewBuilder
+    private func decodeTableCell(
+        _ column: RadioLiteFTDecodeTableColumn,
+        presentation: RadioLiteFTDecodeRowPresentation,
+        emphasis: RadioLiteFTMessageEmphasis,
+        tint: Color,
+        snrDb: Double
+    ) -> some View {
+        switch column {
+        case .message:
+            Text(presentation.text(for: column))
+                .font(.caption.monospaced().weight(emphasis == .normal ? .regular : .semibold))
+                .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.84) : Color.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .frequencyHz, .snr, .utcDelta:
+            Text(presentation.text(for: column))
+                .font(.caption2.monospacedDigit().weight(column == .snr ? .bold : .regular))
+                .foregroundStyle(
+                    column == .snr
+                        ? tint.opacity(snrDb >= -10 ? 1 : 0.72)
+                        : RadioPalette.muted.opacity(0.82)
+                )
+                .lineLimit(1)
+                .frame(width: column.fixedWidth, alignment: .trailing)
         }
     }
 
@@ -544,4 +616,58 @@ struct RadioLiteFT8View: View {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+}
+
+enum RadioLiteFTDecodeTableColumn: CaseIterable, Hashable, Identifiable {
+    case message
+    case frequencyHz
+    case snr
+    case utcDelta
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .message: "消息"
+        case .frequencyHz: "Hz"
+        case .snr: "SNR"
+        case .utcDelta: "Δt"
+        }
+    }
+
+    var fixedWidth: CGFloat {
+        switch self {
+        case .message: 0
+        case .frequencyHz: 44
+        case .snr: 34
+        case .utcDelta: 42
+        }
+    }
+}
+
+struct RadioLiteFTDecodeRowPresentation: Equatable {
+    let message: String
+    let frequencyHz: String
+    let snr: String
+    let utcDelta: String
+
+    init(decode: RadioLiteDigitalDecode) {
+        message = RadioLiteFTDecodeMessageFormatter.text(decode.message)
+        frequencyHz = String(decode.audioFrequencyHz)
+        snr = String(format: "%+.0f", decode.snrDb)
+        utcDelta = String(format: "%+.1f", decode.deltaTimeSeconds)
+    }
+
+    func text(for column: RadioLiteFTDecodeTableColumn) -> String {
+        switch column {
+        case .message: message
+        case .frequencyHz: frequencyHz
+        case .snr: snr
+        case .utcDelta: utcDelta
+        }
+    }
+
+    var accessibilityLabel: String {
+        "消息 \(message)，\(frequencyHz) 赫兹，信噪比 \(snr)，UTC 时差 \(utcDelta) 秒"
+    }
 }
