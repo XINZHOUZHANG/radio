@@ -1,0 +1,167 @@
+name: Radio Lite iOS client
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - ios/**
+      - radio-lite-server/**
+      - web/**
+      - deploy/**
+      - scripts/**
+      - .node-version
+      - .github/workflows/ios.yml
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-check:
+    name: server-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: radio-lite-server/package-lock.json
+      - run: npm --prefix radio-lite-server ci
+      - run: npm --prefix radio-lite-server run check
+
+  web-check:
+    name: web-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: npm --prefix web test
+
+  protocol-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: node scripts/check-ios-radio-lite-contract.mjs
+      - run: node scripts/check-radio-control-dashboard.mjs
+
+  xcode-build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/RadioLite/project.yml
+      - name: Select an available iPhone simulator
+        shell: bash
+        run: |
+          xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          payload = json.load(sys.stdin)
+          devices = [
+              device
+              for runtime, values in payload["devices"].items()
+              if "iOS" in runtime
+              for device in values
+              if device.get("isAvailable") and "iPhone" in device.get("name", "")
+          ]
+          if not devices:
+              raise SystemExit("No available iPhone simulator is installed")
+          print("SIMULATOR_UDID=" + devices[0]["udid"])
+          ' >> "$GITHUB_ENV"
+      - name: Build and run XCTest
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/RadioLite/RadioLite.xcodeproj \
+            -scheme RadioLite \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee xcodebuild.log
+      - name: Publish Swift compiler diagnostics
+        if: failure()
+        run: python3 scripts/annotate-xcodebuild.py xcodebuild.log
+
+  unsigned-device-ipa:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ios/RadioLite/project.yml
+      - name: Build unsigned iPhone application
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/RadioLite/RadioLite.xcodeproj \
+            -scheme RadioLite \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/RadioLiteDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            2>&1 | tee xcodebuild-device.log
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/RadioLiteDerivedData/Build/Products/Debug-iphoneos/RadioLite.app"
+          PACKAGE_ROOT="$RUNNER_TEMP/RadioLiteUnsigned"
+          test -d "$APP_PATH"
+          SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
+          BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
+          [[ "$SHORT_VERSION" =~ ^[0-9]+(\.[0-9]+){2}$ ]]
+          [[ "$BUILD_VERSION" =~ ^[1-9][0-9]*$ ]]
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$APP_PATH/Info.plist")" = "true"
+          if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$APP_PATH/Info.plist" >/dev/null 2>&1; then
+            echo "::error::NSAllowsLocalNetworking makes iOS ignore NSAllowsArbitraryLoads"
+            exit 1
+          fi
+          mkdir -p "$PACKAGE_ROOT/Payload"
+          ditto "$APP_PATH" "$PACKAGE_ROOT/Payload/RadioLite.app"
+          (
+            cd "$PACKAGE_ROOT"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" Payload
+          )
+          shasum -a 256 "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa" \
+            > "$GITHUB_WORKSPACE/Radio-Lite-Debug-unsigned.ipa.sha256"
+      - name: Publish unsigned IPA release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build-${{ github.run_number }}
+          files: |
+            Radio-Lite-Debug-unsigned.ipa
+            Radio-Lite-Debug-unsigned.ipa.sha256
+          fail_on_unmatched_files: true
+      - name: Publish Swift compiler diagnostics
+        if: failure() && hashFiles('xcodebuild-device.log') != ''
+        run: python3 scripts/annotate-xcodebuild.py xcodebuild-device.log

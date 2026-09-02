@@ -7,6 +7,7 @@ from remote_radio_server.gateway import (
     GatewayError,
     Principal,
     RigMessageGateway,
+    serialize_capabilities,
     serialize_json_event,
     serialize_lifecycle_event,
     serialize_snapshot,
@@ -125,6 +126,24 @@ class GatewayValidationTests(unittest.IsolatedAsyncioTestCase):
             await self.gateway.handle(
                 self.user, {"type": "rig.snapshot", "extra": "rejected"}
             )
+
+    async def test_rig_capabilities_rejects_extras_and_serializes_ready_session(self):
+        supervisor = _ToggleSupervisor()
+        gateway = RigMessageGateway(supervisor, self.store, _Safety())
+
+        event = await gateway.handle(self.user, {"type": "rig.capabilities"})
+
+        self.assertEqual(serialize_capabilities(supervisor.capabilities), event)
+        with self.assertRaises(GatewayError) as invalid:
+            await gateway.handle(
+                self.user,
+                {"type": "rig.capabilities", "extra": "rejected"},
+            )
+        self.assertEqual("invalid_message", invalid.exception.code)
+
+        with self.assertRaises(GatewayError) as not_ready:
+            await self.gateway.handle(self.user, {"type": "rig.capabilities"})
+        self.assertEqual("not_ready", not_ready.exception.code)
 
     def test_principal_and_request_id_validation_are_strict(self):
         with self.assertRaises(ValueError):

@@ -1,0 +1,8 @@
+.worktrees/
+__pycache__/
+ios/RadioLite/*.xcodeproj/
+ios/RadioLite/DerivedData/
+*.xcuserstate
+xcuserdata/
+radio-lite-server/node_modules/
+radio-lite-server/.npm-cache/

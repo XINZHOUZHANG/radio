@@ -131,6 +131,9 @@ class RigMessageGateway:
         message_type = _required_text(normalized, "type")
         request_id = _possible_request_id(normalized)
         try:
+            if message_type == "rig.capabilities":
+                _exact_fields(normalized, {"type"})
+                return await self.initial_event()
             if message_type == "rig.snapshot":
                 _exact_fields(normalized, {"type"})
                 return serialize_snapshot(self._state_store.snapshot())

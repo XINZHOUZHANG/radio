@@ -8,34 +8,52 @@ from math import isfinite
 @dataclass(frozen=True, slots=True)
 class RigctldConfig:
     model_id: int
-    device: str
+    device: str | None
     baud: int | None = None
     host: str = "127.0.0.1"
     port: int = 4532
     hardware_tx_enabled: bool = False
+    public_dummy_test: bool = False
 
 
 def build_rigctld_args(config: RigctldConfig) -> list[str]:
     if not isinstance(config, RigctldConfig):
         raise TypeError("config must be a RigctldConfig")
     _positive_integer(config.model_id, "model_id")
-    if not isinstance(config.device, str):
-        raise TypeError("device must be text")
-    if not config.device.strip():
-        raise ValueError("device must be non-empty text")
-    if any(character in config.device for character in "\r\n\0"):
-        raise ValueError("device contains a prohibited control character")
-    if config.baud is not None:
-        _positive_integer(config.baud, "baud")
-    if config.host != "127.0.0.1":
-        raise ValueError("rigctld host must be exactly 127.0.0.1")
     _positive_integer(config.port, "port")
     if config.port > 65535:
         raise ValueError("port must be in the range 1..65535")
     if type(config.hardware_tx_enabled) is not bool:
         raise TypeError("hardware_tx_enabled must be a boolean")
+    if type(config.public_dummy_test) is not bool:
+        raise TypeError("public_dummy_test must be a boolean")
 
-    args = ["rigctld", "-m", str(config.model_id), "-r", config.device]
+    if config.public_dummy_test:
+        if config.model_id != 1:
+            raise ValueError("public Dummy mode requires Hamlib model 1")
+        if config.device is not None:
+            raise ValueError("public Dummy mode does not accept a device")
+        if config.baud is not None:
+            raise ValueError("public Dummy mode does not accept a baud rate")
+        if config.host != "0.0.0.0":
+            raise ValueError("public Dummy mode requires host 0.0.0.0")
+        if config.hardware_tx_enabled:
+            raise ValueError("public Dummy mode forbids hardware TX")
+    else:
+        if not isinstance(config.device, str):
+            raise TypeError("device must be text")
+        if not config.device.strip():
+            raise ValueError("device must be non-empty text")
+        if any(character in config.device for character in "\r\n\0"):
+            raise ValueError("device contains a prohibited control character")
+        if config.baud is not None:
+            _positive_integer(config.baud, "baud")
+        if config.host != "127.0.0.1":
+            raise ValueError("rigctld host must be exactly 127.0.0.1")
+
+    args = ["rigctld", "-m", str(config.model_id)]
+    if config.device is not None:
+        args.extend(("-r", config.device))
     if config.baud is not None:
         args.extend(("-s", str(config.baud)))
     args.extend(("-T", config.host, "-t", str(config.port)))

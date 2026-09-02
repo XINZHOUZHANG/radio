@@ -154,6 +154,39 @@ class RemoteRadioServerValidationTests(unittest.TestCase):
                         _validated_args(argv)
 
 
+class RemoteRadioServerListenerPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_ipv4_bind_requires_explicit_exact_boolean_policy(self):
+        for policy in (False, 1, "yes"):
+            server = RemoteRadioServer(object(), {"phone": "secret"})
+            with self.subTest(policy=policy), self.assertRaises((TypeError, ValueError)):
+                await server.serve(
+                    host="0.0.0.0",
+                    port=0,
+                    allow_non_loopback=policy,
+                )
+
+        server = RemoteRadioServer(object(), {"phone": "secret"})
+        try:
+            await server.serve(
+                host="0.0.0.0",
+                port=0,
+                allow_non_loopback=True,
+            )
+            self.assertGreater(server.port, 0)
+        finally:
+            await server.close()
+
+    async def test_public_policy_does_not_admit_arbitrary_hosts(self):
+        for host in ("::", "localhost", "127.0.0.2"):
+            server = RemoteRadioServer(object(), {"phone": "secret"})
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                await server.serve(
+                    host=host,
+                    port=0,
+                    allow_non_loopback=True,
+                )
+
+
 class RemoteRadioServerConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_large_buffered_frame_yields_to_ready_safety_work(self):
         """Removing the receive checkpoint must starve already-ready safety work."""

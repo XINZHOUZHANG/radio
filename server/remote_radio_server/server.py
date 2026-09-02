@@ -179,9 +179,19 @@ class RemoteRadioServer:
     def authenticated_client_count(self) -> int:
         return sum(connection.principal is not None for connection in self._connections)
 
-    async def serve(self, *, host: str = "127.0.0.1", port: int = 8765) -> None:
-        if host != "127.0.0.1":
-            raise ValueError("WebSocket host must be exactly 127.0.0.1")
+    async def serve(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        allow_non_loopback: bool = False,
+    ) -> None:
+        if type(allow_non_loopback) is not bool:
+            raise TypeError("allow_non_loopback must be a boolean")
+        if host not in {"127.0.0.1", "0.0.0.0"}:
+            raise ValueError("WebSocket host is unsupported")
+        if host == "0.0.0.0" and not allow_non_loopback:
+            raise ValueError("public WebSocket binding requires explicit policy")
         if type(port) is not int:
             raise TypeError("WebSocket port must be an integer")
         if not 0 <= port <= 65535:

@@ -44,6 +44,34 @@ Either flag alone is rejected before a listener, connection, serial device, or
 subprocess starts. These flags are operator acknowledgement, not a safety
 certification. Do not enable them merely to make a test pass.
 
+## Public Dummy acceptance boundary
+
+`--public-dummy-test` is a deliberately plaintext, test-only topology. It binds
+HTTP `8080`, authenticated WebSocket `8765`, and unauthenticated Hamlib
+`rigctld` `4532` to `0.0.0.0`. Any host that can reach the Debian machine can
+attempt those ports unless the operator restricts the surrounding network or
+firewall. The temporary WebSocket token does **not** protect port `4532`.
+
+The mode is permitted only because its owned child is the official Hamlib Dummy
+with exact model ID `1`, no device, no baud rate, and hardware TX disabled. The
+launcher rejects every physical-model/device shape. The Python control plane
+connects to the child through loopback, verifies model ID `1`, and opens the
+browser-facing listeners only after that identity reaches READY.
+
+The dashboard contains no PTT action, and its PTT control is permanently
+disabled. A manually crafted authenticated WebSocket lease/PTT-on sequence is
+rejected with `hardware_tx_disabled`. A client that bypasses the application
+and connects directly to public port `4532` can change the Dummy's simulated
+frequency, mode, or PTT state because `rigctld` has no application
+authentication; it still cannot reach a radio, serial port, tuner, antenna, or
+RF path in this mode.
+
+Do not point this mode at real hardware, forward it as a production service, or
+interpret successful browser acceptance as authorization to transmit. Audio,
+FT8, external-tuner sequencing, rotor control, TLS, station authorization, and
+iOS packaging remain outside this acceptance slice. The unresolved C1, C3, and
+I3 review findings continue to block real-hardware transmission.
+
 ## FT-710 operator acceptance with a dummy load
 
 Real FT-710 transmission is deliberately outside automated acceptance. A
