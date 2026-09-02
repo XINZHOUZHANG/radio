@@ -15,7 +15,7 @@ import {
 } from "./call-queue.ts";
 import { DigitalDecodeStore } from "./decode-store.ts";
 import { UtcSlotScheduler } from "./slot-scheduler.ts";
-import { oppositeSlotParity, slotParityAt } from "./slots.ts";
+import { oppositeSlotParity, slotDurationMs, slotParityAt } from "./slots.ts";
 import type {
   DigitalDecodeBatch,
   DigitalDecodeBatchInput,
@@ -72,6 +72,10 @@ export type DigitalRadioControllerOptions = {
   now?: () => number;
   requestIdFactory?: () => string;
   heartbeatIntervalMs?: number;
+  scheduleTimeout?: (
+    callback: () => void | Promise<void>,
+    delayMs: number,
+  ) => () => void;
   onEvent?: (event: DigitalControllerEvent) => void;
 };
 
@@ -88,6 +92,17 @@ type ActiveTransmission = {
   abort: AbortController;
 };
 
+type ReceiveSlotWatchdog = {
+  generation: number;
+  queueEntryId: string;
+  mode: "FT8" | "FT4";
+  receiveSlotStartMs: number;
+  deadlineMs: number;
+  cancel: () => void;
+};
+
+const RECEIVE_SLOT_WATCHDOG_GRACE_MS = 500;
+
 export class DigitalRadioController {
   readonly #profile: RadioProfile;
   readonly #runtime: () => Promise<RadioRuntime>;
@@ -99,12 +114,18 @@ export class DigitalRadioController {
   readonly #now: () => number;
   readonly #requestIdFactory: () => string;
   readonly #heartbeatIntervalMs: number;
+  readonly #scheduleTimeout: (
+    callback: () => void | Promise<void>,
+    delayMs: number,
+  ) => () => void;
   readonly #onEvent: (event: DigitalControllerEvent) => void;
   readonly #contexts = new Map<string, EntryContext>();
   #session: AutoQsoSession | null = null;
   #lastTransmissionSlotMs: number | null = null;
   #preparedGeneration = 0;
   #activeTransmission: ActiveTransmission | null = null;
+  #receiveSlotWatchdog: ReceiveSlotWatchdog | null = null;
+  #receiveSlotWatchdogGeneration = 0;
   #initialized = false;
   #closed = false;
   #workerFaulted = false;
@@ -126,6 +147,11 @@ export class DigitalRadioController {
       250,
       5_000,
     );
+    this.#scheduleTimeout = options.scheduleTimeout ?? ((callback, delayMs) => {
+      const timer = setTimeout(() => { void callback(); }, delayMs);
+      timer.unref();
+      return () => clearTimeout(timer);
+    });
     this.#onEvent = options.onEvent ?? (() => undefined);
     this.#scheduler = options.scheduler ?? new UtcSlotScheduler({
       now: this.#now,
@@ -269,6 +295,7 @@ export class DigitalRadioController {
         }
       }
       if (accepted) {
+        this.#cancelReceiveSlotWatchdog();
         this.#emitQso();
         await this.#prepareNextTransmission();
         return committed;
@@ -282,6 +309,7 @@ export class DigitalRadioController {
         committed.slotStartMs > this.#lastTransmissionSlotMs &&
         (snapshot.phase === "awaiting_report" || snapshot.phase === "awaiting_final")
       ) {
+        this.#cancelReceiveSlotWatchdog();
         const afterTimeout = session.receiveSlotClosed(committed.receivedAtMs);
         this.#emitQso();
         if (afterTimeout.phase === "failed") {
@@ -330,6 +358,7 @@ export class DigitalRadioController {
     }
     this.#closed = true;
     this.#preparedGeneration += 1;
+    this.#cancelReceiveSlotWatchdog();
     this.#scheduler.cancel();
     this.#session?.stop(this.#now());
     this.#activeTransmission?.abort.abort();
@@ -516,6 +545,11 @@ export class DigitalRadioController {
       this.#lastTransmissionSlotMs = slotStartMs;
       const state = session.recordTransmission(slotStartMs, this.#now());
       this.#emitQso();
+      if (state.phase === "awaiting_report" || state.phase === "awaiting_final") {
+        this.#armReceiveSlotWatchdog(state, slotStartMs);
+      } else {
+        this.#cancelReceiveSlotWatchdog();
+      }
       if (state.phase === "complete") {
         const saved = await this.#logStore.append(session.toLogRecord());
         this.#onEvent({
@@ -567,6 +601,7 @@ export class DigitalRadioController {
       return null;
     }
     this.#preparedGeneration += 1;
+    this.#cancelReceiveSlotWatchdog();
     this.#scheduler.cancel();
     this.#activeTransmission?.abort.abort();
     await this.#worker.stopTransmission().catch(() => undefined);
@@ -599,6 +634,7 @@ export class DigitalRadioController {
     }
     const snapshot = session.snapshot();
     this.#preparedGeneration += 1;
+    this.#cancelReceiveSlotWatchdog();
     this.#scheduler.cancel();
     this.#queue.finishActive();
     this.#contexts.delete(snapshot.queueEntryId);
@@ -616,6 +652,7 @@ export class DigitalRadioController {
     }
     this.#workerFaulted = true;
     this.#preparedGeneration += 1;
+    this.#cancelReceiveSlotWatchdog();
     this.#scheduler.cancel();
     this.#activeTransmission?.abort.abort();
     await this.#worker.stopTransmission().catch(() => undefined);
@@ -654,6 +691,71 @@ export class DigitalRadioController {
       this.#emitError("digital_ptt_off_failed", error);
       throw error;
     }
+  }
+
+  #armReceiveSlotWatchdog(snapshot: AutoQsoSnapshot, transmitSlotStartMs: number): void {
+    this.#cancelReceiveSlotWatchdog();
+    const durationMs = slotDurationMs(snapshot.mode);
+    const receiveSlotStartMs = transmitSlotStartMs + durationMs;
+    const deadlineMs = receiveSlotStartMs + durationMs + RECEIVE_SLOT_WATCHDOG_GRACE_MS;
+    const generation = ++this.#receiveSlotWatchdogGeneration;
+    const watchdog: ReceiveSlotWatchdog = {
+      generation,
+      queueEntryId: snapshot.queueEntryId,
+      mode: snapshot.mode,
+      receiveSlotStartMs,
+      deadlineMs,
+      cancel: () => undefined,
+    };
+    this.#receiveSlotWatchdog = watchdog;
+    watchdog.cancel = this.#scheduleTimeout(
+      () => this.#serialize(() => this.#handleReceiveSlotWatchdog(generation))
+        .catch((error) => this.#emitError("receive_slot_watchdog_failed", error)),
+      Math.max(0, deadlineMs - Math.trunc(this.#now())),
+    );
+  }
+
+  async #handleReceiveSlotWatchdog(generation: number): Promise<void> {
+    const watchdog = this.#receiveSlotWatchdog;
+    if (
+      watchdog === null ||
+      watchdog.generation !== generation ||
+      this.#closed ||
+      this.#workerFaulted
+    ) {
+      return;
+    }
+    this.#receiveSlotWatchdog = null;
+    watchdog.cancel();
+    const session = this.#session;
+    const snapshot = session?.snapshot();
+    if (
+      session === null ||
+      snapshot === undefined ||
+      snapshot.queueEntryId !== watchdog.queueEntryId ||
+      snapshot.mode !== watchdog.mode ||
+      (snapshot.phase !== "awaiting_report" && snapshot.phase !== "awaiting_final")
+    ) {
+      return;
+    }
+    const afterTimeout = session.receiveSlotClosed(
+      Math.max(watchdog.deadlineMs, Math.trunc(this.#now())),
+    );
+    this.#emitQso();
+    if (afterTimeout.phase === "failed") {
+      await this.#finishFailedSession();
+    } else {
+      await this.#prepareNextTransmission();
+    }
+  }
+
+  #cancelReceiveSlotWatchdog(): void {
+    const watchdog = this.#receiveSlotWatchdog;
+    if (watchdog === null) {
+      return;
+    }
+    this.#receiveSlotWatchdog = null;
+    watchdog.cancel();
   }
 
   #emitQueue(): void {

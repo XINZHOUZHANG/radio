@@ -23,6 +23,7 @@ test("automatic digital controller uses the interlock and logs one completed FT8
   await runtime.initialize();
   const acquired = await runtime.acquireControl("connection:one", user(), false);
   const scheduler = new ManualSlotScheduler([45_000, 75_000, 105_000]);
+  const watchdog = new ManualWatchdogTimer();
   const worker = new DummyDigitalWorker({ playbackDelayMs: 0 });
   const events: string[] = [];
   const controller = new DigitalRadioController({
@@ -31,6 +32,7 @@ test("automatic digital controller uses the interlock and logs one completed FT8
     worker,
     logStore: log,
     scheduler,
+    scheduleTimeout: (callback, delayMs) => watchdog.schedule(callback, delayMs),
     now: () => now,
     requestIdFactory: () => "encode_1",
     onEvent: (event) => events.push(event.t),
@@ -56,6 +58,7 @@ test("automatic digital controller uses the interlock and logs one completed FT8
   await scheduler.fire();
   assert.equal(controller.qsoSnapshot()?.phase, "awaiting_report");
   assert.equal(rig.ptt, false);
+  assert.equal(watchdog.armed, true);
 
   await controller.acceptDecoded({
     radioId: "main",
@@ -69,11 +72,13 @@ test("automatic digital controller uses the interlock and logs one completed FT8
       audioFrequencyHz: 1_300,
     }],
   });
+  assert.equal(watchdog.armed, false, "an accepted decode must cancel the receive watchdog");
   now = 69_000;
   runtime.heartbeatControl("connection:one", acquired.lease.token);
   now = 87_640;
   await scheduler.fire();
   assert.equal(controller.qsoSnapshot()?.phase, "awaiting_final");
+  assert.equal(watchdog.armed, true);
 
   await controller.acceptDecoded({
     radioId: "main",
@@ -87,6 +92,7 @@ test("automatic digital controller uses the interlock and logs one completed FT8
       audioFrequencyHz: 1_300,
     }],
   });
+  assert.equal(watchdog.armed, false, "a final decode must cancel the receive watchdog");
   now = 98_000;
   runtime.heartbeatControl("connection:one", acquired.lease.token);
   now = 117_640;
@@ -102,6 +108,108 @@ test("automatic digital controller uses the interlock and logs one completed FT8
     true, false,
   ]);
   assert.equal(events.filter((event) => event === "digital.log.created").length, 1);
+});
+
+test("receive-slot watchdog retries when capture produces no decode batch", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-watchdog-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000, 105_000]);
+  const watchdog = new ManualWatchdogTimer();
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker: new DummyDigitalWorker({ playbackDelayMs: 0 }),
+    logStore: log,
+    scheduler,
+    scheduleTimeout: (callback, delayMs) => watchdog.schedule(callback, delayMs),
+    now: () => now,
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+
+  now = 57_640;
+  await scheduler.fire();
+  assert.equal(controller.qsoSnapshot()?.phase, "awaiting_report");
+  assert.equal(watchdog.delayMs, 17_860, "watchdog must wait through the receive slot and grace");
+
+  now = 75_500;
+  await watchdog.fire();
+  assert.equal(controller.qsoSnapshot()?.phase, "calling");
+  assert.equal(controller.qsoSnapshot()?.callAttempts, 1);
+  assert.equal(scheduler.armedSlotStartMs, 105_000, "fallback retry uses the next TX-parity slot");
+});
+
+test("an empty receive batch cancels the watchdog before scheduling the adjacent retry", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-digital-empty-batch-"));
+  const log = new AdifLogStore(join(directory, "station-log.adif"));
+  await log.load();
+  let now = 40_000;
+  const rig = new DigitalFakeRig();
+  const runtime = new RadioRuntime(profile(), rig, async () => undefined, () => now);
+  await runtime.initialize();
+  const account = user();
+  const acquired = await runtime.acquireControl("connection:one", account, false);
+  const scheduler = new ManualSlotScheduler([45_000, 75_000]);
+  const watchdog = new ManualWatchdogTimer();
+  const controller = new DigitalRadioController({
+    profile: profile(),
+    runtime: async () => runtime,
+    worker: new DummyDigitalWorker({ playbackDelayMs: 0 }),
+    logStore: log,
+    scheduler,
+    scheduleTimeout: (callback, delayMs) => watchdog.schedule(callback, delayMs),
+    now: () => now,
+  });
+  context.after(async () => {
+    await controller.close();
+    await runtime.close();
+  });
+  await controller.initialize();
+  await controller.enqueueManual(
+    { ownerId: "connection:one", controlToken: acquired.lease.token, user: account },
+    {
+      targetCallsign: "JA1ABC",
+      mode: "FT8",
+      audioFrequencyHz: 1_300,
+      txParity: "odd",
+    },
+  );
+
+  now = 57_640;
+  await scheduler.fire();
+  assert.equal(watchdog.armed, true);
+  now = 73_700;
+  await controller.acceptDecoded({
+    radioId: "main",
+    mode: "FT8",
+    slotStartMs: 60_000,
+    receivedAtMs: 75_000,
+    frames: [],
+  });
+
+  assert.equal(watchdog.armed, false);
+  assert.equal(controller.qsoSnapshot()?.phase, "calling");
+  assert.equal(scheduler.armedSlotStartMs, 75_000);
+  await assert.rejects(watchdog.fire(), /no armed watchdog/u);
 });
 
 test("controller skip, remove and stop cancel prepared slots without keying the radio", async (context) => {
@@ -424,6 +532,43 @@ class ManualSlotScheduler implements DigitalSlotScheduler {
       throw new Error("test scheduler has no armed slot");
     }
     await callback(slot);
+  }
+
+  get armedSlotStartMs(): number | null {
+    return this.#slotStartMs;
+  }
+}
+
+class ManualWatchdogTimer {
+  #callback: (() => void | Promise<void>) | null = null;
+  delayMs: number | null = null;
+
+  schedule(callback: () => void | Promise<void>, delayMs: number): () => void {
+    if (this.#callback !== null) {
+      throw new Error("test watchdog is already armed");
+    }
+    this.#callback = callback;
+    this.delayMs = delayMs;
+    return () => {
+      if (this.#callback === callback) {
+        this.#callback = null;
+        this.delayMs = null;
+      }
+    };
+  }
+
+  async fire(): Promise<void> {
+    const callback = this.#callback;
+    this.#callback = null;
+    this.delayMs = null;
+    if (callback === null) {
+      throw new Error("test watchdog has no armed watchdog");
+    }
+    await callback();
+  }
+
+  get armed(): boolean {
+    return this.#callback !== null;
   }
 }
 
