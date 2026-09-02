@@ -13,6 +13,7 @@ export type PcmSlotAssemblerOptions = {
   mode: DigitalMode;
   sampleRate?: number;
   maxMissingMs?: number;
+  emitAfterMs?: number;
   onSlot(slot: CompletedPcmSlot): void;
 };
 
@@ -22,6 +23,7 @@ type ActiveSlot = {
   firstWritten: number;
   lastWritten: number;
   internalMissing: number;
+  emitted: boolean;
 };
 
 /** Aligns continuous PCM to exact FT8/FT4 UTC slots without trusting pipe chunk boundaries. */
@@ -29,6 +31,7 @@ export class UtcPcmSlotAssembler {
   readonly #mode: DigitalMode;
   readonly #sampleRate: number;
   readonly #slotSamples: number;
+  readonly #emitAfterSamples: number;
   readonly #maxMissingSamples: number;
   readonly #onSlot: (slot: CompletedPcmSlot) => void;
   #active: ActiveSlot | null = null;
@@ -36,7 +39,10 @@ export class UtcPcmSlotAssembler {
   constructor(options: PcmSlotAssemblerOptions) {
     this.#mode = options.mode;
     this.#sampleRate = safeSampleRate(options.sampleRate ?? 12_000);
-    this.#slotSamples = Math.round(slotDurationMs(this.#mode) * this.#sampleRate / 1_000);
+    const slotMs = slotDurationMs(this.#mode);
+    this.#slotSamples = Math.round(slotMs * this.#sampleRate / 1_000);
+    const emitAfterMs = finiteRange(options.emitAfterMs ?? slotMs, "emitAfterMs", 1, slotMs);
+    this.#emitAfterSamples = Math.round(emitAfterMs * this.#sampleRate / 1_000);
     const maxMissingMs = finiteRange(options.maxMissingMs ?? 150, "maxMissingMs", 0, 1_000);
     this.#maxMissingSamples = Math.round(maxMissingMs * this.#sampleRate / 1_000);
     this.#onSlot = options.onSlot;
@@ -81,6 +87,7 @@ export class UtcPcmSlotAssembler {
       active.pcm.set(pcm.subarray(sourceOffset, sourceOffset + count), targetOffset);
       active.firstWritten = Math.min(active.firstWritten, targetOffset);
       active.lastWritten = Math.max(active.lastWritten, targetOffset + count);
+      this.#emitEarlyIfReady(active);
       sourceOffset += count;
       absoluteTick += count;
       if (active.lastWritten >= this.#slotSamples) {
@@ -100,13 +107,25 @@ export class UtcPcmSlotAssembler {
       firstWritten: this.#slotSamples,
       lastWritten: -1,
       internalMissing: 0,
+      emitted: false,
     };
+  }
+
+  #emitEarlyIfReady(active: ActiveSlot): void {
+    if (
+      active.emitted ||
+      active.lastWritten < this.#emitAfterSamples ||
+      active.firstWritten + active.internalMissing > this.#maxMissingSamples
+    ) {
+      return;
+    }
+    this.#emit(active);
   }
 
   #finishActive(): void {
     const active = this.#active;
     this.#active = null;
-    if (active === null || active.lastWritten < 0) {
+    if (active === null || active.lastWritten < 0 || active.emitted) {
       return;
     }
     const leadingMissing = active.firstWritten;
@@ -114,13 +133,18 @@ export class UtcPcmSlotAssembler {
     if (leadingMissing + active.internalMissing + trailingMissing > this.#maxMissingSamples) {
       return;
     }
+    this.#emit(active);
+  }
+
+  #emit(active: ActiveSlot): void {
+    active.emitted = true;
     const slotStartMs = Math.round(active.startTick * 1_000 / this.#sampleRate);
     this.#onSlot({
       mode: this.#mode,
       slotStartMs,
       slotEndMs: slotStartMs + slotDurationMs(this.#mode),
       sampleRate: this.#sampleRate,
-      pcm: active.pcm,
+      pcm: active.pcm.slice(),
     });
   }
 }

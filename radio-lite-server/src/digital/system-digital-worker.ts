@@ -89,6 +89,7 @@ export class SystemDigitalWorker implements DigitalWorker {
       new UtcPcmSlotAssembler({
         mode,
         sampleRate: DSP_SAMPLE_RATE,
+        emitAfterMs: mode === "FT8" ? 13_000 : 6_000,
         onSlot: (slot) => this.#enqueueDecode(slot),
       }),
     );
@@ -205,7 +206,7 @@ export class SystemDigitalWorker implements DigitalWorker {
     if (resampler === null || outputStartMs === null) {
       throw new Error("digital PCM resampler could not initialize");
     }
-    const resampled = resampler.push(input);
+    const resampled = value.sampleRate === DSP_SAMPLE_RATE ? input : resampler.push(input);
     this.#expectedCaptureStartMs = value.startedAtMs + durationMs;
     this.#nextResampledStartMs = outputStartMs + resampled.length * 1_000 / DSP_SAMPLE_RATE;
     if (resampled.length === 0) {

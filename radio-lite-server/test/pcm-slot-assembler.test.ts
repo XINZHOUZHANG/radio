@@ -45,3 +45,29 @@ test("UTC assembler fills a small capture gap with silence but rejects a large g
   assembler.push(new Int16Array(4_000), 11_000);
   assert.equal(completed.length, 1);
 });
+
+test("UTC assembler emits one immutable zero-padded decode window before the slot ends", () => {
+  const completed: CompletedPcmSlot[] = [];
+  const assembler = new UtcPcmSlotAssembler({
+    mode: "FT8",
+    sampleRate: 1_000,
+    maxMissingMs: 100,
+    emitAfterMs: 13_000,
+    onSlot: (slot) => completed.push(slot),
+  });
+
+  assembler.push(new Int16Array(12_999).fill(6), 0);
+  assert.equal(completed.length, 0);
+  assembler.push(new Int16Array([7]), 12_999);
+
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].slotStartMs, 0);
+  assert.equal(completed[0].slotEndMs, 15_000);
+  assert.equal(completed[0].pcm.length, 15_000);
+  assert.equal(completed[0].pcm[12_999], 7);
+  assert.equal(completed[0].pcm[13_000], 0);
+
+  assembler.push(new Int16Array(2_000).fill(8), 13_000);
+  assert.equal(completed.length, 1, "the remaining audio cannot emit the same slot twice");
+  assert.equal(completed[0].pcm[13_000], 0, "later writes cannot mutate emitted PCM");
+});
