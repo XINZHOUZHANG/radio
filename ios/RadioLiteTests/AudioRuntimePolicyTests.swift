@@ -331,6 +331,13 @@ final class AudioRuntimePolicyTests: XCTestCase {
         XCTAssertEqual(queue.scheduledBuffers, 12)
     }
 
+    func testReceivePlaybackQueueUsesDevicePlayedBackCompletion() {
+        XCTAssertEqual(
+            RadioLitePlaybackQueueState.receiveCompletionCallbackType,
+            .dataPlayedBack
+        )
+    }
+
     func testLocalPTTReleaseResumesPlaybackWithoutWaitingForRemoteStopDispatch() {
         var gate = RadioLitePlaybackSuspensionState()
 

@@ -270,6 +270,8 @@ struct RadioLiteCaptureEpochState: Equatable, Sendable {
 }
 
 struct RadioLitePlaybackQueueState: Equatable, Sendable {
+    static let receiveCompletionCallbackType: AVAudioPlayerNodeCompletionCallbackType = .dataPlayedBack
+
     let targetBuffers: Int
     let maximumBuffers: Int
     private(set) var scheduledBuffers = 0
@@ -480,7 +482,10 @@ final class RadioLiteAudioEngine: ObservableObject {
                 return false
             }
             receivedPackets &+= 1
-            player.scheduleBuffer(buffer) { [weak self] in
+            player.scheduleBuffer(
+                buffer,
+                completionCallbackType: RadioLitePlaybackQueueState.receiveCompletionCallbackType
+            ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.playbackQueue.complete(generation: queueGeneration)
                 }
