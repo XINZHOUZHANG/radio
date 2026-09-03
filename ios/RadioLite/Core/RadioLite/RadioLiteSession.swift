@@ -1772,7 +1772,13 @@ final class RadioLiteSession: ObservableObject {
         guard let http else { throw RadioLiteSessionError.notConnected }
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
-        let result = try await http.importADIF(Data(contentsOf: url))
+        // Keep the security scope alive while the detached task reads the selected file.
+        // mappedIfSafe avoids an unnecessary copy for large local documents and keeps the
+        // synchronous file read off the main actor.
+        let data = try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url, options: [.mappedIfSafe])
+        }.value
+        let result = try await http.importADIF(data)
         await refreshLogs()
         return (result.imported, result.duplicates)
     }
