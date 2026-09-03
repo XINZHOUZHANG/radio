@@ -3,6 +3,7 @@ import SwiftUI
 struct RadioLiteFT8View: View {
     @EnvironmentObject private var session: RadioLiteSession
     @EnvironmentObject private var media: RadioLiteMediaClient
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var decodeFeed = RadioLiteDecodeFeedState()
     @State private var manualCall = ""
     @State private var manualGrid = ""
@@ -146,7 +147,7 @@ struct RadioLiteFT8View: View {
                         .labelsHidden()
                         .tint(RadioPalette.accent)
                 }
-                if !decodeFeed.displayedBatches.isEmpty {
+                if !decodeFeed.displayedBatches.isEmpty && !isCompactDecodeLayout {
                     decodeTableHeader
                 }
                 if decodeFeed.displayedBatches.isEmpty {
@@ -162,7 +163,7 @@ struct RadioLiteFT8View: View {
                                 Color.clear
                                     .frame(height: 1)
                                     .id(DecodeHistoryAnchor.latest)
-                                LazyVStack(spacing: 8) {
+                                LazyVStack(spacing: isCompactDecodeLayout ? 2 : 8) {
                                     ForEach(decodeFeed.displayedBatches) { batch in
                                         decodeBatchSection(batch)
                                     }
@@ -230,8 +231,8 @@ struct RadioLiteFT8View: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(RadioPalette.muted)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+            .padding(.horizontal, isCompactDecodeLayout ? 4 : 9)
+            .padding(.vertical, isCompactDecodeLayout ? 4 : 7)
             if decodes.isEmpty {
                 Text("此时隙没有符合筛选条件的消息")
                     .font(.caption)
@@ -253,25 +254,32 @@ struct RadioLiteFT8View: View {
             }
         }
         .background(
-            RadioPalette.panelRaised.opacity(0.3),
+            isCompactDecodeLayout ? Color.clear : RadioPalette.panelRaised.opacity(0.3),
             in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
         .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                .fill(RadioPalette.accent.opacity(0.9))
-                .frame(width: 3)
-                .padding(.vertical, 6)
+            if !isCompactDecodeLayout {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(RadioPalette.accent.opacity(0.9))
+                    .frame(width: 3)
+                    .padding(.vertical, 6)
+            }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.045))
+            if !isCompactDecodeLayout {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.045))
+            }
         }
     }
 
     private func decodeRow(_ decode: RadioLiteDigitalDecode) -> some View {
         let selected = decodeFeed.selectedDecodeId == decode.id
         let message = RadioLiteFTMessage.parse(decode.message)
-        let emphasis = message.emphasis(myCallsign: stationCallsign)
+        let emphasis = message.emphasis(
+            myCallsign: stationCallsign,
+            workedCallsigns: workedCallsigns
+        )
         let tint = decodeTint(emphasis)
         let distance = RadioLiteMaidenheadDistance.kilometers(
             from: stationGrid,
@@ -283,26 +291,46 @@ struct RadioLiteFT8View: View {
             distanceKilometers: distance
         )
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                ForEach(RadioLiteFTDecodeTableColumn.allCases) { column in
-                    decodeTableCell(
-                        column,
-                        presentation: presentation,
-                        emphasis: emphasis,
-                        tint: tint,
-                        snrDb: decode.snrDb
-                    )
+            if isCompactDecodeLayout {
+                decodeTableCell(
+                    .message,
+                    presentation: presentation,
+                    emphasis: emphasis,
+                    tint: tint,
+                    snrDb: decode.snrDb
+                )
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+                Text(RadioLiteFTDecodeCompactMetadataFormatter.text(decode: decode))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(RadioPalette.muted.opacity(0.82))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .allowsTightening(true)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    ForEach(RadioLiteFTDecodeTableColumn.allCases) { column in
+                        decodeTableCell(
+                            column,
+                            presentation: presentation,
+                            emphasis: emphasis,
+                            tint: tint,
+                            snrDb: decode.snrDb
+                        )
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
             if selected, let metadata {
                 Text(metadata)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(tint.opacity(emphasis == .normal ? 0.72 : 0.92))
                     .lineLimit(1)
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 7)
+                    .padding(.horizontal, isCompactDecodeLayout ? 4 : 8)
+                    .padding(.bottom, isCompactDecodeLayout ? 4 : 7)
             }
         }
         .contentShape(Rectangle())
@@ -311,9 +339,20 @@ struct RadioLiteFT8View: View {
             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(selected ? tint.opacity(0.58) : tint.opacity(emphasis == .normal ? 0.04 : 0.22))
+            if !isCompactDecodeLayout {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(selected ? tint.opacity(0.58) : tint.opacity(emphasis == .normal ? 0.04 : 0.22))
+            }
         }
+        .overlay(alignment: .leading) {
+            if emphasis == .addressedToMe {
+                Capsule()
+                    .fill(RadioPalette.transmit)
+                    .frame(width: 3)
+                    .padding(.vertical, 3)
+            }
+        }
+        .opacity(emphasis == .worked && !selected ? 0.52 : 1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(presentation.accessibilityLabel)
         .accessibilityValue(Text(selected ? "已选中" : "未选中"))
@@ -330,11 +369,12 @@ struct RadioLiteFT8View: View {
         switch column {
         case .message:
             Text(presentation.text(for: column))
-                .font(.caption.monospaced().weight(emphasis == .normal ? .regular : .semibold))
-                .foregroundStyle(emphasis == .normal ? Color.white.opacity(0.84) : Color.white)
-                .lineLimit(1)
+                .font(.caption.monospaced().weight(emphasis == .normal || emphasis == .worked ? .regular : .semibold))
+                .foregroundStyle(emphasis == .normal || emphasis == .worked ? Color.white.opacity(0.84) : Color.white)
+                .lineLimit(isCompactDecodeLayout ? 2 : 1)
                 .minimumScaleFactor(0.72)
                 .allowsTightening(true)
+                .strikethrough(emphasis == .worked, color: tint.opacity(0.8))
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .frequencyHz, .snr, .utcDelta:
             Text(presentation.text(for: column))
@@ -564,6 +604,7 @@ struct RadioLiteFT8View: View {
         case .normal: RadioPalette.muted
         case .cq: RadioPalette.accent
         case .addressedToMe: RadioPalette.transmit
+        case .worked: RadioPalette.muted
         }
     }
 
@@ -578,7 +619,28 @@ struct RadioLiteFT8View: View {
             RadioPalette.accent.opacity(selected ? 0.18 : 0.09)
         case .addressedToMe:
             RadioPalette.transmit.opacity(selected ? 0.22 : 0.13)
+        case .worked:
+            selected ? Color.white.opacity(0.07) : Color.clear
         }
+    }
+
+    private var isCompactDecodeLayout: Bool {
+        horizontalSizeClass == .compact
+    }
+
+    private var workedCallsigns: Set<String> {
+        var callsigns = Set(session.qsos.map { normalizeCallsign($0.call) })
+        callsigns.formUnion(session.callQueue?.entries.map { normalizeCallsign($0.targetCallsign) } ?? [])
+        if let target = session.automaticQSO?.targetCallsign {
+            callsigns.insert(normalizeCallsign(target))
+        }
+        return callsigns
+    }
+
+    private func normalizeCallsign(_ value: String) -> String {
+        value
+            .uppercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>[]{}(),"))
     }
 
     private func parityLabel(_ parity: RadioLiteDigitalSlotClock.Parity) -> String {
@@ -642,6 +704,12 @@ enum RadioLiteFTDecodeTableColumn: CaseIterable, Hashable, Identifiable {
         case .snr: 34
         case .utcDelta: 42
         }
+    }
+}
+
+enum RadioLiteFTDecodeCompactMetadataFormatter {
+    static func text(decode: RadioLiteDigitalDecode) -> String {
+        "\(decode.audioFrequencyHz) Hz · SNR \(String(format: "%+.0f", decode.snrDb)) · Δt \(String(format: "%+.1f", decode.deltaTimeSeconds)) s"
     }
 }
 

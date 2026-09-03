@@ -22,4 +22,19 @@ final class RadioLiteFT8DecodeTableTests: XCTestCase {
             ["CQ JA1ABC 🇯🇵 PM95", "612", "-8", "+0.1"]
         )
     }
+
+    func testCompactDecodeMetadataIsSelfDescribingAndKeepsColumnOrder() {
+        let decode = RadioLiteDigitalDecode(
+            id: "decode-compact",
+            message: "CQ JA1ABC PM95",
+            snrDb: 23,
+            deltaTimeSeconds: 0.2,
+            audioFrequencyHz: 395,
+            confidence: 1
+        )
+        XCTAssertEqual(
+            RadioLiteFTDecodeCompactMetadataFormatter.text(decode: decode),
+            "395 Hz · SNR +23 · Δt +0.2 s"
+        )
+    }
 }

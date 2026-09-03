@@ -398,6 +398,34 @@ final class RadioLiteFTMessageTests: XCTestCase {
         )
     }
 
+    func testWorkedCallEmphasisIsBelowRepliesAndCQ() {
+        let worked: Set<String> = ["JA1ABC"]
+        XCTAssertEqual(
+            RadioLiteFTMessage.parse("BG2TEST JA1ABC -10").emphasis(
+                myCallsign: "BG2TEST", workedCallsigns: worked
+            ),
+            .addressedToMe
+        )
+        XCTAssertEqual(
+            RadioLiteFTMessage.parse("CQ JA1ABC PM95").emphasis(
+                myCallsign: "BG2TEST", workedCallsigns: worked
+            ),
+            .worked
+        )
+        XCTAssertEqual(
+            RadioLiteFTMessage.parse("CQ HL2ABC PM95").emphasis(
+                myCallsign: "BG2TEST", workedCallsigns: worked
+            ),
+            .cq
+        )
+        XCTAssertEqual(
+            RadioLiteFTMessage.parse("PA3ABC JA1ABC -10").emphasis(
+                myCallsign: "BG2TEST", workedCallsigns: worked
+            ),
+            .normal
+        )
+    }
+
     func testMaidenheadDistanceReturnsGreatCircleKilometers() throws {
         XCTAssertEqual(RadioLiteMaidenheadDistance.kilometers(from: "PM95", to: "PM95"), 0)
 

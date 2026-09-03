@@ -4,6 +4,7 @@ enum RadioLiteFTMessageEmphasis: Equatable, Sendable {
     case normal
     case cq
     case addressedToMe
+    case worked
 }
 
 struct RadioLiteFTMessage: Equatable, Sendable {
@@ -47,11 +48,19 @@ struct RadioLiteFTMessage: Equatable, Sendable {
         return RadioLiteFTMessage(sender: sender, recipient: recipient, grid: grid)
     }
 
-    func emphasis(myCallsign: String?) -> RadioLiteFTMessageEmphasis {
+    func emphasis(
+        myCallsign: String?,
+        workedCallsigns: Set<String> = []
+    ) -> RadioLiteFTMessageEmphasis {
         let normalizedCallsign = myCallsign.map(Self.normalizeToken)
         if let normalizedCallsign, !normalizedCallsign.isEmpty,
            recipient == normalizedCallsign {
             return .addressedToMe
+        }
+        if recipient == "CQ",
+           let sender,
+           workedCallsigns.contains(Self.normalizeToken(sender)) {
+            return .worked
         }
         return recipient == "CQ" ? .cq : .normal
     }
