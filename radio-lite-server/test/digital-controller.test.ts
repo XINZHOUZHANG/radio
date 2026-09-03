@@ -80,6 +80,13 @@ test("automatic digital controller uses the interlock and logs one completed FT8
   assert.equal(controller.qsoSnapshot()?.phase, "awaiting_final");
   assert.equal(watchdog.armed, true);
 
+  worker.beginDecode({ mode: "FT8", slotStartMs: 90_000 });
+  now = 105_500;
+  await watchdog.fire();
+  assert.equal(controller.qsoSnapshot()?.phase, "awaiting_final");
+  assert.equal(controller.qsoSnapshot()?.reportAttempts, 1);
+  assert.equal(watchdog.armed, true, "watchdog remains only as a worker-loss fallback");
+
   await controller.acceptDecoded({
     radioId: "main",
     mode: "FT8",
@@ -92,6 +99,7 @@ test("automatic digital controller uses the interlock and logs one completed FT8
       audioFrequencyHz: 1_300,
     }],
   });
+  worker.finishDecode({ mode: "FT8", slotStartMs: 90_000 });
   assert.equal(watchdog.armed, false, "a final decode must cancel the receive watchdog");
   now = 98_000;
   runtime.heartbeatControl("connection:one", acquired.lease.token);

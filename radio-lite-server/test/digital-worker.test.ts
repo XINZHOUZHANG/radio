@@ -34,7 +34,7 @@ test("dummy worker exposes the same prepare, playback, decode and failure contra
   const decoded: string[] = [];
   const faults: string[] = [];
   await worker.start({
-    decoded: (batch) => decoded.push(batch.frames[0]?.message ?? ""),
+    decoded: (batch) => { decoded.push(batch.frames[0]?.message ?? ""); },
     fault: (error) => faults.push(error instanceof Error ? error.message : String(error)),
   });
   const prepared = await worker.prepare({

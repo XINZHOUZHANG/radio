@@ -24,8 +24,15 @@ export type PreparedDigitalTransmission = {
 };
 
 export type DigitalWorkerOutput = {
-  decoded(batch: DigitalDecodeBatchInput): void;
+  decoded(batch: DigitalDecodeBatchInput): void | Promise<void>;
+  decodeStarted?(slot: DigitalDecodeSlot): void;
+  decodeFinished?(slot: DigitalDecodeSlot): void;
   fault(error: unknown): void;
+};
+
+export type DigitalDecodeSlot = {
+  mode: DigitalMode;
+  slotStartMs: number;
 };
 
 export type DigitalWorker = {

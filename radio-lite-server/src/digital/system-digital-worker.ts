@@ -17,6 +17,7 @@ import type {
   DigitalEncodeRequest,
   DigitalWorker,
   DigitalWorkerOutput,
+  DigitalDecodeSlot,
   PreparedDigitalTransmission,
 } from "./worker.ts";
 import {
@@ -243,26 +244,39 @@ export class SystemDigitalWorker implements DigitalWorker {
     try {
       while (!this.#closed && !this.#faulted && this.#pendingSlots.length > 0) {
         const slot = this.#pendingSlots.shift()!;
-        const decoded = await this.#client.decode({
-          mode: slot.mode,
-          pcm: slot.pcm,
-          nominalFrequencyHz: this.#nominalAudioFrequencyHz,
-          myCall: this.#profile.station.callsign,
-          myGrid: this.#profile.station.grid,
-        });
-        if (this.#closed || this.#faulted || this.#transmitting) {
-          continue;
-        }
-        const batch: DigitalDecodeBatchInput = {
-          radioId: this.#profile.id,
-          mode: slot.mode,
-          slotStartMs: slot.slotStartMs,
-          receivedAtMs: Math.max(slot.slotEndMs, Math.trunc(this.#now())),
-          frames: decoded.frames.map(safeDecodeFrame).filter(
-            (frame): frame is RawDigitalDecode => frame !== null,
-          ),
+        const decodeSlot: DigitalDecodeSlot = { mode: slot.mode, slotStartMs: slot.slotStartMs };
+        this.#output?.decodeStarted?.(decodeSlot);
+        let finished = false;
+        const finish = () => {
+          if (!finished) {
+            finished = true;
+            this.#output?.decodeFinished?.(decodeSlot);
+          }
         };
-        this.#output?.decoded(batch);
+        try {
+          const decoded = await this.#client.decode({
+            mode: slot.mode,
+            pcm: slot.pcm,
+            nominalFrequencyHz: this.#nominalAudioFrequencyHz,
+            myCall: this.#profile.station.callsign,
+            myGrid: this.#profile.station.grid,
+          });
+          if (this.#closed || this.#faulted || this.#transmitting) {
+            continue;
+          }
+          const batch: DigitalDecodeBatchInput = {
+            radioId: this.#profile.id,
+            mode: slot.mode,
+            slotStartMs: slot.slotStartMs,
+            receivedAtMs: Math.max(slot.slotEndMs, Math.trunc(this.#now())),
+            frames: decoded.frames.map(safeDecodeFrame).filter(
+              (frame): frame is RawDigitalDecode => frame !== null,
+            ),
+          };
+          await this.#output?.decoded(batch);
+        } finally {
+          finish();
+        }
       }
     } catch (error) {
       this.#fail(error);

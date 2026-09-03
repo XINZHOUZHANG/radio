@@ -1,6 +1,7 @@
 import type {
   DigitalEncodeRequest,
   DigitalWorker,
+  DigitalDecodeSlot,
   DigitalWorkerOutput,
   PreparedDigitalTransmission,
 } from "./worker.ts";
@@ -79,6 +80,16 @@ export class DummyDigitalWorker implements DigitalWorker {
   injectDecodeBatch(batch: DigitalDecodeBatchInput): void {
     this.#assertStarted();
     this.#output!.decoded(batch);
+  }
+
+  beginDecode(slot: DigitalDecodeSlot): void {
+    this.#assertStarted();
+    this.#output!.decodeStarted?.(slot);
+  }
+
+  finishDecode(slot: DigitalDecodeSlot): void {
+    this.#assertStarted();
+    this.#output!.decodeFinished?.(slot);
   }
 
   injectFault(error: unknown): void {

@@ -23,6 +23,7 @@ import type {
 } from "./types.ts";
 import type {
   DigitalWorker,
+  DigitalDecodeSlot,
   PreparedDigitalTransmission,
 } from "./worker.ts";
 
@@ -101,6 +102,8 @@ type ReceiveSlotWatchdog = {
   cancel: () => void;
 };
 
+const DIGITAL_DECODE_WATCHDOG_TIMEOUT_MS = 45_000;
+
 const RECEIVE_SLOT_WATCHDOG_GRACE_MS = 500;
 
 export class DigitalRadioController {
@@ -126,6 +129,7 @@ export class DigitalRadioController {
   #activeTransmission: ActiveTransmission | null = null;
   #receiveSlotWatchdog: ReceiveSlotWatchdog | null = null;
   #receiveSlotWatchdogGeneration = 0;
+  readonly #pendingDecodes = new Map<string, number>();
   #initialized = false;
   #closed = false;
   #workerFaulted = false;
@@ -166,8 +170,12 @@ export class DigitalRadioController {
     this.#assertOpen();
     await this.#worker.start({
       decoded: (input) => {
-        void this.acceptDecoded(input).catch((error) => this.#emitError("decode_batch_rejected", error));
+        return this.acceptDecoded(input).then(() => undefined).catch((error) => {
+          this.#emitError("decode_batch_rejected", error);
+        });
       },
+      decodeStarted: (slot) => this.#pendingDecodes.set(decodeSlotKey(slot), this.#now()),
+      decodeFinished: (slot) => this.#pendingDecodes.delete(decodeSlotKey(slot)),
       fault: (error) => {
         void this.#serialize(() => this.#handleWorkerFault(error));
       },
@@ -738,6 +746,19 @@ export class DigitalRadioController {
     ) {
       return;
     }
+    const pendingSince = this.#pendingDecodes.get(decodeSlotKey(watchdog));
+    if (
+      pendingSince !== undefined &&
+      Math.trunc(this.#now()) - pendingSince < DIGITAL_DECODE_WATCHDOG_TIMEOUT_MS
+    ) {
+      this.#receiveSlotWatchdog = watchdog;
+      watchdog.cancel = this.#scheduleTimeout(
+        () => this.#serialize(() => this.#handleReceiveSlotWatchdog(generation))
+          .catch((error) => this.#emitError("receive_slot_watchdog_failed", error)),
+        500,
+      );
+      return;
+    }
     const afterTimeout = session.receiveSlotClosed(
       Math.max(watchdog.deadlineMs, Math.trunc(this.#now())),
     );
@@ -803,6 +824,10 @@ export class DigitalRadioController {
       throw new Error("digital controller is closed");
     }
   }
+}
+
+function decodeSlotKey(slot: DigitalDecodeSlot | ReceiveSlotWatchdog): string {
+  return `${slot.mode}:${"slotStartMs" in slot ? slot.slotStartMs : slot.receiveSlotStartMs}`;
 }
 
 function cloneContext(value: DigitalControlContext): EntryContext {

@@ -54,7 +54,7 @@ test("system digital worker decodes each complete UTC slot and shares audio for 
   });
   context.after(() => worker.close());
   await worker.start({
-    decoded: (batch) => batches.push(batch),
+    decoded: (batch) => { batches.push(batch); },
     fault: (error) => { throw error; },
   });
 
@@ -79,6 +79,55 @@ test("system digital worker decodes each complete UTC slot and shares audio for 
   assert.deepEqual(played, [new Int16Array([10, 20, 30])]);
   await worker.stopTransmission();
   assert.equal(stopCount, 1);
+});
+
+test("system digital worker waits for decoded consumer before finishing a slot", async (context) => {
+  let consumer: DigitalAudioConsumer | null = null;
+  let releaseDecode!: () => void;
+  const decodeReleased = new Promise<void>((resolve) => { releaseDecode = resolve; });
+  const events: string[] = [];
+  const port: DigitalAudioPort = {
+    sampleRate: 12_000,
+    play: async () => undefined,
+    stop: async () => undefined,
+    close: async () => undefined,
+  };
+  const client: WsjtxClient = {
+    start: async () => undefined,
+    encode: async ({ message }) => ({
+      pcm: new Int16Array([1]), sampleRate: 12_000, durationMs: 1, messageSent: message,
+    }),
+    decode: async () => ({ frames: [] }),
+    close: async () => undefined,
+  };
+  const worker = new SystemDigitalWorker(profile(), {
+    openAudio: async (value) => { consumer = value; return port; },
+    clientFactory: () => client,
+    now: () => 13_000,
+  });
+  context.after(() => worker.close());
+  await worker.start({
+    decodeStarted: (slot) => { if (slot.mode === "FT8") events.push("started"); },
+    decoded: async (batch) => {
+      if (batch.mode === "FT8") {
+        events.push("decoded");
+        await decodeReleased;
+      }
+    },
+    decodeFinished: (slot) => { if (slot.mode === "FT8") events.push("finished"); },
+    fault: (error) => { throw error; },
+  });
+  consumer!.pcm({
+    pcm: int16ToPcm16Le(new Int16Array(12_000 * 13)),
+    sampleRate: 12_000,
+    startedAtMs: 0,
+  });
+  await immediate();
+  assert.deepEqual(events, ["started", "decoded"]);
+  releaseDecode();
+  await immediate();
+  await immediate();
+  assert.deepEqual(events, ["started", "decoded", "finished"]);
 });
 
 test("system digital worker starts FT4 and FT8 decoding before their slot boundaries", async (context) => {
@@ -109,7 +158,7 @@ test("system digital worker starts FT4 and FT8 decoding before their slot bounda
   });
   context.after(() => worker.close());
   await worker.start({
-    decoded: (batch) => batches.push(batch),
+    decoded: (batch) => { batches.push(batch); },
     fault: (error) => { throw error; },
   });
 
