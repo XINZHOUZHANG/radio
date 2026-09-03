@@ -10,6 +10,7 @@ struct RadioLiteLogbookView: View {
     @State private var exportURL: URL?
     @State private var showExporter = false
     @State private var operationStatus: String?
+    @State private var importing = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -86,8 +87,9 @@ struct RadioLiteLogbookView: View {
                     } label: { Label("导出 ADIF", systemImage: "square.and.arrow.up") }
                     if session.isAdmin {
                         Button { showImporter = true } label: {
-                            Label("导入 ADIF", systemImage: "square.and.arrow.down")
+                            Label(importing ? "导入中…" : "导入 ADIF", systemImage: "square.and.arrow.down")
                         }
+                        .disabled(importing)
                     }
                 } label: { Image(systemName: "ellipsis.circle") }
             }
@@ -127,7 +129,12 @@ struct RadioLiteLogbookView: View {
         }
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: [UTType(filenameExtension: "adi") ?? .data, .plainText, .data]
+            allowedContentTypes: [
+                UTType(filenameExtension: "adi") ?? .data,
+                UTType(filenameExtension: "adif") ?? .data,
+                .plainText,
+                .data,
+            ]
         ) { result in
             Task { await importFile(result) }
         }
@@ -154,6 +161,9 @@ struct RadioLiteLogbookView: View {
     }
 
     private func importFile(_ result: Result<URL, Error>) async {
+        guard !importing else { return }
+        importing = true
+        defer { importing = false }
         do {
             let url = try result.get()
             let counts = try await session.importADIF(from: url)
