@@ -49,7 +49,16 @@ struct RadioLiteLogbookView: View {
                 .listRowBackground(Color.clear)
             }
 
-            if let operationStatus {
+            if importing {
+                Section {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("正在读取并导入 ADIF…")
+                    }
+                    .foregroundStyle(RadioPalette.accent)
+                }
+                .listRowBackground(RadioPalette.panel)
+            } else if let operationStatus {
                 Section {
                     Label(operationStatus, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(RadioPalette.accent)
