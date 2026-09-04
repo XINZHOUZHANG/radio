@@ -2,6 +2,31 @@ import MapKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
+enum RadioLiteLogTime {
+    private static let utcFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "MM-dd HH:mm'z'"
+        return formatter
+    }()
+
+    static func utc(_ milliseconds: Int64) -> String {
+        utcFormatter.string(from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000))
+    }
+
+    static func local(_ milliseconds: Int64) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "yyyy-MM-dd HH:mm ZZZZ"
+        return formatter.string(from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000))
+    }
+}
+
 struct RadioLiteLogbookView: View {
     @EnvironmentObject private var session: RadioLiteSession
     @State private var search = ""
@@ -19,7 +44,7 @@ struct RadioLiteLogbookView: View {
             Section {
                 HStack(spacing: 9) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundStyle(RadioPalette.muted)
+                        .foregroundStyle(TX.text3)
                     TextField("搜索呼号、网格或模式", text: $search)
                         .focused($searchFocused)
                         .textInputAutocapitalization(.characters)
@@ -27,13 +52,13 @@ struct RadioLiteLogbookView: View {
                     if !search.isEmpty {
                         Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain)
-                            .foregroundStyle(RadioPalette.muted)
+                            .foregroundStyle(TX.text3)
                     }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 12))
-                .listRowBackground(Color.clear)
+                .background(TX.raised, in: RoundedRectangle(cornerRadius: TX.cardRadius))
+                .listRowBackground(TX.bg.opacity(0))
                 .listRowInsets(.init(top: 8, leading: 14, bottom: 4, trailing: 14))
 
                 HStack {
@@ -47,9 +72,9 @@ struct RadioLiteLogbookView: View {
                         Label("\(session.grids.count) 网格", systemImage: "map.fill")
                     }
                 }
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(RadioPalette.accent)
-                .listRowBackground(Color.clear)
+                .font(TX.data(12, .semibold))
+                .foregroundStyle(TX.teal)
+                .listRowBackground(TX.bg.opacity(0))
             }
 
             if importing {
@@ -58,15 +83,15 @@ struct RadioLiteLogbookView: View {
                         ProgressView()
                         Text(importProgressMessage)
                     }
-                    .foregroundStyle(RadioPalette.accent)
+                    .foregroundStyle(TX.teal)
                 }
-                .listRowBackground(RadioPalette.panel)
+                .listRowBackground(TX.card)
             } else if let operationStatus {
                 Section {
                     Label(operationStatus, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(RadioPalette.accent)
+                        .foregroundStyle(TX.teal)
                 }
-                .listRowBackground(RadioPalette.panel)
+                .listRowBackground(TX.card)
             }
 
             Section("最近通联") {
@@ -76,11 +101,11 @@ struct RadioLiteLogbookView: View {
                         systemImage: "book.closed"
                     )
                     .frame(minHeight: 190)
-                    .listRowBackground(Color.clear)
+                    .listRowBackground(TX.bg.opacity(0))
                 } else {
                     ForEach(filteredQSOs) { qso in
                         RadioLiteQSORow(qso: qso)
-                            .listRowBackground(RadioPalette.panel)
+                            .listRowBackground(TX.card)
                     }
                 }
             }
@@ -88,7 +113,7 @@ struct RadioLiteLogbookView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .scrollDismissesKeyboard(.interactively)
-        .background(RadioPalette.background.ignoresSafeArea())
+        .background(TX.bg.ignoresSafeArea())
         .navigationTitle("ADIF 日志")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -122,15 +147,15 @@ struct RadioLiteLogbookView: View {
                 NavigationStack {
                     VStack(spacing: 22) {
                         Image(systemName: "doc.badge.arrow.up")
-                            .font(.system(size: 48))
-                            .foregroundStyle(RadioPalette.accent)
+                            .font(TX.ui(48))
+                            .foregroundStyle(TX.teal)
                         Text("ADIF 已准备好")
-                            .font(.title2.bold())
+                            .font(TX.ui(22, .bold))
                         ShareLink(item: exportURL) {
                             Label("共享 radio-lite-log.adi", systemImage: "square.and.arrow.up")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent, prominent: true))
+                        .buttonStyle(RadioActionButtonStyle(tint: TX.teal, prominent: true))
                     }
                     .padding(24)
                     .navigationTitle("导出日志")
@@ -222,33 +247,34 @@ private struct RadioLiteQSORow: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text(qso.call)
-                    .font(.headline.monospaced())
+                    .font(TX.data(17, .semibold))
+                    .foregroundStyle(TX.text1)
                 if let grid = qso.grid {
                     Text(grid)
-                        .font(.caption.monospaced().weight(.semibold))
-                        .foregroundStyle(RadioPalette.cyan)
+                        .font(TX.data(12, .semibold))
+                        .foregroundStyle(TX.text3)
                 }
                 Spacer()
                 Text(qso.submode ?? qso.mode)
-                    .font(.caption.monospaced().weight(.bold))
-                    .foregroundStyle(RadioPalette.accent)
+                    .font(TX.data(12, .bold))
+                    .foregroundStyle(TX.teal)
             }
             HStack {
-                Label(Date(timeIntervalSince1970: Double(qso.startedAtMs) / 1_000).formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
+                Label(RadioLiteLogTime.utc(qso.startedAtMs), systemImage: "clock")
                 Spacer()
                 if let frequency = qso.frequencyHz {
                     Text(String(format: "%.6f MHz", Double(frequency) / 1_000_000))
                 }
             }
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(RadioPalette.muted)
+            .font(TX.data(11))
+            .foregroundStyle(TX.text3)
             HStack(spacing: 8) {
                 Text(qso.source.replacingOccurrences(of: "_", with: " "))
                 if let sent = qso.rstSent { Text("发 \(sent)") }
                 if let received = qso.rstReceived { Text("收 \(received)") }
             }
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(RadioPalette.muted)
+            .font(TX.ui(11, .semibold))
+            .foregroundStyle(TX.text3)
         }
         .padding(.vertical, 5)
     }
@@ -335,7 +361,7 @@ struct RadioLiteManualQSOView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if let formError {
                         Label(formError, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(RadioPalette.transmit)
+                            .foregroundStyle(TX.amber)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
@@ -351,7 +377,7 @@ struct RadioLiteManualQSOView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 9)
-                .background(.ultraThinMaterial)
+                .background(TX.raised.opacity(0.96))
                 .overlay(alignment: .top) { Divider().opacity(0.35) }
             }
             .navigationTitle("手动记录语音 QSO")
@@ -442,11 +468,11 @@ struct RadioLiteGridMapView: View {
                 ForEach(renderSet.cells) { cell in
                     MapPolygon(coordinates: cell.coordinates)
                         .foregroundStyle(
-                            RadioPalette.accent.opacity(
+                            TX.teal.opacity(
                                 cell.fillOpacity * (renderSet.level == .field ? 0.55 : 1)
                             )
                         )
-                        .stroke(RadioPalette.accent.opacity(0.42), lineWidth: 0.7)
+                        .stroke(TX.teal.opacity(0.42), lineWidth: 0.7)
                 }
                 ForEach(renderSet.labeledCells) { cell in
                     Annotation(
@@ -459,15 +485,16 @@ struct RadioLiteGridMapView: View {
                         Button { selected = cell.summary } label: {
                             VStack(spacing: 2) {
                                 Text("\(cell.summary.qsoCount)")
-                                    .font(.caption2.bold().monospacedDigit())
+                                    .font(TX.data(11, .bold))
                                     .frame(minWidth: 25, minHeight: 25)
-                                    .foregroundStyle(.black)
-                                    .background(RadioPalette.accent, in: Circle())
+                                    .foregroundStyle(TX.bg)
+                                    .background(TX.teal, in: Circle())
                                 Text(cell.summary.grid)
-                                    .font(.caption2.monospaced().bold())
+                                    .font(TX.data(11, .bold))
+                                    .foregroundStyle(TX.text3)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 2)
-                                    .background(Color.black.opacity(0.72), in: Capsule())
+                                    .background(TX.bg.opacity(0.9), in: Capsule())
                             }
                         }
                         .buttonStyle(.plain)
@@ -512,11 +539,12 @@ struct RadioLiteGridMapView: View {
                     Text("当前视野 \(renderSet.cells.count) 个网格")
                 }
             }
-            .font(.caption.weight(.semibold))
+            .font(TX.ui(12, .semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.72)
             .padding(12)
-            .background(.ultraThinMaterial)
+            .foregroundStyle(TX.text2)
+            .background(TX.raised.opacity(0.96))
         }
         .sheet(item: $selected) { item in
             RadioLiteGridQSOListView(summary: item, loadGridPage: loadGridPage)
@@ -560,9 +588,7 @@ private struct RadioLiteGridQSOListView: View {
                     LabeledContent("QSO", value: String(summary.qsoCount))
                     LabeledContent(
                         "最近",
-                        value: Date(
-                            timeIntervalSince1970: Double(summary.lastQsoAtMs) / 1_000
-                        ).formatted(date: .abbreviated, time: .shortened)
+                        value: RadioLiteLogTime.utc(summary.lastQsoAtMs)
                     )
                     DisclosureGroup("频段") {
                         ForEach(summary.bands.sorted(by: valueThenKey), id: \.key) { band, count in
@@ -585,7 +611,7 @@ private struct RadioLiteGridQSOListView: View {
                     } else if log.records.isEmpty, let errorMessage {
                         VStack(alignment: .leading, spacing: 10) {
                             Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(TX.amber)
                             Button("重试") {
                                 requestLoad(reset: true)
                             }
@@ -610,7 +636,7 @@ private struct RadioLiteGridQSOListView: View {
                         if let errorMessage {
                             VStack(alignment: .leading, spacing: 8) {
                                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(TX.amber)
                                 Button("重试加载") {
                                     requestLoad(reset: false)
                                 }
@@ -706,9 +732,17 @@ private struct RadioLiteQSORecordDetailView: View {
         List {
             Section("通联") {
                 LabeledContent("呼号", value: qso.call)
-                LabeledContent("开始", value: formattedDate(qso.startedAtMs))
+                LabeledContent("开始 UTC", value: RadioLiteLogTime.utc(qso.startedAtMs))
+                    .font(TX.data(14))
+                LabeledContent("开始（本地）", value: RadioLiteLogTime.local(qso.startedAtMs))
+                    .font(TX.data(11))
+                    .foregroundStyle(TX.text3)
                 if let endedAtMs = qso.endedAtMs {
-                    LabeledContent("结束", value: formattedDate(endedAtMs))
+                    LabeledContent("结束 UTC", value: RadioLiteLogTime.utc(endedAtMs))
+                        .font(TX.data(14))
+                    LabeledContent("结束（本地）", value: RadioLiteLogTime.local(endedAtMs))
+                        .font(TX.data(11))
+                        .foregroundStyle(TX.text3)
                 }
                 LabeledContent("模式", value: qso.submode ?? qso.mode)
                 LabeledContent("频段", value: qso.band)
@@ -759,11 +793,6 @@ private struct RadioLiteQSORecordDetailView: View {
             }
             return (key: key, label: label, value: value)
         }
-    }
-
-    private func formattedDate(_ milliseconds: Int64) -> String {
-        Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
-            .formatted(date: .abbreviated, time: .standard)
     }
 
     private static let supplementalFieldLabels: [(String, String)] = [
