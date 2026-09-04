@@ -585,8 +585,8 @@ assert(gridMapPresentation.includes('let sourceCells: [RadioLiteGridMapCell]'));
 assert(gridMapPresentation.includes('fieldCells = Self.aggregateFields(grids)'));
 assert(gridMapPresentation.includes('memberGridIDs'));
 assert(!gridMapPresentation.includes('grids.prefix('));
-assert(/^\s*CURRENT_PROJECT_VERSION:\s*23\s*$/mu.test(radioLiteProject));
-assert(/^\s*MARKETING_VERSION:\s*0\.2\.11\s*$/mu.test(radioLiteProject));
+assert(/^\s*CURRENT_PROJECT_VERSION:\s*24\s*$/mu.test(radioLiteProject));
+assert(/^\s*MARKETING_VERSION:\s*0\.2\.12\s*$/mu.test(radioLiteProject));
 assert(deviceConfiguration.includes('audioCards = try container.decodeIfPresent'));
 assert(deviceConfigurationView.includes('isSelectableUSBCard'));
 
