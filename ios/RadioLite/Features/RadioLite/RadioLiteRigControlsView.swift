@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RadioLiteRigControlsView: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @State private var showCompatibilityInfo = false
 
     let isTransmitting: Bool
     let hasControl: Bool
@@ -36,7 +37,7 @@ struct RadioLiteRigControlsView: View {
                             hasControl: hasControl
                         )
                         if control.id != generalControls.last?.id {
-                            Divider().overlay(Color.white.opacity(0.08))
+                            Divider().overlay(TX.divider)
                         }
                     }
                 }
@@ -46,21 +47,29 @@ struct RadioLiteRigControlsView: View {
 
     private var header: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("兼容电台控制")
-                    .font(.headline)
-                Text("服务器未提供新版分组控制")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
-            }
+            Text("电台控制")
+                .font(TX.ui(17, .semibold))
             Spacer()
+            Button { showCompatibilityInfo = true } label: {
+                Image(systemName: "info.circle")
+                    .frame(width: TX.hitMin, height: TX.hitMin)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("兼容电台控制说明")
+            .popover(isPresented: $showCompatibilityInfo) {
+                Text("服务器未提供新版分组控制，当前使用兼容电台控制。可用参数以服务器实际返回为准。")
+                    .font(TX.ui(14))
+                    .foregroundStyle(TX.text2)
+                    .padding(TX.pagePad)
+                    .presentationCompactAdaptation(.popover)
+            }
             Button {
                 Task { await refreshLegacyControls() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .foregroundStyle(RadioPalette.accent)
+            .foregroundStyle(TX.teal)
             .disabled(session.selectedRadioId == nil)
             .accessibilityLabel("刷新兼容电台控制")
         }
@@ -83,6 +92,8 @@ struct RadioLiteRigControlsView: View {
 
 private struct RadioLiteRigControlRow: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @Environment(\.radioLiteSliderEditing) private var sliderEditing
+    @State private var sliderID = UUID()
 
     let control: RadioLiteRigControl
     let isTransmitting: Bool
@@ -103,28 +114,29 @@ private struct RadioLiteRigControlRow: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
                 Text(display.label)
-                    .font(.subheadline.weight(.semibold))
+                    .font(TX.ui(15, .semibold))
                 Spacer()
                 if isSubmitting {
                     ProgressView().controlSize(.small)
                 }
                 Text(display.formattedValue(draftValue))
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(RadioPalette.cyan)
+                    .font(TX.data(12, .semibold))
+                    .foregroundStyle(TX.teal)
             }
 
             controlEditor
 
             if let reason = disabledReason {
                 Label(reason, systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
         }
         .onChange(of: control.value) { _, confirmedValue in
             guard !isAdjusting, !isSubmitting else { return }
             draftValue = confirmedValue
         }
+        .onDisappear { sliderEditing(sliderID, false) }
     }
 
     @ViewBuilder
@@ -133,10 +145,10 @@ private struct RadioLiteRigControlRow: View {
         case .function:
             Toggle(isOn: functionBinding) {
                 Text(draftValue >= 0.5 ? "开启" : "关闭")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
-            .tint(RadioPalette.accent)
+            .tint(TX.teal)
             .disabled(!canWrite)
         case .level, .filter:
             Slider(
@@ -145,15 +157,17 @@ private struct RadioLiteRigControlRow: View {
                 step: sliderStep,
                 onEditingChanged: { editing in
                     isAdjusting = editing
+                    sliderEditing(sliderID, editing)
                     if !editing { submit(draftValue) }
                 }
             )
-            .tint(display.kind == .filter ? RadioPalette.cyan : RadioPalette.accent)
+            .tint(display.kind == .filter ? TX.teal : TX.teal)
+            .padding(.vertical, TX.pagePad)
             .disabled(!canWrite || !hasUsableSliderRange)
         case .unknown:
             Text("当前 App 版本尚不支持这种 Hamlib 控件类型")
-                .font(.caption)
-                .foregroundStyle(RadioPalette.muted)
+                .font(TX.ui(12))
+                .foregroundStyle(TX.text3)
         }
     }
 
