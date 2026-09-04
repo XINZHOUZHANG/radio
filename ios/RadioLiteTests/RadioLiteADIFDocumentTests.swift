@@ -1,5 +1,6 @@
 import Foundation
 import UniformTypeIdentifiers
+import UIKit
 import XCTest
 @testable import RadioLite
 
@@ -50,5 +51,53 @@ final class RadioLiteADIFDocumentTests: XCTestCase {
         let actual = try await RadioLiteADIFDocument.readCoordinatedData(from: url)
 
         XCTAssertEqual(actual, expected)
+    }
+
+    @MainActor
+    func testDocumentPickerCoordinatorForwardsOnlyTheFirstSelection() {
+        let firstURL = URL(fileURLWithPath: "/tmp/first.adi")
+        let secondURL = URL(fileURLWithPath: "/tmp/second.adi")
+        var selectedURLs: [URL] = []
+        var cancellationCount = 0
+        let coordinator = RadioLiteADIFDocumentPicker.Coordinator(
+            onResult: { result in
+                if case let .success(url) = result {
+                    selectedURLs.append(url)
+                }
+            },
+            onCancel: { cancellationCount += 1 }
+        )
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.item],
+            asCopy: true
+        )
+
+        coordinator.documentPicker(picker, didPickDocumentsAt: [firstURL])
+        coordinator.documentPicker(picker, didPickDocumentsAt: [secondURL])
+        coordinator.documentPickerWasCancelled(picker)
+
+        XCTAssertEqual(selectedURLs, [firstURL])
+        XCTAssertEqual(cancellationCount, 0)
+    }
+
+    @MainActor
+    func testDocumentPickerCoordinatorForwardsCancellationOnlyOnce() {
+        var resultCount = 0
+        var cancellationCount = 0
+        let coordinator = RadioLiteADIFDocumentPicker.Coordinator(
+            onResult: { _ in resultCount += 1 },
+            onCancel: { cancellationCount += 1 }
+        )
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.item],
+            asCopy: true
+        )
+
+        coordinator.documentPickerWasCancelled(picker)
+        coordinator.documentPickerWasCancelled(picker)
+        coordinator.documentPicker(picker, didPickDocumentsAt: [])
+
+        XCTAssertEqual(resultCount, 0)
+        XCTAssertEqual(cancellationCount, 1)
     }
 }

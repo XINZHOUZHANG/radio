@@ -137,11 +137,17 @@ struct RadioLiteLogbookView: View {
                 .presentationDetents([.medium])
             }
         }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: RadioLiteADIFDocument.allowedContentTypes
-        ) { result in
-            handleImportSelection(result)
+        .sheet(isPresented: $showImporter) {
+            RadioLiteADIFDocumentPicker(
+                onResult: { result in
+                    // Begin consuming the copied URL before dismissing the picker.
+                    handleImportSelection(result)
+                    showImporter = false
+                },
+                onCancel: {
+                    showImporter = false
+                }
+            )
         }
     }
 
@@ -170,9 +176,8 @@ struct RadioLiteLogbookView: View {
         do {
             let url = try result.get()
             try RadioLiteADIFDocument.validateImportURL(url)
-            // The document picker grants a security-scoped URL. Acquire it before
-            // crossing the Task boundary so third-party file providers cannot revoke
-            // access before the coordinated copy starts.
+            // Copy mode normally returns an app-readable URL. Acquire a security scope
+            // as well when a provider supplies one, before crossing the Task boundary.
             let securityScopeAccessed = url.startAccessingSecurityScopedResource()
             operationStatus = nil
             importProgressMessage = "正在读取 \(url.lastPathComponent)…"
