@@ -48,7 +48,7 @@ struct RadioLiteControlDashboardView: View {
             .environmentObject(session)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
-            .presentationBackground(RadioPalette.background)
+            .presentationBackground(TX.bg)
         }
     }
 
@@ -63,10 +63,10 @@ struct RadioLiteControlDashboardView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("电台控制")
-                    .font(.headline)
+                    .font(TX.ui(17, .semibold))
                 Text("选择功能后再调整参数")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
             Spacer()
             Button {
@@ -74,10 +74,10 @@ struct RadioLiteControlDashboardView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .frame(width: 34, height: 34)
-                    .background(RadioPalette.panelRaised, in: Circle())
+                    .background(TX.raised, in: Circle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(RadioPalette.accent)
+            .foregroundStyle(TX.teal)
             .disabled(session.selectedRadioId == nil)
             .accessibilityLabel("刷新电台控制")
         }
@@ -87,29 +87,29 @@ struct RadioLiteControlDashboardView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Image(systemName: section.id.systemImage)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(RadioPalette.accent)
+                    .font(TX.ui(20, .semibold))
+                    .foregroundStyle(TX.teal)
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12, .bold))
+                    .foregroundStyle(TX.text3)
             }
             Spacer(minLength: 0)
             Text(section.id.label)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color.white)
+                .font(TX.ui(15, .bold))
+                .foregroundStyle(TX.text1)
             Text(section.summary)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(RadioPalette.cyan)
+                .font(TX.data(12))
+                .foregroundStyle(TX.teal)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
         }
         .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
         .padding(13)
-        .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(TX.raised, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06))
+                .strokeBorder(TX.stroke)
         }
         .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
@@ -132,6 +132,7 @@ private struct RadioLiteControlSectionSheet: View {
     let hasControl: Bool
 
     @State private var expandedItemID: String?
+    @State private var activeSliderIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -162,7 +163,12 @@ private struct RadioLiteControlSectionSheet: View {
                 }
                 .padding(14)
             }
-            .background(RadioPalette.background)
+            .scrollDisabled(!activeSliderIDs.isEmpty)
+            .environment(\.radioLiteSliderEditing) { id, editing in
+                if editing { activeSliderIDs.insert(id) }
+                else { activeSliderIDs.remove(id) }
+            }
+            .background(TX.bg)
             .navigationTitle(category.label)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -188,19 +194,19 @@ private struct RadioLiteControlSectionSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("机内天调", systemImage: "tuningfork")
-                    .font(.headline)
+                    .font(TX.ui(17, .semibold))
                 Spacer()
                 Text(tunerStatusText)
-                    .font(.caption.weight(.bold))
+                    .font(TX.ui(12, .bold))
                     .foregroundStyle(
                         session.isTuning || session.isTuningPending
-                            ? RadioPalette.warning
-                            : RadioPalette.cyan
+                            ? TX.amber
+                            : TX.teal
                     )
             }
             Text("调谐会短暂进入发射状态。请确认天线系统已连接并保持现场安全。")
-                .font(.caption)
-                .foregroundStyle(RadioPalette.muted)
+                .font(TX.ui(12))
+                .foregroundStyle(TX.text3)
             Button {
                 session.beginTuning()
             } label: {
@@ -208,33 +214,33 @@ private struct RadioLiteControlSectionSheet: View {
                     session.isTuningPending ? "正在启动…" : "开始调谐",
                     systemImage: "tuningfork"
                 )
-                .font(.headline)
+                .font(TX.ui(17, .semibold))
                 .frame(maxWidth: .infinity, minHeight: 50)
             }
-            .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.warning, prominent: false))
+            .buttonStyle(RadioActionButtonStyle(tint: TX.amber, prominent: false))
             .disabled(!canStartTuner)
             if RadioLiteTunerInteractionPolicy.canEmergencyStop(isTuning: session.isTuning) {
                 Button {
                     session.endTuning()
                 } label: {
                     Label("停止调谐", systemImage: "stop.circle.fill")
-                        .font(.headline)
+                        .font(TX.ui(17, .semibold))
                         .frame(maxWidth: .infinity, minHeight: 46)
                 }
-                .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.transmit, prominent: true))
+                .buttonStyle(RadioActionButtonStyle(tint: TX.txRed, prominent: true))
                 .disabled(!hasControl)
                 Text("仅在电台未自动结束调谐时使用。")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
             if !hasControl {
                 Label("需要先取得电台控制权", systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
         }
         .padding(16)
-        .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(TX.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var tunerStatusText: String {
@@ -267,16 +273,16 @@ private struct RadioLiteDashboardControlItemView: View {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.white)
+                            .font(TX.ui(15, .semibold))
+                            .foregroundStyle(TX.text1)
                         Text(item.summary)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(RadioPalette.cyan)
+                            .font(TX.data(12))
+                            .foregroundStyle(TX.teal)
                     }
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(RadioPalette.muted)
+                        .font(TX.ui(12, .bold))
+                        .foregroundStyle(TX.text3)
                 }
                 .padding(15)
                 .contentShape(Rectangle())
@@ -284,7 +290,7 @@ private struct RadioLiteDashboardControlItemView: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                Divider().overlay(Color.white.opacity(0.08))
+                Divider().overlay(TX.divider)
                 VStack(spacing: 15) {
                     ForEach(item.members) { member in
                         RadioLiteDashboardControlEditor(
@@ -294,7 +300,7 @@ private struct RadioLiteDashboardControlItemView: View {
                             hasControl: hasControl
                         )
                         if member.id != item.members.last?.id {
-                            Divider().overlay(Color.white.opacity(0.08))
+                            Divider().overlay(TX.divider)
                         }
                     }
                 }
@@ -302,13 +308,15 @@ private struct RadioLiteDashboardControlItemView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .background(RadioPalette.panelRaised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(TX.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
 private struct RadioLiteDashboardControlEditor: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @Environment(\.radioLiteSliderEditing) private var sliderEditing
+    @State private var sliderID = UUID()
 
     let control: RadioLiteCapabilityControl
     let label: String
@@ -336,15 +344,15 @@ private struct RadioLiteDashboardControlEditor: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
-                    .font(.caption.weight(.semibold))
+                    .font(TX.ui(12, .semibold))
                 Spacer()
                 if isSubmitting {
                     ProgressView().controlSize(.small)
                 }
                 if control.presentation != .button {
                     Text(control.formattedValue(draftValue))
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(RadioPalette.cyan)
+                        .font(TX.data(12, .semibold))
+                        .foregroundStyle(TX.teal)
                 }
             }
 
@@ -354,14 +362,15 @@ private struct RadioLiteDashboardControlEditor: View {
                control.access != .readOnly,
                control.presentation != .meter {
                 Label(reason, systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
         }
         .onChange(of: control.value) { _, confirmedValue in
             guard !isAdjusting, !isSubmitting else { return }
             draftValue = confirmedValue
         }
+        .onDisappear { sliderEditing(sliderID, false) }
     }
 
     @ViewBuilder
@@ -372,7 +381,7 @@ private struct RadioLiteDashboardControlEditor: View {
         case .toggle:
             Toggle("", isOn: toggleBinding)
                 .labelsHidden()
-                .tint(RadioPalette.accent)
+                .tint(TX.teal)
                 .disabled(!canMutate)
         case .slider:
             Slider(
@@ -381,7 +390,8 @@ private struct RadioLiteDashboardControlEditor: View {
                 step: numericStep,
                 onEditingChanged: submitWhenEditingEnds
             )
-            .tint(RadioPalette.accent)
+            .padding(.vertical, TX.pagePad)
+            .tint(TX.teal)
             .disabled(!canMutate || !hasNumericRange)
         case .discrete:
             if let options = control.options, !options.isEmpty {
@@ -396,7 +406,7 @@ private struct RadioLiteDashboardControlEditor: View {
             } else {
                 Stepper(value: numericBinding, in: numericRange, step: numericStep) {
                     Text(control.formattedValue(draftValue))
-                        .font(.caption.monospacedDigit())
+                        .font(TX.data(12))
                 }
                 .disabled(!canMutate || !hasNumericRange)
             }
@@ -407,12 +417,12 @@ private struct RadioLiteDashboardControlEditor: View {
         case .offset:
             Stepper(value: numericBinding, in: numericRange, step: numericStep) {
                 Text(control.formattedValue(draftValue))
-                    .font(.caption.monospacedDigit())
+                    .font(TX.data(12))
             }
             .disabled(!canMutate || !hasNumericRange)
         case .button:
             Button(label) { submitAction() }
-                .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent))
+                .buttonStyle(RadioActionButtonStyle(tint: TX.teal))
                 .disabled(!canMutate)
         case .unknown:
             EmptyView()
@@ -496,6 +506,7 @@ private struct RadioLiteDashboardControlEditor: View {
 
     private func submitWhenEditingEnds(_ editing: Bool) {
         isAdjusting = editing
+        sliderEditing(sliderID, editing)
         if !editing { submit(draftValue) }
     }
 
