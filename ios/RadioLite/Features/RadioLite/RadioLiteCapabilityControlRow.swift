@@ -2,6 +2,8 @@ import SwiftUI
 
 struct RadioLiteCapabilityControlRow: View {
     @EnvironmentObject private var session: RadioLiteSession
+    @Environment(\.radioLiteSliderEditing) private var sliderEditing
+    @State private var sliderID = UUID()
 
     let control: RadioLiteCapabilityControl
     let isTransmitting: Bool
@@ -22,15 +24,15 @@ struct RadioLiteCapabilityControlRow: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
                 Text(display.label)
-                    .font(.subheadline.weight(.semibold))
+                    .font(TX.ui(15, .semibold))
                 Spacer()
                 if isSubmitting {
                     ProgressView().controlSize(.small)
                 }
                 if control.presentation != .button {
                     Text(control.formattedValue(draftValue))
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(RadioPalette.cyan)
+                        .font(TX.data(12, .semibold))
+                        .foregroundStyle(TX.teal)
                 }
             }
 
@@ -40,14 +42,15 @@ struct RadioLiteCapabilityControlRow: View {
                control.access != .readOnly,
                control.presentation != .meter {
                 Label(reason, systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
             }
         }
         .onChange(of: control.value) { _, confirmedValue in
             guard !isAdjusting, !isSubmitting else { return }
             draftValue = confirmedValue
         }
+        .onDisappear { sliderEditing(sliderID, false) }
     }
 
     @ViewBuilder
@@ -58,11 +61,11 @@ struct RadioLiteCapabilityControlRow: View {
                 EmptyView()
             }
             .gaugeStyle(.linearCapacity)
-            .tint(RadioPalette.cyan)
+            .tint(TX.teal)
         case .toggle:
             Toggle("", isOn: toggleBinding)
                 .labelsHidden()
-                .tint(RadioPalette.accent)
+                .tint(TX.teal)
                 .disabled(!canMutate)
         case .slider:
             Slider(
@@ -71,7 +74,8 @@ struct RadioLiteCapabilityControlRow: View {
                 step: numericStep,
                 onEditingChanged: submitWhenEditingEnds
             )
-            .tint(RadioPalette.accent)
+            .padding(.vertical, TX.pagePad)
+            .tint(TX.teal)
             .disabled(!canMutate || !hasNumericRange)
         case .discrete:
             if let options = control.options, !options.isEmpty {
@@ -89,7 +93,7 @@ struct RadioLiteCapabilityControlRow: View {
                     step: numericStep
                 ) {
                     Text(control.formattedValue(draftValue))
-                        .font(.caption.monospacedDigit())
+                        .font(TX.data(12))
                 }
                 .disabled(!canMutate || !hasNumericRange)
             }
@@ -108,14 +112,14 @@ struct RadioLiteCapabilityControlRow: View {
                 step: numericStep
             ) {
                 Text(control.formattedValue(draftValue))
-                    .font(.caption.monospacedDigit())
+                    .font(TX.data(12))
             }
             .disabled(!canMutate || !hasNumericRange)
         case .button:
             Button(display.label) {
                 submitAction()
             }
-            .buttonStyle(RadioActionButtonStyle(tint: RadioPalette.accent))
+            .buttonStyle(RadioActionButtonStyle(tint: TX.teal))
             .disabled(!canMutate)
         case .unknown:
             EmptyView()
@@ -190,6 +194,7 @@ struct RadioLiteCapabilityControlRow: View {
 
     private func submitWhenEditingEnds(_ editing: Bool) {
         isAdjusting = editing
+        sliderEditing(sliderID, editing)
         if !editing { submit(draftValue) }
     }
 
