@@ -1312,12 +1312,16 @@ export class RadioLiteService {
       }
       if (method === "GET" && url.pathname === "/api/v1/logs") {
         this.#requireHttpPrincipal(request, false);
-        exactQueryKeys(url, ["limit", "offset"]);
+        exactQueryKeys(url, ["grid", "limit", "offset"]);
         const limit = queryInteger(url, "limit", 100, 1, 1_000);
         const offset = queryInteger(url, "offset", 0, 0, Number.MAX_SAFE_INTEGER);
+        const grid = url.searchParams.get("grid");
+        const page = grid === null
+          ? { records: this.#log.list(limit, offset), total: this.#log.count }
+          : this.#log.pageByGrid(grid, limit, offset);
         sendJson(response, 200, {
-          records: this.#log.list(limit, offset),
-          total: this.#log.count,
+          records: page.records,
+          total: page.total,
           limit,
           offset,
         });

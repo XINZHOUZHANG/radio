@@ -382,6 +382,69 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(unicodeListedLog.records[0].fields.NAME, "测试员");
   assert.equal(unicodeListedLog.records[0].fields.QTH, "测试城");
 
+  const gridFilterLog = Buffer.from(
+    [
+      "<CALL:6>JA2AAA<QSO_DATE:8>20260904<TIME_ON:6>074000<MODE:3>FT8<BAND:3>20M<GRIDSQUARE:6>PM95AA<NAME:4>Taro<QTH:5>Tokyo<COMMENT:11>Map details<EOR>",
+      "<CALL:5>W1AAA<QSO_DATE:8>20260904<TIME_ON:6>074200<MODE:2>CW<BAND:3>20M<GRIDSQUARE:6>FN31PR<PRIVATE:18>nonmatching-marker<EOR>",
+    ].join(""),
+    "ascii",
+  );
+  response = await fetch(`${base}/api/v1/logs/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/adif",
+      Cookie: cookie!,
+      "X-CSRF-Token": login.csrfToken,
+    },
+    body: gridFilterLog,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { imported: 2, duplicates: 0 });
+
+  response = await fetch(`${base}/api/v1/logs?grid=PM95&limit=1&offset=0`);
+  assert.equal(response.status, 401);
+
+  response = await fetch(`${base}/api/v1/logs?grid=pm95&limit=1&offset=0`, {
+    headers: { Cookie: cookie! },
+  });
+  assert.equal(response.status, 200);
+  const firstGridPageText = await response.text();
+  assert.equal(firstGridPageText.includes("nonmatching-marker"), false);
+  const firstGridPage = JSON.parse(firstGridPageText);
+  assert.equal(firstGridPage.total, 2);
+  assert.equal(firstGridPage.limit, 1);
+  assert.equal(firstGridPage.offset, 0);
+  assert.deepEqual(firstGridPage.records.map((record: { call: string }) => record.call), ["JA2AAA"]);
+  assert.equal(firstGridPage.records[0].fields.NAME, "Taro");
+  assert.equal(firstGridPage.records[0].fields.QTH, "Tokyo");
+  assert.equal(firstGridPage.records[0].fields.COMMENT, "Map details");
+
+  response = await fetch(`${base}/api/v1/logs?grid=PM95&limit=1&offset=1`, {
+    headers: { Cookie: cookie! },
+  });
+  assert.equal(response.status, 200);
+  const secondGridPage = await response.json();
+  assert.equal(secondGridPage.total, 2);
+  assert.deepEqual(secondGridPage.records.map((record: { call: string }) => record.call), ["JA1ABC"]);
+
+  response = await fetch(`${base}/api/v1/logs?grid=PM&limit=10`, {
+    headers: { Cookie: cookie! },
+  });
+  assert.equal(response.status, 200);
+  const fieldGridPage = await response.json();
+  assert.equal(fieldGridPage.total, 2);
+
+  for (const query of [
+    "grid=FN31PR",
+    "grid=ZZ99",
+    "grid=",
+    "grid=FN31&grid=FN32",
+    "grid=FN31&limit=1001",
+  ]) {
+    response = await fetch(`${base}/api/v1/logs?${query}`, { headers: { Cookie: cookie! } });
+    assert.equal(response.status, 400, query);
+  }
+
   const webSocket = new WebSocket(
     `ws://127.0.0.1:${address.port}/ws/control`,
     "radio-lite.v1",

@@ -9,6 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (...parts) => readFileSync(join(root, ...parts), 'utf8').replace(/\r\n/g, '\n');
 
 const service = read('radio-lite-server', 'src', 'server', 'radio-lite-service.ts');
+const logStore = read('radio-lite-server', 'src', 'log', 'adif-log-store.ts');
 const protocol = read('radio-lite-server', 'PROTOCOL.md');
 const http = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteHTTPClient.swift');
 const session = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteSession.swift');
@@ -43,6 +44,7 @@ const logbookView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLite
 const adifDocument = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteADIFDocument.swift');
 const adifDocumentPicker = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteADIFDocumentPicker.swift');
 const gridMapPresentation = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteGridMapPresentation.swift');
+const gridLogPresentation = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteGridLogPresentation.swift');
 const radioLiteProject = read('ios', 'RadioLite', 'project.yml');
 const radioLiteInfo = read('ios', 'RadioLite', 'App', 'Info.plist');
 
@@ -551,6 +553,18 @@ for (const source of [radioLiteProject, radioLiteInfo]) {
 assert(/public\.filename-extension:\s*\n\s*- adi\s*\n\s*- adif/u.test(radioLiteProject));
 assert(/<key>public\.filename-extension<\/key>[\s\S]*?<string>adi<\/string>[\s\S]*?<string>adif<\/string>/u.test(radioLiteInfo));
 assert(logbookView.includes('RadioLiteGridMapView(grids: session.grids)'));
+assert(http.includes('URLQueryItem(name: "grid", value: grid)'));
+assert(session.includes('func logs(inGrid grid: String'));
+assert(session.includes('http.logs(limit: limit, offset: offset, grid: grid)'));
+assert(service.includes('exactQueryKeys(url, ["grid", "limit", "offset"])'));
+assert(service.includes('this.#log.pageByGrid(grid, limit, offset)'));
+assert(logStore.includes('pageByGrid('));
+assert(logbookView.includes('try await session.logs(inGrid: grid, limit: limit, offset: offset)'));
+assert(logbookView.includes('RadioLiteGridQSOListView(summary: item, loadGridPage: loadGridPage)'));
+assert(logbookView.includes('RadioLiteQSORecordDetailView(qso: qso)'));
+assert(gridLogPresentation.includes('guard normalizedGrid == grid else'));
+assert(gridLogPresentation.includes('guard page.offset == 0 || page.offset == nextOffset else'));
+assert(gridLogPresentation.includes('nextOffset = page.offset + page.records.count'));
 const gridMapView = logbookView.slice(logbookView.indexOf('struct RadioLiteGridMapView: View'));
 assert(!gridMapView.includes('@EnvironmentObject'));
 assert(!gridMapView.includes('Map(position: $camera)'));
@@ -571,8 +585,8 @@ assert(gridMapPresentation.includes('let sourceCells: [RadioLiteGridMapCell]'));
 assert(gridMapPresentation.includes('fieldCells = Self.aggregateFields(grids)'));
 assert(gridMapPresentation.includes('memberGridIDs'));
 assert(!gridMapPresentation.includes('grids.prefix('));
-assert(/^\s*CURRENT_PROJECT_VERSION:\s*22\s*$/mu.test(radioLiteProject));
-assert(/^\s*MARKETING_VERSION:\s*0\.2\.10\s*$/mu.test(radioLiteProject));
+assert(/^\s*CURRENT_PROJECT_VERSION:\s*23\s*$/mu.test(radioLiteProject));
+assert(/^\s*MARKETING_VERSION:\s*0\.2\.11\s*$/mu.test(radioLiteProject));
 assert(deviceConfiguration.includes('audioCards = try container.decodeIfPresent'));
 assert(deviceConfigurationView.includes('isSelectableUSBCard'));
 

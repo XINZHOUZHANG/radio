@@ -40,7 +40,9 @@ struct RadioLiteLogbookView: View {
                     Label("\(session.qsoTotal) QSO", systemImage: "book.closed.fill")
                     Spacer()
                     NavigationLink {
-                        RadioLiteGridMapView(grids: session.grids)
+                        RadioLiteGridMapView(grids: session.grids) { grid, limit, offset in
+                            try await session.logs(inGrid: grid, limit: limit, offset: offset)
+                        }
                     } label: {
                         Label("\(session.grids.count) 网格", systemImage: "map.fill")
                     }
@@ -422,11 +424,16 @@ struct RadioLiteGridMapView: View {
     @State private var presentation: RadioLiteGridMapPresentation
     @State private var renderSet: RadioLiteGridMapRenderSet
     @State private var selected: RadioLiteGridSummary?
+    private let loadGridPage: @MainActor (String, Int, Int) async throws -> RadioLiteLogPage
 
-    init(grids: [RadioLiteGridSummary]) {
+    init(
+        grids: [RadioLiteGridSummary],
+        loadGridPage: @escaping @MainActor (String, Int, Int) async throws -> RadioLiteLogPage
+    ) {
         let presentation = RadioLiteGridMapPresentation(grids: grids)
         _presentation = State(initialValue: presentation)
         _renderSet = State(initialValue: presentation.initialRenderSet)
+        self.loadGridPage = loadGridPage
     }
 
     var body: some View {
@@ -512,26 +519,267 @@ struct RadioLiteGridMapView: View {
             .background(.ultraThinMaterial)
         }
         .sheet(item: $selected) { item in
-            NavigationStack {
-                List {
-                    LabeledContent("网格", value: item.grid)
-                    LabeledContent("QSO", value: String(item.qsoCount))
-                    LabeledContent("最近", value: Date(timeIntervalSince1970: Double(item.lastQsoAtMs) / 1_000).formatted())
-                    Section("频段") {
-                        ForEach(item.bands.sorted(by: { $0.value > $1.value }), id: \.key) {
-                            LabeledContent($0.key, value: String($0.value))
+            RadioLiteGridQSOListView(summary: item, loadGridPage: loadGridPage)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+@MainActor
+private struct RadioLiteGridQSOListView: View {
+    @Environment(\.dismiss) private var dismiss
+    let summary: RadioLiteGridSummary
+    private let loadGridPage: @MainActor (String, Int, Int) async throws -> RadioLiteLogPage
+    @State private var log: RadioLiteGridLogPresentation
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var loadRequest = LoadRequest(reset: true)
+
+    private static let pageSize = 50
+
+    init(
+        summary: RadioLiteGridSummary,
+        loadGridPage: @escaping @MainActor (String, Int, Int) async throws -> RadioLiteLogPage
+    ) {
+        self.summary = summary
+        self.loadGridPage = loadGridPage
+        _log = State(
+            initialValue: RadioLiteGridLogPresentation(
+                grid: summary.grid,
+                expectedTotal: summary.qsoCount
+            )
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("网格统计") {
+                    LabeledContent("网格", value: summary.grid)
+                    LabeledContent("QSO", value: String(summary.qsoCount))
+                    LabeledContent(
+                        "最近",
+                        value: Date(
+                            timeIntervalSince1970: Double(summary.lastQsoAtMs) / 1_000
+                        ).formatted(date: .abbreviated, time: .shortened)
+                    )
+                    DisclosureGroup("频段") {
+                        ForEach(summary.bands.sorted(by: valueThenKey), id: \.key) { band, count in
+                            LabeledContent(band, value: String(count))
                         }
                     }
-                    Section("模式") {
-                        ForEach(item.modes.sorted(by: { $0.value > $1.value }), id: \.key) {
-                            LabeledContent($0.key, value: String($0.value))
+                    DisclosureGroup("模式") {
+                        ForEach(summary.modes.sorted(by: valueThenKey), id: \.key) { mode, count in
+                            LabeledContent(mode, value: String(count))
                         }
                     }
                 }
-                .navigationTitle(item.grid)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { selected = nil } } }
+
+                Section {
+                    if log.records.isEmpty, isLoading {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("正在读取该网格的通联记录…")
+                        }
+                    } else if log.records.isEmpty, let errorMessage {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Button("重试") {
+                                requestLoad(reset: true)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(.vertical, 6)
+                    } else if log.records.isEmpty {
+                        ContentUnavailableView(
+                            "没有通联记录",
+                            systemImage: "book.closed",
+                            description: Text("服务器没有找到属于 \(summary.grid) 的 QSO")
+                        )
+                    } else {
+                        ForEach(log.records) { qso in
+                            NavigationLink {
+                                RadioLiteQSORecordDetailView(qso: qso)
+                            } label: {
+                                RadioLiteQSORow(qso: qso)
+                            }
+                        }
+
+                        if let errorMessage {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                Button("重试加载") {
+                                    requestLoad(reset: false)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .padding(.vertical, 4)
+                        } else if isLoading {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                Text("正在加载更多…")
+                            }
+                        } else if log.hasMore {
+                            Button {
+                                requestLoad(reset: false)
+                            } label: {
+                                HStack {
+                                    Spacer()
+                                    Label("加载更多", systemImage: "arrow.down.circle")
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("通联过的呼号与详情")
+                        Spacer()
+                        Text("\(log.records.count)/\(log.total)")
+                            .monospacedDigit()
+                    }
+                }
             }
-            .presentationDetents([.medium])
+            .navigationTitle(summary.grid)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .task(id: loadRequest.id) {
+                await load(loadRequest)
+            }
         }
     }
+
+    private func requestLoad(reset: Bool) {
+        loadRequest = LoadRequest(reset: reset)
+    }
+
+    private func load(_ request: LoadRequest) async {
+        if request.reset {
+            log = RadioLiteGridLogPresentation(grid: summary.grid, expectedTotal: summary.qsoCount)
+        }
+        let offset = request.reset ? 0 : log.nextOffset
+        isLoading = true
+        errorMessage = nil
+        defer {
+            if loadRequest.id == request.id {
+                isLoading = false
+            }
+        }
+
+        do {
+            let page = try await loadGridPage(summary.grid, Self.pageSize, offset)
+            try Task.checkCancellation()
+            guard loadRequest.id == request.id else { return }
+            _ = log.apply(page, requestedGrid: summary.grid)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled, loadRequest.id == request.id else { return }
+            errorMessage = "读取失败：\(error.localizedDescription)"
+        }
+    }
+
+    private struct LoadRequest: Equatable {
+        let id = UUID()
+        let reset: Bool
+    }
+
+    private func valueThenKey(
+        _ left: Dictionary<String, Int>.Element,
+        _ right: Dictionary<String, Int>.Element
+    ) -> Bool {
+        left.value != right.value ? left.value > right.value : left.key < right.key
+    }
+}
+
+private struct RadioLiteQSORecordDetailView: View {
+    let qso: RadioLiteQSORecord
+
+    var body: some View {
+        List {
+            Section("通联") {
+                LabeledContent("呼号", value: qso.call)
+                LabeledContent("开始", value: formattedDate(qso.startedAtMs))
+                if let endedAtMs = qso.endedAtMs {
+                    LabeledContent("结束", value: formattedDate(endedAtMs))
+                }
+                LabeledContent("模式", value: qso.submode ?? qso.mode)
+                LabeledContent("频段", value: qso.band)
+                if let frequencyHz = qso.frequencyHz {
+                    LabeledContent(
+                        "频率",
+                        value: String(format: "%.6f MHz", Double(frequencyHz) / 1_000_000)
+                    )
+                }
+                LabeledContent("来源", value: qso.source.replacingOccurrences(of: "_", with: " "))
+            }
+
+            Section("信号与位置") {
+                if let rstSent = qso.rstSent {
+                    LabeledContent("发送报告", value: rstSent)
+                }
+                if let rstReceived = qso.rstReceived {
+                    LabeledContent("接收报告", value: rstReceived)
+                }
+                if let grid = qso.grid {
+                    LabeledContent("对方网格", value: grid)
+                }
+                if let myCall = qso.myCall {
+                    LabeledContent("本台呼号", value: myCall)
+                }
+                if let myGrid = qso.myGrid {
+                    LabeledContent("本台网格", value: myGrid)
+                }
+            }
+
+            if !supplementalFields.isEmpty {
+                Section("ADIF 附加信息") {
+                    ForEach(supplementalFields, id: \.key) { field in
+                        LabeledContent(field.label, value: field.value)
+                    }
+                }
+            }
+        }
+        .navigationTitle(qso.call)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var supplementalFields: [(key: String, label: String, value: String)] {
+        Self.supplementalFieldLabels.compactMap { key, label in
+            guard let value = qso.fields[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                return nil
+            }
+            return (key: key, label: label, value: value)
+        }
+    }
+
+    private func formattedDate(_ milliseconds: Int64) -> String {
+        Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+            .formatted(date: .abbreviated, time: .standard)
+    }
+
+    private static let supplementalFieldLabels: [(String, String)] = [
+        ("NAME", "姓名"),
+        ("QTH", "地点"),
+        ("COUNTRY", "国家/地区"),
+        ("STATE", "州/省"),
+        ("CNTY", "县/区"),
+        ("CQZ", "CQ 分区"),
+        ("ITUZ", "ITU 分区"),
+        ("TX_PWR", "发射功率"),
+        ("COMMENT", "备注"),
+        ("NOTES", "附注"),
+        ("QSL_SENT", "QSL 已发"),
+        ("QSL_RCVD", "QSL 已收"),
+        ("LOTW_QSL_SENT", "LoTW 已发"),
+        ("LOTW_QSL_RCVD", "LoTW 已收"),
+    ]
 }

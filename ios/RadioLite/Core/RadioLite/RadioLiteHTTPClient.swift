@@ -231,14 +231,22 @@ final class RadioLiteHTTPClient: @unchecked Sendable {
         )
     }
 
-    func logs(limit: Int = 100, offset: Int = 0) async throws -> RadioLiteLogPage {
-        try await send(
+    func logs(
+        limit: Int = 100,
+        offset: Int = 0,
+        grid: String? = nil
+    ) async throws -> RadioLiteLogPage {
+        var queryItems = [
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "offset", value: String(offset)),
+        ]
+        if let grid {
+            queryItems.append(URLQueryItem(name: "grid", value: grid))
+        }
+        return try await send(
             method: "GET",
             path: "/api/v1/logs",
-            queryItems: [
-                URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "offset", value: String(offset)),
-            ]
+            queryItems: queryItems
         )
     }
 

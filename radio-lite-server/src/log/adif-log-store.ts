@@ -208,6 +208,38 @@ export class AdifLogStore {
       .map((entry) => cloneRecord(entry.record));
   }
 
+  pageByGrid(
+    grid: string,
+    limit = 100,
+    offset = 0,
+  ): { records: QsoLogRecord[]; total: number } {
+    this.#assertLoaded();
+    const normalizedGrid = normalizeMaidenhead(grid);
+    if (normalizedGrid.length !== 2 && normalizedGrid.length !== 4) {
+      throw new Error("grid filter must be a 2 or 4 character Maidenhead locator");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new Error("log limit must be in 1..1000");
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error("log offset must be a non-negative integer");
+    }
+
+    const records: QsoLogRecord[] = [];
+    let total = 0;
+    for (let index = this.#records.length - 1; index >= 0; index -= 1) {
+      const record = this.#records[index].record;
+      if (record.grid === null || !record.grid.startsWith(normalizedGrid)) {
+        continue;
+      }
+      if (total >= offset && records.length < limit) {
+        records.push(cloneRecord(record));
+      }
+      total += 1;
+    }
+    return { records, total };
+  }
+
   gridSummary(resolution: 2 | 4 | 6 | 8 = 4): GridSummary[] {
     this.#assertLoaded();
     if (resolution !== 2 && resolution !== 4 && resolution !== 6 && resolution !== 8) {

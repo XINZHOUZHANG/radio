@@ -277,11 +277,18 @@ export. The import limit is 16 MiB, and the maximum log accepted at startup is
 
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/logs?limit=100&offset=0` | authenticated | Newest-first paginated QSO records |
+| `GET` | `/api/v1/logs?limit=100&offset=0&grid=FN31` | authenticated | Newest-first paginated QSO records, optionally filtered by a 2/4-character Maidenhead prefix |
 | `POST` | `/api/v1/logs` | operator | Add a manual voice QSO from the iOS app |
 | `GET` | `/api/v1/logs/grids?resolution=4` | authenticated | Aggregate QSOs into 2/4/6/8-character Maidenhead cells |
 | `GET` | `/api/v1/logs/export` | authenticated | Download `radio-lite-log.adi` |
 | `POST` | `/api/v1/logs/import` | administrator | Import and deduplicate ADIF records |
+
+The optional `grid` query accepts only a two- or four-character Maidenhead
+locator. Matching is case-insensitive and includes more precise locators with
+that prefix: for example, `FN31` matches both `FN31` and `FN31PR`. `total`
+counts only matching QSOs. `limit` remains bounded to `1..1000`, so selecting a
+large two-character field never returns the complete matching log in one
+response.
 
 The manual-QSO request body is:
 

@@ -111,6 +111,113 @@ test("ADIF import preserves unknown fields, deduplicates and aggregates grid cel
   assert.equal(reopened.list(10)[1].fields.QTH, "测试城");
 });
 
+test("ADIF store pages QSOs by bounded two or four character grid prefixes", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-adif-grid-page-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new AdifLogStore(join(directory, "station-log.adif"));
+  await store.load();
+  await store.import(serializeAdif([
+    {
+      CALL: "W1AAA",
+      QSO_DATE: "20260825",
+      TIME_ON: "120000",
+      BAND: "20M",
+      MODE: "FT8",
+      GRIDSQUARE: "FN31PR",
+    },
+    {
+      CALL: "W1BBB",
+      QSO_DATE: "20260825",
+      TIME_ON: "121500",
+      BAND: "20M",
+      MODE: "SSB",
+      GRIDSQUARE: "FN31AA",
+    },
+    {
+      CALL: "W1CCC",
+      QSO_DATE: "20260825",
+      TIME_ON: "123000",
+      BAND: "40M",
+      MODE: "CW",
+      GRIDSQUARE: "FN32AB",
+    },
+    {
+      CALL: "JA1DDD",
+      QSO_DATE: "20260825",
+      TIME_ON: "124500",
+      BAND: "20M",
+      MODE: "FT8",
+      GRIDSQUARE: "PM95",
+    },
+    {
+      CALL: "N0GRID",
+      QSO_DATE: "20260825",
+      TIME_ON: "130000",
+      BAND: "20M",
+      MODE: "FT8",
+    },
+  ]));
+
+  const firstPage = store.pageByGrid(" fn31 ", 1, 0);
+  assert.equal(firstPage.total, 2);
+  assert.deepEqual(firstPage.records.map((record) => record.call), ["W1BBB"]);
+  const secondPage = store.pageByGrid("FN31", 1, 1);
+  assert.equal(secondPage.total, 2);
+  assert.deepEqual(secondPage.records.map((record) => record.call), ["W1AAA"]);
+
+  const fieldPage = store.pageByGrid("fn", 10, 0);
+  assert.equal(fieldPage.total, 3);
+  assert.deepEqual(fieldPage.records.map((record) => record.call), ["W1CCC", "W1BBB", "W1AAA"]);
+  assert.equal(store.gridSummary(4).find((entry) => entry.grid === "FN31")?.qsoCount, firstPage.total);
+  assert.equal(store.gridSummary(2).find((entry) => entry.grid === "FN")?.qsoCount, fieldPage.total);
+
+  assert.throws(() => store.pageByGrid("FN31PR"), /2 or 4 character Maidenhead/u);
+  assert.throws(() => store.pageByGrid("ZZ99"), /Maidenhead/u);
+  assert.throws(() => store.pageByGrid("FN31", 1_001), /limit/u);
+  assert.throws(() => store.pageByGrid("FN31", 1, -1), /offset/u);
+});
+
+test("ADIF store keeps grid pages bounded for about seven thousand matching QSOs", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "radio-lite-adif-grid-large-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new AdifLogStore(join(directory, "station-log.adif"));
+  await store.load();
+
+  const matchingCount = 7_005;
+  const nonmatchingCount = 13;
+  const startedAtMs = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const recordAt = (index: number, grid: string) => {
+    const iso = new Date(startedAtMs + index * 1_000).toISOString();
+    return {
+      CALL: "W1AAA",
+      QSO_DATE: iso.slice(0, 10).replaceAll("-", ""),
+      TIME_ON: iso.slice(11, 19).replaceAll(":", ""),
+      BAND: "20M",
+      MODE: "FT8",
+      GRIDSQUARE: grid,
+    };
+  };
+  const matching = Array.from({ length: matchingCount }, (_, index) =>
+    recordAt(index, index % 2 === 0 ? "FN31AA" : "FN32BB"));
+  const nonmatching = Array.from({ length: nonmatchingCount }, (_, index) =>
+    recordAt(matchingCount + index, "PM95AA"));
+  await store.import(serializeAdif([...matching, ...nonmatching]));
+
+  const firstPage = store.pageByGrid("FN", 50, 0);
+  assert.equal(firstPage.total, matchingCount);
+  assert.equal(firstPage.records.length, 50);
+  assert.ok(firstPage.records.every((record) => record.grid?.startsWith("FN") === true));
+
+  const deepPage = store.pageByGrid("FN", 50, 6_950);
+  assert.equal(deepPage.total, matchingCount);
+  assert.equal(deepPage.records.length, 50);
+
+  const finalPage = store.pageByGrid("FN", 50, 7_000);
+  assert.equal(finalPage.total, matchingCount);
+  assert.equal(finalPage.records.length, 5);
+  assert.ok(finalPage.records.every((record) => record.grid?.startsWith("FN") === true));
+});
+
 test("ADIF store preserves a corrupt copy and repairs only an interrupted tail", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "radio-lite-adif-recover-"));
   context.after(() => rm(directory, { recursive: true, force: true }));

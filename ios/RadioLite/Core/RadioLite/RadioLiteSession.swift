@@ -1759,6 +1759,19 @@ final class RadioLiteSession: ObservableObject {
         await refreshLogs()
     }
 
+    func logs(inGrid grid: String, limit: Int = 50, offset: Int = 0) async throws -> RadioLiteLogPage {
+        guard let ownership = authenticationOwnershipState.currentOwnership,
+              authenticationOwnershipState.isCurrent(ownership),
+              let http else {
+            throw RadioLiteSessionError.notConnected
+        }
+        let page = try await http.logs(limit: limit, offset: offset, grid: grid)
+        guard authenticationOwnershipState.isCurrent(ownership) else {
+            throw CancellationError()
+        }
+        return page
+    }
+
     func exportADIF() async throws -> URL {
         guard let http else { throw RadioLiteSessionError.notConnected }
         let data = try await http.exportADIF()
