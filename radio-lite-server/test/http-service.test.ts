@@ -359,6 +359,29 @@ test("HTTP service completes setup, login, pairing and radio configuration", asy
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { imported: 0, duplicates: 1 });
 
+  const unicodeLog = Buffer.from(
+    "<CALL:6>BH1XYZ<QSO_DATE:8>20260904<TIME_ON:6>073800<MODE:3>FT8<BAND:3>20M<NAME:3>测试员<QTH:3>测试城<EOR>",
+    "utf8",
+  );
+  response = await fetch(`${base}/api/v1/logs/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/adif",
+      Cookie: cookie!,
+      "X-CSRF-Token": login.csrfToken,
+    },
+    body: unicodeLog,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { imported: 1, duplicates: 0 });
+
+  response = await fetch(`${base}/api/v1/logs?limit=1`, { headers: { Cookie: cookie! } });
+  assert.equal(response.status, 200);
+  const unicodeListedLog = await response.json();
+  assert.equal(unicodeListedLog.total, 2);
+  assert.equal(unicodeListedLog.records[0].fields.NAME, "测试员");
+  assert.equal(unicodeListedLog.records[0].fields.QTH, "测试城");
+
   const webSocket = new WebSocket(
     `ws://127.0.0.1:${address.port}/ws/control`,
     "radio-lite.v1",

@@ -81,6 +81,8 @@ test("ADIF import preserves unknown fields, deduplicates and aggregates grid cel
       MODE: "FT8",
       GRIDSQUARE: "FN31PR",
       STATE: "CT",
+      NAME: "测试员",
+      QTH: "测试城",
     },
     {
       CALL: "K1ABC",
@@ -94,12 +96,19 @@ test("ADIF import preserves unknown fields, deduplicates and aggregates grid cel
   ]);
   assert.deepEqual(await store.import(imported), { imported: 2, duplicates: 0 });
   assert.equal(store.list(10)[1].fields.STATE, "CT");
+  assert.equal(store.list(10)[1].fields.NAME, "测试员");
+  assert.equal(store.list(10)[1].fields.QTH, "测试城");
   const grids = store.gridSummary(4);
   assert.equal(grids.length, 1);
   assert.equal(grids[0].grid, "FN31");
   assert.equal(grids[0].qsoCount, 2);
   assert.deepEqual(grids[0].bands, { "20M": 2 });
   assert.deepEqual(grids[0].modes, { FT8: 1, SSB: 1 });
+
+  const reopened = new AdifLogStore(join(directory, "station-log.adif"));
+  assert.equal((await reopened.load()).count, 2);
+  assert.equal(reopened.list(10)[1].fields.NAME, "测试员");
+  assert.equal(reopened.list(10)[1].fields.QTH, "测试城");
 });
 
 test("ADIF store preserves a corrupt copy and repairs only an interrupted tail", async (context) => {

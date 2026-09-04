@@ -45,6 +45,22 @@ test("ADIF parser accepts case-insensitive tags, leading-zero lengths and type h
   }]);
 });
 
+test("ADIF parser and writer preserve UTF-8 fields whose lengths count characters", () => {
+  const encoded = Buffer.from(
+    "<CALL:6>BH1ABC<QSO_DATE:8>20260904<TIME_ON:6>073800<MODE:3>FT8<BAND:3>20M<NAME:3>测试员<QTH:3>测试城<EOR>",
+    "utf8",
+  );
+  const parsed = parseAdif(encoded);
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0].NAME, "测试员");
+  assert.equal(parsed.records[0].QTH, "测试城");
+
+  const serialized = serializeAdifRecord(parsed.records[0]);
+  assert.match(serialized.toString("utf8"), /<NAME:3>测试员/u);
+  assert.match(serialized.toString("utf8"), /<QTH:3>测试城/u);
+  assert.deepEqual(parseAdif(serialized).records, parsed.records);
+});
+
 test("ADIF recovery mode keeps complete records and marks an interrupted tail", () => {
   const first = serializeAdifRecord({
     CALL: "W1AW",
@@ -61,8 +77,8 @@ test("ADIF recovery mode keeps complete records and marks an interrupted tail", 
   assert.equal(recovered.trailingIncomplete, true);
 });
 
-test("ADIF writer and parser reject ambiguous or non-interoperable data", () => {
-  assert.throws(() => serializeAdifRecord({ CALL: "北京" }), /ASCII/u);
+test("ADIF writer and parser reject ambiguous or unsafe data", () => {
+  assert.throws(() => serializeAdifRecord({ CALL: "W1AW\0" }), /prohibited/u);
   assert.throws(() => serializeAdifRecord({ "BAD-FIELD": "x" }), /field name/u);
   assert.throws(
     () => parseAdif(Buffer.from("<CALL:4>W1AW<CALL:4>W2AW<EOR>", "ascii")),

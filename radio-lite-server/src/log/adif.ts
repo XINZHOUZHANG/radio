@@ -108,22 +108,20 @@ export function parseAdif(
     if (!Number.isSafeInteger(length) || length < 0 || length > MAX_FIELD_BYTES) {
       throw new AdifParseError(`ADIF field ${name} has an invalid data length`);
     }
-    if (position + length > bytes.length) {
-      return incomplete(`ADIF field ${name} is incomplete at byte ${currentStart || tagStart}`);
-    }
     if (name in current) {
       throw new AdifParseError(`ADIF record contains duplicate field ${name}`);
     }
-    const valueBytes = bytes.subarray(position, position + length);
-    const value = valueBytes.toString("utf8");
-    if (!Buffer.from(value, "utf8").equals(valueBytes)) {
-      throw new AdifParseError(`ADIF field ${name} is not valid UTF-8`);
+    // Wavelog and other deployed loggers emit UTF-8 ADI values and count
+    // Unicode characters rather than encoded bytes. ASCII remains identical.
+    const field = readUtf8Characters(bytes, position, length, name);
+    if (field === null) {
+      return incomplete(`ADIF field ${name} is incomplete at byte ${currentStart || tagStart}`);
     }
     if (Object.keys(current).length === 0) {
       currentStart = tagStart;
     }
-    current[name] = value;
-    position += length;
+    current[name] = field.value;
+    position = field.nextPosition;
   }
 
   if (Object.keys(current).length > 0) {
@@ -147,8 +145,11 @@ export function serializeAdif(
     serializeFields(fields, ["ADIF_VER", "PROGRAMID", "PROGRAMVERSION"]),
     "<EOH>",
   ].join("\r\n");
-  const recordText = records.map((record) => serializeAdifRecord(record).toString("ascii"));
-  return Buffer.from(`${headerText}\r\n${recordText.join("")}\r\n`, "ascii");
+  return Buffer.concat([
+    Buffer.from(`${headerText}\r\n`, "utf8"),
+    ...records.map((record) => serializeAdifRecord(record)),
+    Buffer.from("\r\n", "ascii"),
+  ]);
 }
 
 export function serializeAdifRecord(record: AdifFields): Buffer {
@@ -156,7 +157,7 @@ export function serializeAdifRecord(record: AdifFields): Buffer {
   if (Object.keys(normalized).length === 0) {
     throw new Error("ADIF record must contain at least one field");
   }
-  return Buffer.from(`${serializeFields(normalized, RECORD_FIELD_ORDER)}<EOR>\r\n`, "ascii");
+  return Buffer.from(`${serializeFields(normalized, RECORD_FIELD_ORDER)}<EOR>\r\n`, "utf8");
 }
 
 function serializeFields(fields: AdifFields, preferredOrder: readonly string[]): string {
@@ -167,7 +168,7 @@ function serializeFields(fields: AdifFields, preferredOrder: readonly string[]):
   ];
   return ordered.map((name) => {
     const value = fields[name];
-    return `<${name}:${value.length}>${value}`;
+    return `<${name}:${[...value].length}>${value}`;
   }).join("");
 }
 
@@ -181,11 +182,12 @@ function normalizeFields(value: AdifFields): AdifFields {
     if (!FIELD_NAME_PATTERN.test(name) || name === "EOH" || name === "EOR") {
       throw new Error(`ADIF field name is invalid: ${rawName}`);
     }
-    if (typeof rawValue !== "string" || rawValue.length > MAX_FIELD_BYTES) {
+    if (typeof rawValue !== "string") {
       throw new Error(`ADIF field ${name} must be bounded text`);
     }
-    if (!/^[\x00-\x7f]*$/u.test(rawValue)) {
-      throw new Error(`ADIF field ${name} must use interoperable ASCII text`);
+    const encoded = Buffer.from(rawValue, "utf8");
+    if (encoded.length > MAX_FIELD_BYTES || encoded.toString("utf8") !== rawValue) {
+      throw new Error(`ADIF field ${name} must use bounded valid UTF-8 text`);
     }
     if (/[\0]/u.test(rawValue)) {
       throw new Error(`ADIF field ${name} contains a prohibited character`);
@@ -196,4 +198,90 @@ function normalizeFields(value: AdifFields): AdifFields {
     normalized[name] = rawValue;
   }
   return normalized;
+}
+
+function readUtf8Characters(
+  bytes: Buffer,
+  start: number,
+  characterLength: number,
+  fieldName: string,
+): { value: string; nextPosition: number } | null {
+  const presumedAsciiEnd = start + characterLength;
+  if (presumedAsciiEnd > bytes.length) {
+    return null;
+  }
+  let ascii = true;
+  for (let position = start; position < presumedAsciiEnd; position += 1) {
+    if ((bytes[position]! & 0x80) !== 0) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    return {
+      value: bytes.subarray(start, presumedAsciiEnd).toString("ascii"),
+      nextPosition: presumedAsciiEnd,
+    };
+  }
+
+  let nextPosition = start;
+  for (let characters = 0; characters < characterLength; characters += 1) {
+    if (nextPosition >= bytes.length) {
+      return null;
+    }
+    const width = validUtf8SequenceWidth(bytes, nextPosition);
+    if (width === null) {
+      throw new AdifParseError(`ADIF field ${fieldName} is not valid UTF-8`);
+    }
+    if (width === 0) {
+      return null;
+    }
+    nextPosition += width;
+    if (nextPosition - start > MAX_FIELD_BYTES) {
+      throw new AdifParseError(`ADIF field ${fieldName} has an invalid data length`);
+    }
+  }
+  return {
+    value: bytes.subarray(start, nextPosition).toString("utf8"),
+    nextPosition,
+  };
+}
+
+// Returns zero for a truncated sequence and null for malformed UTF-8.
+function validUtf8SequenceWidth(bytes: Buffer, position: number): number | null {
+  const first = bytes[position]!;
+  if (first <= 0x7f) {
+    return 1;
+  }
+  const width = first >= 0xc2 && first <= 0xdf
+    ? 2
+    : first >= 0xe0 && first <= 0xef
+      ? 3
+      : first >= 0xf0 && first <= 0xf4
+        ? 4
+        : null;
+  if (width === null) {
+    return null;
+  }
+  if (position + width > bytes.length) {
+    return 0;
+  }
+  const second = bytes[position + 1]!;
+  if ((second & 0xc0) !== 0x80) {
+    return null;
+  }
+  if (
+    (first === 0xe0 && second < 0xa0) ||
+    (first === 0xed && second > 0x9f) ||
+    (first === 0xf0 && second < 0x90) ||
+    (first === 0xf4 && second > 0x8f)
+  ) {
+    return null;
+  }
+  for (let offset = 2; offset < width; offset += 1) {
+    if ((bytes[position + offset]! & 0xc0) !== 0x80) {
+      return null;
+    }
+  }
+  return width;
 }
