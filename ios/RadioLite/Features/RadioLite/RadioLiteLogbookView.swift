@@ -11,6 +11,7 @@ struct RadioLiteLogbookView: View {
     @State private var showExporter = false
     @State private var operationStatus: String?
     @State private var importing = false
+    @State private var importProgressMessage = "正在读取所选 ADIF…"
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -53,7 +54,7 @@ struct RadioLiteLogbookView: View {
                 Section {
                     HStack(spacing: 10) {
                         ProgressView()
-                        Text("正在读取并导入 ADIF…")
+                        Text(importProgressMessage)
                     }
                     .foregroundStyle(RadioPalette.accent)
                 }
@@ -138,14 +139,9 @@ struct RadioLiteLogbookView: View {
         }
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: [
-                UTType(filenameExtension: "adi") ?? .data,
-                UTType(filenameExtension: "adif") ?? .data,
-                .plainText,
-                .data,
-            ]
+            allowedContentTypes: RadioLiteADIFDocument.allowedContentTypes
         ) { result in
-            Task { await importFile(result) }
+            handleImportSelection(result)
         }
     }
 
@@ -169,13 +165,41 @@ struct RadioLiteLogbookView: View {
         }
     }
 
-    private func importFile(_ result: Result<URL, Error>) async {
+    private func handleImportSelection(_ result: Result<URL, Error>) {
         guard !importing else { return }
-        importing = true
-        defer { importing = false }
         do {
             let url = try result.get()
-            let counts = try await session.importADIF(from: url)
+            // The document picker grants a security-scoped URL. Acquire it before
+            // crossing the Task boundary so third-party file providers cannot revoke
+            // access before the coordinated copy starts.
+            let securityScopeAccessed = url.startAccessingSecurityScopedResource()
+            operationStatus = nil
+            importProgressMessage = "正在读取 \(url.lastPathComponent)…"
+            importing = true
+            Task { @MainActor in
+                await importFile(at: url, securityScopeAccessed: securityScopeAccessed)
+            }
+        } catch {
+            session.errorMessage = "ADIF 文件选择失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func importFile(at url: URL, securityScopeAccessed: Bool) async {
+        var shouldStopSecurityScope = securityScopeAccessed
+        defer {
+            if shouldStopSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+            importing = false
+        }
+        do {
+            let data = try await RadioLiteADIFDocument.readCoordinatedData(from: url)
+            if shouldStopSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+                shouldStopSecurityScope = false
+            }
+            importProgressMessage = "正在上传并导入 ADIF…"
+            let counts = try await session.importADIF(data: data)
             operationStatus = "导入 \(counts.0) 条，跳过 \(counts.1) 条重复记录"
         } catch {
             session.errorMessage = "ADIF 导入失败：\(error.localizedDescription)"

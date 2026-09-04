@@ -23,5 +23,30 @@
     <array>
         <string>audio</string>
     </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>xyz.992218.radio-lite.adif</string>
+            <key>UTTypeDescription</key>
+            <string>Amateur Data Interchange Format log</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>adi</string>
+                    <string>adif</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/adif</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>

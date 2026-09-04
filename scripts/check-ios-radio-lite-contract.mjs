@@ -39,6 +39,10 @@ const frame = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteMediaFrame
 const socket = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteWebSocketChannel.swift');
 const hamlibRig = read('radio-lite-server', 'src', 'rig', 'hamlib-rig.ts');
 const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
+const logbookView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteLogbookView.swift');
+const adifDocument = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteADIFDocument.swift');
+const radioLiteProject = read('ios', 'RadioLite', 'project.yml');
+const radioLiteInfo = read('ios', 'RadioLite', 'App', 'Info.plist');
 
 const capabilityModelFields = [
   'id', 'token', 'group', 'access', 'presentation', 'value', 'minimum', 'maximum',
@@ -513,6 +517,24 @@ assert(session.includes('@Published private(set) var telemetry: RadioLiteTelemet
 assert(session.includes('await unsubscribeTelemetry()'));
 assert(session.includes('try await subscribeTelemetry('));
 assert(telemetryStrip.includes('frame(height: 52)'));
+assert(adifDocument.includes('UTType(importedAs: typeIdentifier, conformingTo: .plainText)'));
+assert(adifDocument.includes('NSFileCoordinator()'));
+assert(adifDocument.includes('copyItem(at: coordinatedURL, to: temporaryURL)'));
+assert(logbookView.includes('RadioLiteADIFDocument.allowedContentTypes'));
+const adifSelectionHandler = logbookView.slice(
+  logbookView.indexOf('private func handleImportSelection('),
+  logbookView.indexOf('private func importFile(at:'),
+);
+assert(adifSelectionHandler.indexOf('startAccessingSecurityScopedResource()') >= 0);
+assert(adifSelectionHandler.indexOf('startAccessingSecurityScopedResource()') < adifSelectionHandler.indexOf('Task {'));
+for (const source of [radioLiteProject, radioLiteInfo]) {
+  assert(source.includes('UTImportedTypeDeclarations'));
+  assert(source.includes('xyz.992218.radio-lite.adif'));
+  assert(source.includes('public.plain-text'));
+  assert(source.includes('application/adif'));
+}
+assert(/public\.filename-extension:\s*\n\s*- adi\s*\n\s*- adif/u.test(radioLiteProject));
+assert(/<key>public\.filename-extension<\/key>[\s\S]*?<string>adi<\/string>[\s\S]*?<string>adif<\/string>/u.test(radioLiteInfo));
 assert(deviceConfiguration.includes('audioCards = try container.decodeIfPresent'));
 assert(deviceConfigurationView.includes('isSelectableUSBCard'));
 
