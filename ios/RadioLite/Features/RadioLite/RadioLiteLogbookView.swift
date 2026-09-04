@@ -40,7 +40,7 @@ struct RadioLiteLogbookView: View {
                     Label("\(session.qsoTotal) QSO", systemImage: "book.closed.fill")
                     Spacer()
                     NavigationLink {
-                        RadioLiteGridMapView()
+                        RadioLiteGridMapView(grids: session.grids)
                     } label: {
                         Label("\(session.grids.count) 网格", systemImage: "map.fill")
                     }
@@ -419,44 +419,68 @@ struct RadioLiteManualQSOView: View {
 }
 
 struct RadioLiteGridMapView: View {
-    @EnvironmentObject private var session: RadioLiteSession
-    @State private var camera: MapCameraPosition = .automatic
+    @State private var presentation: RadioLiteGridMapPresentation
     @State private var selected: RadioLiteGridSummary?
 
+    init(grids: [RadioLiteGridSummary]) {
+        _presentation = State(initialValue: RadioLiteGridMapPresentation(grids: grids))
+    }
+
     var body: some View {
-        Map(position: $camera) {
-            ForEach(session.grids.prefix(600)) { item in
-                MapPolygon(coordinates: coordinates(item))
-                    .foregroundStyle(RadioPalette.accent.opacity(fillOpacity(item.qsoCount)))
-                    .stroke(RadioPalette.accent.opacity(0.42), lineWidth: 0.7)
-                Annotation(item.grid, coordinate: CLLocationCoordinate2D(latitude: item.latitude, longitude: item.longitude)) {
-                    Button { selected = item } label: {
-                        VStack(spacing: 2) {
-                            Text("\(item.qsoCount)")
-                                .font(.caption2.bold().monospacedDigit())
-                                .frame(minWidth: 25, minHeight: 25)
-                                .foregroundStyle(.black)
-                                .background(RadioPalette.accent, in: Circle())
-                            Text(item.grid)
-                                .font(.caption2.monospaced().bold())
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.72), in: Capsule())
+        MapReader { proxy in
+            Map(initialPosition: .automatic) {
+                ForEach(presentation.cells) { cell in
+                    MapPolygon(coordinates: cell.coordinates)
+                        .foregroundStyle(RadioPalette.accent.opacity(cell.fillOpacity))
+                        .stroke(RadioPalette.accent.opacity(0.42), lineWidth: 0.7)
+                }
+                ForEach(presentation.labeledCells) { cell in
+                    Annotation(
+                        cell.summary.grid,
+                        coordinate: CLLocationCoordinate2D(
+                            latitude: cell.summary.latitude,
+                            longitude: cell.summary.longitude
+                        )
+                    ) {
+                        Button { selected = cell.summary } label: {
+                            VStack(spacing: 2) {
+                                Text("\(cell.summary.qsoCount)")
+                                    .font(.caption2.bold().monospacedDigit())
+                                    .frame(minWidth: 25, minHeight: 25)
+                                    .foregroundStyle(.black)
+                                    .background(RadioPalette.accent, in: Circle())
+                                Text(cell.summary.grid)
+                                    .font(.caption2.monospaced().bold())
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.72), in: Capsule())
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+            .mapStyle(.standard)
+            .mapControls { MapCompass(); MapScaleView(); MapPitchToggle() }
+            .simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { event in
+                        guard let coordinate = proxy.convert(event.location, from: .local) else {
+                            return
+                        }
+                        if let summary = presentation.summary(at: coordinate) {
+                            selected = summary
+                        }
+                    }
+            )
         }
-        .mapStyle(.standard)
-        .mapControls { MapCompass(); MapScaleView(); MapPitchToggle() }
         .navigationTitle("通联网格")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Label("\(session.grids.count) 网格", systemImage: "square.grid.3x3")
+                Label("\(presentation.totalGridCount) 网格", systemImage: "square.grid.3x3")
                 Spacer()
-                Text("服务端 ADIF 聚合")
+                Text("地图显示 \(presentation.cells.count) 个")
             }
             .font(.caption.weight(.semibold))
             .padding(12)
@@ -484,20 +508,5 @@ struct RadioLiteGridMapView: View {
             }
             .presentationDetents([.medium])
         }
-    }
-
-    private func coordinates(_ item: RadioLiteGridSummary) -> [CLLocationCoordinate2D] {
-        let halfLat = item.latitudeSpan / 2
-        let halfLon = item.longitudeSpan / 2
-        return [
-            .init(latitude: item.latitude - halfLat, longitude: item.longitude - halfLon),
-            .init(latitude: item.latitude - halfLat, longitude: item.longitude + halfLon),
-            .init(latitude: item.latitude + halfLat, longitude: item.longitude + halfLon),
-            .init(latitude: item.latitude + halfLat, longitude: item.longitude - halfLon),
-        ]
-    }
-
-    private func fillOpacity(_ count: Int) -> Double {
-        min(0.3, 0.07 + log10(Double(max(1, count))) * 0.06)
     }
 }

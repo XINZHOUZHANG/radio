@@ -42,6 +42,7 @@ const mediaHub = read('radio-lite-server', 'src', 'media', 'media-hub.ts');
 const logbookView = read('ios', 'RadioLite', 'Features', 'RadioLite', 'RadioLiteLogbookView.swift');
 const adifDocument = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteADIFDocument.swift');
 const adifDocumentPicker = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteADIFDocumentPicker.swift');
+const gridMapPresentation = read('ios', 'RadioLite', 'Core', 'RadioLite', 'RadioLiteGridMapPresentation.swift');
 const radioLiteProject = read('ios', 'RadioLite', 'project.yml');
 const radioLiteInfo = read('ios', 'RadioLite', 'App', 'Info.plist');
 
@@ -549,8 +550,19 @@ for (const source of [radioLiteProject, radioLiteInfo]) {
 }
 assert(/public\.filename-extension:\s*\n\s*- adi\s*\n\s*- adif/u.test(radioLiteProject));
 assert(/<key>public\.filename-extension<\/key>[\s\S]*?<string>adi<\/string>[\s\S]*?<string>adif<\/string>/u.test(radioLiteInfo));
-assert(/^\s*CURRENT_PROJECT_VERSION:\s*21\s*$/mu.test(radioLiteProject));
-assert(/^\s*MARKETING_VERSION:\s*0\.2\.9\s*$/mu.test(radioLiteProject));
+assert(logbookView.includes('RadioLiteGridMapView(grids: session.grids)'));
+const gridMapView = logbookView.slice(logbookView.indexOf('struct RadioLiteGridMapView: View'));
+assert(!gridMapView.includes('@EnvironmentObject'));
+assert(!gridMapView.includes('Map(position: $camera)'));
+assert(gridMapView.includes('Map(initialPosition: .automatic)'));
+assert(gridMapView.includes('SpatialTapGesture()'));
+assert(gridMapView.includes('proxy.convert(event.location, from: .local)'));
+assert(!gridMapView.includes('session.grids.prefix(600)'));
+assert(gridMapPresentation.includes('static let maximumCells = 600'));
+assert(gridMapPresentation.includes('static let maximumLabels = 80'));
+assert(gridMapPresentation.includes('cells = grids.prefix(Self.maximumCells).map'));
+assert(/^\s*CURRENT_PROJECT_VERSION:\s*22\s*$/mu.test(radioLiteProject));
+assert(/^\s*MARKETING_VERSION:\s*0\.2\.10\s*$/mu.test(radioLiteProject));
 assert(deviceConfiguration.includes('audioCards = try container.decodeIfPresent'));
 assert(deviceConfigurationView.includes('isSelectableUSBCard'));
 
