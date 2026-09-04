@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct RadioLiteSpectrumAxisTick: Equatable, Identifiable, Sendable {
     let index: Int
@@ -70,6 +71,7 @@ struct RadioLiteSpectrumView: View {
     let policy: RadioLiteMediaPolicy?
     let compact: Bool
     let selectedAudioFrequencyHz: Int?
+    let transmitAudioFrequencyHz: Int?
 
     @State private var isExpanded = false
 
@@ -79,7 +81,8 @@ struct RadioLiteSpectrumView: View {
         history: [[UInt8]],
         policy: RadioLiteMediaPolicy?,
         compact: Bool = false,
-        selectedAudioFrequencyHz: Int? = nil
+        selectedAudioFrequencyHz: Int? = nil,
+        transmitAudioFrequencyHz: Int? = nil
     ) {
         self.spectrum = spectrum
         self.capability = capability
@@ -87,6 +90,7 @@ struct RadioLiteSpectrumView: View {
         self.policy = policy
         self.compact = compact
         self.selectedAudioFrequencyHz = selectedAudioFrequencyHz
+        self.transmitAudioFrequencyHz = transmitAudioFrequencyHz
     }
 
     @ViewBuilder
@@ -95,12 +99,12 @@ struct RadioLiteSpectrumView: View {
             spectrumContent
                 .padding(10)
                 .background(
-                    RadioPalette.panel,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    TX.card,
+                    in: RoundedRectangle(cornerRadius: TX.cardRadius, style: .continuous)
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.055))
+                    RoundedRectangle(cornerRadius: TX.cardRadius, style: .continuous)
+                        .strokeBorder(TX.divider)
                 }
         } else {
             RadioPanel {
@@ -113,21 +117,21 @@ struct RadioLiteSpectrumView: View {
         VStack(alignment: .leading, spacing: compact ? 7 : 11) {
             header
             Text(axisDescription)
-                .font((compact ? Font.caption2 : Font.caption).monospacedDigit())
-                .foregroundStyle(RadioPalette.muted)
+                .font(TX.data(compact ? 10.5 : 12))
+                .foregroundStyle(TX.text3)
             spectrumPlot
             frequencyAxisLabels
 
             if let selectedFrequencyRangeMessage {
                 Label(selectedFrequencyRangeMessage, systemImage: "arrow.left.and.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(RadioPalette.warning)
+                    .font(TX.ui(11, .semibold))
+                    .foregroundStyle(TX.amber)
             }
 
             if let statusMessage {
                 Label(statusMessage, systemImage: statusIcon)
-                    .font(.caption)
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12))
+                    .foregroundStyle(TX.text3)
                     .frame(maxWidth: .infinity)
             }
 
@@ -139,8 +143,9 @@ struct RadioLiteSpectrumView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Label("实时频谱", systemImage: "waveform.path")
-                .font(compact ? .subheadline.weight(.semibold) : .headline)
+            Label(audioRangeTitle, systemImage: "waveform.path")
+                .font(TX.ui(compact ? 13 : 15, .semibold))
+                .foregroundStyle(TX.text1)
             Spacer(minLength: 4)
             sourceBadge
             if !compact {
@@ -150,15 +155,15 @@ struct RadioLiteSpectrumView: View {
                     }
                 } label: {
                     Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.caption.weight(.bold))
+                        .font(TX.ui(12, .bold))
                         .frame(width: 30, height: 30)
                         .background(
-                            RadioPalette.panelRaised,
-                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            TX.raised,
+                            in: RoundedRectangle(cornerRadius: TX.chipRadius, style: .continuous)
                         )
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(RadioPalette.cyan)
+                .foregroundStyle(TX.teal)
                 .accessibilityLabel(isExpanded ? "收起频谱" : "展开频谱")
             }
         }
@@ -175,7 +180,7 @@ struct RadioLiteSpectrumView: View {
                 grid.move(to: CGPoint(x: 0, y: y))
                 grid.addLine(to: CGPoint(x: size.width, y: y))
             }
-            context.stroke(grid, with: .color(Color.white.opacity(0.075)), lineWidth: 0.5)
+            context.stroke(grid, with: .color(TX.stroke), lineWidth: 0.5)
 
             if let bins = spectrum?.bins, bins.count > 1 {
                 let step = size.width / CGFloat(bins.count - 1)
@@ -196,28 +201,28 @@ struct RadioLiteSpectrumView: View {
                 fill.addLine(to: CGPoint(x: size.width, y: size.height))
                 fill.closeSubpath()
                 context.fill(fill, with: .linearGradient(
-                    Gradient(colors: [RadioPalette.cyan.opacity(0.5), RadioPalette.accent.opacity(0.02)]),
+                    Gradient(colors: [TX.teal.opacity(0.5), TX.teal.opacity(0.03)]),
                     startPoint: .zero,
                     endPoint: CGPoint(x: 0, y: size.height)
                 ))
-                context.stroke(line, with: .color(RadioPalette.cyan), lineWidth: compact ? 1.1 : 1.4)
+                context.stroke(line, with: .color(TX.teal), lineWidth: compact ? 1.1 : 1.4)
             }
 
-            if let markerPosition = selectedMarker.normalizedPosition {
+            if let markerPosition = transmitMarker.normalizedPosition {
                 let x = size.width * CGFloat(markerPosition)
                 var marker = Path()
                 marker.move(to: CGPoint(x: x, y: 0))
                 marker.addLine(to: CGPoint(x: x, y: size.height))
                 context.stroke(
                     marker,
-                    with: .color(RadioPalette.warning.opacity(0.95)),
+                    with: .color(TX.amber),
                     style: StrokeStyle(lineWidth: compact ? 1.2 : 1.6, dash: [4, 3])
                 )
             }
         }
         .frame(height: compact ? 58 : (isExpanded ? 145 : 80))
         .background(
-            RadioPalette.background.opacity(0.9),
+            TX.bg,
             in: RoundedRectangle(cornerRadius: compact ? 9 : 13, style: .continuous)
         )
         .accessibilityLabel("接收音频频谱")
@@ -242,21 +247,20 @@ struct RadioLiteSpectrumView: View {
             }
         }
         .frame(height: 14)
-        .font(.caption2.monospacedDigit())
-        .foregroundStyle(RadioPalette.muted)
+        .font(TX.data(10.5))
+        .foregroundStyle(TX.text3)
     }
 
     private var waterfall: some View {
         VStack(alignment: .leading, spacing: compact ? 4 : 6) {
             if !compact {
                 Text("瀑布图")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(RadioPalette.muted)
+                    .font(TX.ui(12, .semibold))
+                    .foregroundStyle(TX.text3)
             }
             Canvas { context, size in
                 let rows = Array(history.reversed())
-                guard !rows.isEmpty else { return }
-                let rowHeight = size.height / CGFloat(rows.count)
+                let rowHeight = size.height / CGFloat(max(1, rows.count))
                 for (rowIndex, bins) in rows.enumerated() where !bins.isEmpty {
                     let columnWidth = size.width / CGFloat(bins.count)
                     for (column, level) in bins.enumerated() {
@@ -269,33 +273,41 @@ struct RadioLiteSpectrumView: View {
                         context.fill(Path(rectangle), with: .color(waterfallColor(level)))
                     }
                 }
+                // Both plots use the same audio axis and full canvas width.
+                if let markerPosition = transmitMarker.normalizedPosition {
+                    let x = size.width * CGFloat(markerPosition)
+                    var marker = Path()
+                    marker.move(to: CGPoint(x: x, y: 0))
+                    marker.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(
+                        marker,
+                        with: .color(TX.amber),
+                        style: StrokeStyle(lineWidth: compact ? 1.2 : 1.6, dash: [4, 3])
+                    )
+                }
             }
             .frame(height: compact ? 64 : (isExpanded ? 112 : 82))
             .background(
-                RadioPalette.background,
+                TX.bg,
                 in: RoundedRectangle(cornerRadius: compact ? 8 : 11, style: .continuous)
             )
         }
     }
 
+    @ViewBuilder
     private var sourceBadge: some View {
-        let text: String
-        let color: Color
         if capability?.available == false {
-            text = "不可用"
-            color = RadioPalette.warning
+            sourceBadge("不可用", color: TX.amber)
         } else if capability?.simulated == true {
-            text = "模拟数据"
-            color = RadioPalette.warning
-        } else if capability?.available == true {
-            text = "真实声卡 FFT"
-            color = RadioPalette.accent
-        } else {
-            text = "协商中"
-            color = RadioPalette.muted
+            sourceBadge("模拟数据", color: TX.amber)
+        } else if capability == nil {
+            sourceBadge("协商中", color: TX.text3)
         }
-        return Text(text)
-            .font(.caption2.weight(.bold))
+    }
+
+    private func sourceBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(TX.ui(10.5, .bold))
             .foregroundStyle(color)
             .padding(.horizontal, compact ? 6 : 8)
             .padding(.vertical, compact ? 3 : 5)
@@ -314,21 +326,35 @@ struct RadioLiteSpectrumView: View {
         frequencyAxis.marker(for: selectedAudioFrequencyHz)
     }
 
+    private var transmitMarker: RadioLiteSpectrumMarker {
+        frequencyAxis.marker(for: transmitAudioFrequencyHz)
+    }
+
+    private var audioRangeTitle: String {
+        guard displaySpanHz > 0 else { return "接收音频频谱" }
+        return String(format: "音频 0–%.1f kHz", Double(displaySpanHz) / 1_000)
+    }
+
     private var axisDescription: String {
         let points = spectrum?.bins.count ?? policy?.spectrumBins ?? 0
         guard let spectrum, spectrum.centerFrequencyHz > 0 else {
-            return "接收音频 0–\(displaySpanHz) Hz · \(points) 点"
+            return "\(points) 点\(transmitMarkerDescription)"
         }
         return String(
-            format: "RX %.6f MHz · 音频 0–%.1f kHz · %d 点",
+            format: "RX %.6f MHz · %d 点%@",
             Double(spectrum.centerFrequencyHz) / 1_000_000,
-            Double(displaySpanHz) / 1_000,
-            points
+            points,
+            transmitMarkerDescription
         )
     }
 
+    private var transmitMarkerDescription: String {
+        guard let transmitAudioFrequencyHz else { return "" }
+        return " · TX \(transmitAudioFrequencyHz) Hz"
+    }
+
     private var markerAccessibilityValue: String {
-        guard let selectedAudioFrequencyHz else { return axisDescription }
+        guard let selectedAudioFrequencyHz else { return "\(audioRangeTitle)，\(axisDescription)" }
         if selectedMarker.outOfRangeFrequencyHz != nil {
             return "\(axisDescription)，已选 \(selectedAudioFrequencyHz) Hz，超出当前频谱范围"
         }
@@ -336,6 +362,9 @@ struct RadioLiteSpectrumView: View {
     }
 
     private var selectedFrequencyRangeMessage: String? {
+        if let frequencyHz = transmitMarker.outOfRangeFrequencyHz {
+            return "TX \(frequencyHz) Hz，超出 0–\(displaySpanHz) Hz 频谱范围"
+        }
         guard let frequencyHz = selectedMarker.outOfRangeFrequencyHz else { return nil }
         return "已选 \(frequencyHz) Hz，超出 0–\(displaySpanHz) Hz 频谱范围"
     }
@@ -387,45 +416,28 @@ struct RadioLiteSpectrumView: View {
     }
 
     private func waterfallColor(_ value: UInt8) -> Color {
-        let level = pow(Double(value) / 255, 0.62)
-        if level < 0.22 {
-            return interpolateColor(
-                from: (0.035, 0.055, 0.075),
-                to: (0.085, 0.115, 0.145),
-                progress: level / 0.22
-            )
-        }
-        if level < 0.58 {
-            return interpolateColor(
-                from: (0.085, 0.115, 0.145),
-                to: (0.16, 0.82, 0.72),
-                progress: (level - 0.22) / 0.36
-            )
-        }
-        if level < 0.86 {
-            return interpolateColor(
-                from: (0.16, 0.82, 0.72),
-                to: (1, 0.68, 0.18),
-                progress: (level - 0.58) / 0.28
-            )
-        }
-        return interpolateColor(
-            from: (1, 0.68, 0.18),
-            to: (1, 1, 1),
-            progress: (level - 0.86) / 0.14
-        )
+        Self.waterfallPalette[Int(value)]
     }
 
-    private func interpolateColor(
-        from lower: (Double, Double, Double),
-        to upper: (Double, Double, Double),
-        progress: Double
-    ) -> Color {
-        let amount = min(1, max(0, progress))
+    // The media client has already AGC-normalized these 8-bit display values.
+    // Do not apply a second AGC or infer a physical 30-second noise floor here.
+    // Cache the seven-stop palette once instead of resolving colours per pixel.
+    private static let waterfallPalette: [Color] = (0...255).map { value in
+        let level = Double(value) / 255
+        let stops = TX.waterfallStops
+        let upperIndex = stops.firstIndex(where: { $0.0 >= level }) ?? (stops.count - 1)
+        guard upperIndex > 0 else { return stops[0].1 }
+        let lower = stops[upperIndex - 1]
+        let upper = stops[upperIndex]
+        let amount = (level - lower.0) / (upper.0 - lower.0)
+        var lowerR: CGFloat = 0, lowerG: CGFloat = 0, lowerB: CGFloat = 0, lowerA: CGFloat = 0
+        var upperR: CGFloat = 0, upperG: CGFloat = 0, upperB: CGFloat = 0, upperA: CGFloat = 0
+        UIColor(lower.1).getRed(&lowerR, green: &lowerG, blue: &lowerB, alpha: &lowerA)
+        UIColor(upper.1).getRed(&upperR, green: &upperG, blue: &upperB, alpha: &upperA)
         return Color(
-            red: lower.0 + (upper.0 - lower.0) * amount,
-            green: lower.1 + (upper.1 - lower.1) * amount,
-            blue: lower.2 + (upper.2 - lower.2) * amount
+            red: Double(lowerR) + Double(upperR - lowerR) * amount,
+            green: Double(lowerG) + Double(upperG - lowerG) * amount,
+            blue: Double(lowerB) + Double(upperB - lowerB) * amount
         )
     }
 }
