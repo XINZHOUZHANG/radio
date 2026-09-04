@@ -9,8 +9,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: 5.9
-    CURRENT_PROJECT_VERSION: 23
-    MARKETING_VERSION: 0.2.11
+    CURRENT_PROJECT_VERSION: 24
+    MARKETING_VERSION: 0.2.12
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
 
@@ -56,6 +56,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: xyz.992218.radio-lite.remote
         GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     scheme:
       testTargets:
         - RadioLiteTests
