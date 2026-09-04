@@ -169,6 +169,7 @@ struct RadioLiteLogbookView: View {
         guard !importing else { return }
         do {
             let url = try result.get()
+            try RadioLiteADIFDocument.validateImportURL(url)
             // The document picker grants a security-scoped URL. Acquire it before
             // crossing the Task boundary so third-party file providers cannot revoke
             // access before the coordinated copy starts.

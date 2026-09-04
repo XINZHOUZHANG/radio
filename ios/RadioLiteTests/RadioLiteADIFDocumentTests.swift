@@ -19,6 +19,25 @@ final class RadioLiteADIFDocumentTests: XCTestCase {
         XCTAssertEqual(RadioLiteADIFDocument.supportedFilenameExtensions, ["adi", "adif"])
     }
 
+    func testPickerAcceptsProviderItemsThenValidatesFilenameExtension() throws {
+        XCTAssertEqual(
+            RadioLiteADIFDocument.allowedContentTypes.map(\.identifier),
+            [UTType.item.identifier]
+        )
+
+        for filename in ["station.adi", "station.adif", "station.ADI", "station.ADIF"] {
+            let url = URL(fileURLWithPath: "/tmp/\(filename)")
+            XCTAssertTrue(RadioLiteADIFDocument.supportsImportURL(url), filename)
+            XCTAssertNoThrow(try RadioLiteADIFDocument.validateImportURL(url), filename)
+        }
+
+        for filename in ["station.txt", "station", "station.adi.zip"] {
+            let url = URL(fileURLWithPath: "/tmp/\(filename)")
+            XCTAssertFalse(RadioLiteADIFDocument.supportsImportURL(url), filename)
+            XCTAssertThrowsError(try RadioLiteADIFDocument.validateImportURL(url), filename)
+        }
+    }
+
     func testCoordinatedReaderCopiesSelectedFileBeforeReturningData() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("radio-lite-adif-test-\(UUID().uuidString)", isDirectory: true)

@@ -518,6 +518,8 @@ assert(session.includes('await unsubscribeTelemetry()'));
 assert(session.includes('try await subscribeTelemetry('));
 assert(telemetryStrip.includes('frame(height: 52)'));
 assert(adifDocument.includes('UTType(importedAs: typeIdentifier, conformingTo: .plainText)'));
+assert(adifDocument.includes('static let allowedContentTypes: [UTType] = [.item]'));
+assert(adifDocument.includes('supportedFilenameExtensions.contains(url.pathExtension.lowercased())'));
 assert(adifDocument.includes('NSFileCoordinator()'));
 assert(adifDocument.includes('copyItem(at: coordinatedURL, to: temporaryURL)'));
 assert(logbookView.includes('RadioLiteADIFDocument.allowedContentTypes'));
@@ -525,7 +527,9 @@ const adifSelectionHandler = logbookView.slice(
   logbookView.indexOf('private func handleImportSelection('),
   logbookView.indexOf('private func importFile(at:'),
 );
+assert(adifSelectionHandler.indexOf('validateImportURL(url)') >= 0);
 assert(adifSelectionHandler.indexOf('startAccessingSecurityScopedResource()') >= 0);
+assert(adifSelectionHandler.indexOf('validateImportURL(url)') < adifSelectionHandler.indexOf('startAccessingSecurityScopedResource()'));
 assert(adifSelectionHandler.indexOf('startAccessingSecurityScopedResource()') < adifSelectionHandler.indexOf('Task {'));
 for (const source of [radioLiteProject, radioLiteInfo]) {
   assert(source.includes('UTImportedTypeDeclarations'));

@@ -5,7 +5,19 @@ enum RadioLiteADIFDocument {
     static let typeIdentifier = "xyz.992218.radio-lite.adif"
     static let contentType = UTType(importedAs: typeIdentifier, conformingTo: .plainText)
     static let supportedFilenameExtensions = ["adi", "adif"]
-    static let allowedContentTypes: [UTType] = [contentType, .plainText, .data]
+    // Some Files providers expose an unknown ADI extension only as public.item.
+    // Let the picker return those URLs, then enforce the ADIF extension ourselves.
+    static let allowedContentTypes: [UTType] = [.item]
+
+    static func supportsImportURL(_ url: URL) -> Bool {
+        supportedFilenameExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    static func validateImportURL(_ url: URL) throws {
+        guard supportsImportURL(url) else {
+            throw ImportValidationError.unsupportedFilenameExtension
+        }
+    }
 
     static func readCoordinatedData(from sourceURL: URL) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
@@ -40,5 +52,13 @@ enum RadioLiteADIFDocument {
         }
         try copyResult.get()
         return try Data(contentsOf: temporaryURL)
+    }
+
+    private enum ImportValidationError: LocalizedError {
+        case unsupportedFilenameExtension
+
+        var errorDescription: String? {
+            "请选择扩展名为 .adi 或 .adif 的日志文件。"
+        }
     }
 }
