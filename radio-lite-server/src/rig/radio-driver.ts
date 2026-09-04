@@ -104,6 +104,7 @@ export interface RadioDriver {
   setMode(mode: string, passbandHz?: number): Promise<RadioModeState>;
   setControl(id: string, value: RadioControlValue): Promise<RadioControl>;
   invokeAction(id: string): Promise<void>;
+  engageInternalTuner?(): Promise<boolean>;
   writePtt(enabled: boolean): Promise<void>;
   readPtt(options?: RadioPttReadOptions): Promise<boolean>;
 }

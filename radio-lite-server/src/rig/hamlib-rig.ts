@@ -411,16 +411,23 @@ export class HamlibRig {
         "radio does not support internal tuning via Hamlib TUNE",
       );
     }
+    await this.engageInternalTuner();
+    await this.#transport.request("\\vfo_op TUNE");
+  }
+
+  /** Engage the persistent tuner switch without starting another tuning cycle. */
+  async engageInternalTuner(): Promise<boolean> {
     try {
       await this.#transport.request("\\set_func TUNER 1");
       this.#tunerSwitchWritable = true;
+      return true;
     } catch (error) {
       if (!(error instanceof RigReportError) || error.report !== -11) {
         throw error;
       }
       this.#tunerSwitchWritable = false;
+      return false;
     }
-    await this.#transport.request("\\vfo_op TUNE");
   }
 
   /** Send a tuner command without adding a read-back CAT round trip. */

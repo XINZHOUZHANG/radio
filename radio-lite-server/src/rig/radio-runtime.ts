@@ -48,6 +48,7 @@ export class RadioRuntimeCleanupUncertainError extends Error {}
 export type RadioRuntimeOptions = {
   safetyEvents?: SafetyEventHub;
   telemetryClock?: RadioTelemetryClock;
+  onWarning?: (message: string) => void;
   startManaged?: () => Promise<void>;
   restartManaged?: (
     recoveryGeneration: number,
@@ -90,6 +91,7 @@ export class RadioRuntime {
   readonly telemetry: RadioTelemetrySampler;
   readonly #driver: RadioDriver;
   readonly #now: () => number;
+  readonly #onWarning: (message: string) => void;
   readonly #safetyTimer: ReturnType<typeof setInterval>;
   #closePromise: Promise<void> | null = null;
   #initializePromise: Promise<void> | null = null;
@@ -111,6 +113,9 @@ export class RadioRuntime {
     this.profile = profile;
     this.#driver = driver;
     this.#now = now;
+    this.#onWarning = options.onWarning ?? ((message) => {
+      process.emitWarning(message, { code: "RADIO_LITE_TUNER_REENGAGE" });
+    });
     this.telemetry = new RadioTelemetrySampler(profile.id, driver, {
       clock: options.telemetryClock,
       now,
@@ -597,14 +602,51 @@ export class RadioRuntime {
       observation.consecutiveOffSamples += 1;
       if (observation.consecutiveOffSamples < TUNING_OFF_SAMPLES_REQUIRED) return;
 
-      await this.supervisor.stop(
-        observation.ownerId,
-        observation.transmitToken,
-        "tuning completed after consecutive PTT OFF read-back",
-      );
-      this.#completeTuning(observation.transmitToken, "ptt_off");
+      await this.#serialize(async () => {
+        if (this.#tuningObservation !== observation) return;
+        const activeLease = this.supervisor.snapshot().lease;
+        if (
+          activeLease?.mode !== "tuning" ||
+          activeLease.ownerId !== observation.ownerId ||
+          activeLease.leaseToken !== observation.transmitToken
+        ) {
+          return;
+        }
+        const outcome = await this.supervisor.stop(
+          observation.ownerId,
+          observation.transmitToken,
+          "tuning completed after consecutive PTT OFF read-back",
+        );
+        if (outcome.kind === "offConfirmed") {
+          await this.#reengagePersistentTuner();
+        }
+        this.#completeTuning(observation.transmitToken, "ptt_off");
+      });
     } finally {
       this.#tuningCheckInFlight = false;
+    }
+  }
+
+  async #reengagePersistentTuner(): Promise<void> {
+    if (this.#driver.engageInternalTuner === undefined) return;
+    try {
+      const engaged = await this.#driver.engageInternalTuner();
+      if (!engaged) {
+        this.#onWarning(
+          "persistent tuner could not be re-engaged after tuning: Hamlib returned RPRT -11",
+        );
+        return;
+      }
+      const current = this.#controlsById?.get("function:TUNER");
+      if (current !== undefined) {
+        this.#controlsById = new Map(this.#controlsById).set("function:TUNER", {
+          ...current,
+          value: true,
+        });
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.#onWarning(`persistent tuner could not be re-engaged after tuning: ${detail}`);
     }
   }
 

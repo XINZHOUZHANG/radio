@@ -443,6 +443,19 @@ test("raw internal tuner write sends exactly one CAT command", async () => {
   assert.deepEqual(commands, ["\\set_func TUNER 0"]);
 });
 
+test("persistent tuner engagement sends one enable command without starting another tune", async () => {
+  const commands: string[] = [];
+  const rig = new HamlibRig({
+    request: async (command: string) => {
+      commands.push(command);
+      return response(command.slice(1).split(" ")[0], {});
+    },
+  });
+
+  assert.equal(await rig.engageInternalTuner(), true);
+  assert.deepEqual(commands, ["\\set_func TUNER 1"]);
+});
+
 test("internal tuner start enables a supported tuner switch before the TUNE action", async () => {
   const commands: string[] = [];
   const rig = new HamlibRig({
@@ -557,6 +570,10 @@ test("internal tuner falls back to TUNE when an unknown TUNER switch returns ENI
     "\\set_func TUNER 1",
     "\\vfo_op TUNE",
   ]);
+
+  commands.length = 0;
+  assert.equal(await rig.engageInternalTuner(), false);
+  assert.deepEqual(commands, ["\\set_func TUNER 1"]);
 
   commands.length = 0;
   await rig.writeInternalTuner(false);

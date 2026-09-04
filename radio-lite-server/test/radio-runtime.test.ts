@@ -47,6 +47,9 @@ class FakeRig implements RadioDriver {
   readControlsCalls = 0;
   readonly telemetryModes: Array<"receive" | "transmit"> = [];
   invokeActionCalls = 0;
+  tunerEngageCalls = 0;
+  tunerEngageResult = true;
+  tunerEngageError: Error | null = null;
 
   async initialize() {}
   async close() {}
@@ -114,6 +117,13 @@ class FakeRig implements RadioDriver {
     this.invokeActionCalls += 1;
     if (id !== "action:TUNER") throw new Error("action unavailable");
     await this.startInternalTuner();
+  }
+  async engageInternalTuner() {
+    this.tunerEngageCalls += 1;
+    this.events.push("tuner-engage");
+    if (this.tunerEngageError !== null) throw this.tunerEngageError;
+    this.tuner = this.tunerEngageResult;
+    return this.tunerEngageResult;
   }
 }
 
@@ -610,6 +620,7 @@ test("runtime releases a tuning lease within one second after two normal PTT OFF
     true,
   );
   rig.ptt = false;
+  rig.tuner = false;
   const pttOffAtMs = Date.now();
   assert.equal(
     await within(rig.observeNextNormalPttRead(), 1_000, "first PTT OFF sample was not observed"),
@@ -627,7 +638,13 @@ test("runtime releases a tuning lease within one second after two normal PTT OFF
 
   assert.ok(Date.now() - pttOffAtMs < 1_000, "normal tuning completion waited for the hard limit");
   assert.equal(runtime.interlock.snapshot().state, "idle");
-  assert.deepEqual(rig.events.slice(-2), ["ptt-write:false", "ptt-read:false"]);
+  assert.equal(rig.tuner, true);
+  assert.equal(rig.tunerEngageCalls, 1);
+  assert.deepEqual(rig.events.slice(-3), [
+    "ptt-write:false",
+    "ptt-read:false",
+    "tuner-engage",
+  ]);
 });
 
 test("runtime does not treat PTT OFF during the tuning startup grace period as completion", async (context) => {
@@ -679,6 +696,40 @@ test("runtime keeps the 30 second tuning hard limit and force-dekeys when PTT re
   );
 
   assert.deepEqual(rig.events, ["ptt-write:false", "ptt-read:false"]);
+  assert.equal(rig.tunerEngageCalls, 0);
+  assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
+});
+
+test("runtime releases completed tuning and warns when persistent tuner re-engagement fails", async (context) => {
+  const rig = new ObservablePttRig();
+  rig.tunerEngageError = new Error("simulated tuner write failure");
+  const warnings: string[] = [];
+  const runtime = new RadioRuntime(profile(true), rig, undefined, Date.now, {
+    onWarning: (message) => warnings.push(message),
+  });
+  context.after(() => runtime.close().catch(() => undefined));
+  await runtime.initialize();
+  const operator = user("tuning-reengage-failure", "operator", true);
+  const control = await runtime.acquireControl("tuning-reengage-device", operator);
+  rig.ptt = false;
+  const transmit = await runtime.startTransmit(
+    "tuning-reengage-device",
+    operator,
+    control.lease.token,
+    "tuning",
+  );
+  const completion = runtime.waitForTuningCompletion(transmit.leaseToken);
+
+  await within(
+    waitFor(() => runtime.interlock.snapshot().state === "idle"),
+    1_500,
+    "tuning did not release after tuner re-engagement failed",
+  );
+
+  assert.equal((await completion).reason, "ptt_off");
+  assert.equal(rig.tunerEngageCalls, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /simulated tuner write failure/u);
   assert.equal(runtime.interlock.snapshot().dekeyRequired, false);
 });
 

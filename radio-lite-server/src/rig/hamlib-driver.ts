@@ -81,6 +81,10 @@ export class HamlibDriver implements RadioDriver {
     await this.#rig.startInternalTuner();
   }
 
+  engageInternalTuner(): Promise<boolean> {
+    return this.#rig.engageInternalTuner();
+  }
+
   writePtt(enabled: boolean): Promise<void> {
     return this.#rig.writePtt(enabled);
   }
