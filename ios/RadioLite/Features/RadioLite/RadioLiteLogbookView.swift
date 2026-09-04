@@ -420,21 +420,28 @@ struct RadioLiteManualQSOView: View {
 
 struct RadioLiteGridMapView: View {
     @State private var presentation: RadioLiteGridMapPresentation
+    @State private var renderSet: RadioLiteGridMapRenderSet
     @State private var selected: RadioLiteGridSummary?
 
     init(grids: [RadioLiteGridSummary]) {
-        _presentation = State(initialValue: RadioLiteGridMapPresentation(grids: grids))
+        let presentation = RadioLiteGridMapPresentation(grids: grids)
+        _presentation = State(initialValue: presentation)
+        _renderSet = State(initialValue: presentation.initialRenderSet)
     }
 
     var body: some View {
         MapReader { proxy in
             Map(initialPosition: .automatic) {
-                ForEach(presentation.cells) { cell in
+                ForEach(renderSet.cells) { cell in
                     MapPolygon(coordinates: cell.coordinates)
-                        .foregroundStyle(RadioPalette.accent.opacity(cell.fillOpacity))
+                        .foregroundStyle(
+                            RadioPalette.accent.opacity(
+                                cell.fillOpacity * (renderSet.level == .field ? 0.55 : 1)
+                            )
+                        )
                         .stroke(RadioPalette.accent.opacity(0.42), lineWidth: 0.7)
                 }
-                ForEach(presentation.labeledCells) { cell in
+                ForEach(renderSet.labeledCells) { cell in
                     Annotation(
                         cell.summary.grid,
                         coordinate: CLLocationCoordinate2D(
@@ -462,16 +469,26 @@ struct RadioLiteGridMapView: View {
             }
             .mapStyle(.standard)
             .mapControls { MapCompass(); MapScaleView(); MapPitchToggle() }
+            .onMapCameraChange(frequency: .onEnd) { context in
+                let nextRenderSet = presentation.render(
+                    in: context.region,
+                    previousLevel: renderSet.level
+                )
+                if !renderSet.hasSameContent(as: nextRenderSet) {
+                    renderSet = nextRenderSet
+                }
+            }
             .simultaneousGesture(
                 SpatialTapGesture()
                     .onEnded { event in
                         guard let coordinate = proxy.convert(event.location, from: .local) else {
                             return
                         }
-                        if let summary = presentation.summary(at: coordinate) {
+                        if let summary = renderSet.summary(at: coordinate) {
                             selected = summary
                         }
-                    }
+                    },
+                including: .gesture
             )
         }
         .navigationTitle("通联网格")
@@ -480,9 +497,17 @@ struct RadioLiteGridMapView: View {
             HStack {
                 Label("\(presentation.totalGridCount) 网格", systemImage: "square.grid.3x3")
                 Spacer()
-                Text("地图显示 \(presentation.cells.count) 个")
+                if renderSet.level == .field {
+                    Text("区域概览 · 放大看城市/四位网格")
+                } else if renderSet.omittedVisibleCount > 0 {
+                    Text("显示 \(renderSet.cells.count)/\(renderSet.visibleSourceCount) · 请继续放大")
+                } else {
+                    Text("当前视野 \(renderSet.cells.count) 个网格")
+                }
             }
             .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
             .padding(12)
             .background(.ultraThinMaterial)
         }
