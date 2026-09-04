@@ -339,11 +339,11 @@ private struct RadioLiteFrequencyPressSurface: UIViewRepresentable {
     func updateUIView(_ button: FrequencyButton, context: Context) {
         context.coordinator.parent = self
         button.isEnabled = enabled
-        if !enabled { context.coordinator.cancelTouch() }
+        if !enabled { context.coordinator.deactivate() }
     }
 
     static func dismantleUIView(_ button: FrequencyButton, coordinator: Coordinator) {
-        coordinator.cancelTouch()
+        coordinator.deactivate()
         button.activate = nil
     }
 
@@ -385,10 +385,20 @@ private struct RadioLiteFrequencyPressSurface: UIViewRepresentable {
         }
 
         @objc func cancelTouch() {
+            stopRepeating(notify: true)
+        }
+
+        func deactivate() {
+            // Parent onChange/onDisappear already clears pending edits. Do not
+            // mutate SwiftUI state from updateUIView or dismantleUIView.
+            stopRepeating(notify: false)
+        }
+
+        private func stopRepeating(notify: Bool) {
             repeatTask?.cancel()
             repeatTask = nil
             pressing = false
-            if didRepeat { parent.onRepeatEnded() }
+            if didRepeat && notify { parent.onRepeatEnded() }
             didRepeat = false
         }
 
